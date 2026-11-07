@@ -246,7 +246,7 @@ class BaseCockpitAdapter(ABC):
 
     @property
     def supports_spec_guidance(self) -> bool:
-        return True
+        return False
 
     def handle_spec_inquiry_turn(
         self,
