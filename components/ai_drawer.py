@@ -99,22 +99,7 @@ def render_ai_drawer(
         else:
             st.markdown('<span class="key-badge-required">🔒 KEY REQUIRED</span>', unsafe_allow_html=True)
 
-    # 4. Action Button: Start End-to-End Analytics Engineering Workflow
-    wf_btn_label = (
-        "🚀 Start AE Guided Workflow"
-        if is_en
-        else "🚀 啟動 AE 需求交付全流程"
-    )
-    if st.button(wf_btn_label, key=f"btn_start_ae_wf_{active_scope_id}", use_container_width=True):
-        st.session_state["pending_ai_query"] = (
-            "🚀 Start AE Guided Workflow" if is_en else "🚀 啟動 AE 需求交付全流程"
-        )
-        st.session_state["cockpit_active_view"] = "workflow"
-        st.rerun()
-
-    st.markdown("---")
-
-    # 5. Check BYOK Wall: If No Valid Key, Display Strict Warning Card & Disable Chat
+    # 4. Check BYOK Wall: If No Valid Key, Display Strict Warning Card & Disable Chat
     if not has_valid_key:
         st.markdown(
             """
@@ -137,7 +122,7 @@ def render_ai_drawer(
         # Suppress interactive chat when key is absent
         return
 
-    # 6. Unlocked AI Copilot Mode
+    # 5. Unlocked AI Copilot Mode
     # Reset inquiry button
     r_col1, r_col2 = st.columns([7, 3])
     with r_col2:
@@ -146,7 +131,7 @@ def render_ai_drawer(
             reset_inquiry_state(active_scope_id)
             st.rerun()
 
-    # Quick Diagnosis / Suggested Questions
+    # Quick Diagnosis / Suggested Questions (Strictly 2 Primary Options)
     if quick_questions:
         st.markdown(
             "**💡 Suggested Questions:**"
@@ -160,8 +145,11 @@ def render_ai_drawer(
                 use_container_width=True,
             ):
                 st.session_state["pending_ai_query"] = q_text
+                if "workflow" in q_text.lower() or "全流程" in q_text:
+                    st.session_state["cockpit_active_view"] = "workflow"
+                st.rerun()
 
-    # Conversation History Container
+    # Conversation History Container (Stretched to 700px with optimized typography)
     hist_key = f"ai_advisor_chat_hist_{active_scope_id}"
     if hist_key not in st.session_state:
         welcome_intro = (
@@ -175,7 +163,24 @@ def render_ai_drawer(
         )
         st.session_state[hist_key] = [{"role": "assistant", "content": welcome_intro}]
 
-    with st.container(height=340, border=True):
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stChatMessage"] {
+            font-size: 0.92rem !important;
+            line-height: 1.5 !important;
+            padding: 0.5rem 0.75rem !important;
+        }
+        div[data-testid="stChatMessage"] p, div[data-testid="stChatMessage"] li {
+            font-size: 0.92rem !important;
+            line-height: 1.5 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container(height=700, border=True):
         for msg in st.session_state[hist_key]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
