@@ -7,7 +7,13 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from ..adapter import KPICardSpec, MetricComponent
+try:
+    from ..adapter import KPICardSpec, MetricComponent
+except (ImportError, ValueError):
+    try:
+        from adapter import KPICardSpec, MetricComponent
+    except (ImportError, ValueError):
+        from cockpit_core.adapter import KPICardSpec, MetricComponent
 
 
 def _render_formula_tag(card: KPICardSpec, is_en: bool) -> str:

@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-COCKPIT_CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "lakehouse-cockpit-core"))
+COCKPIT_CORE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if COCKPIT_CORE_DIR not in sys.path:
     sys.path.insert(0, COCKPIT_CORE_DIR)
 

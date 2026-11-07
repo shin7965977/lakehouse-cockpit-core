@@ -11,8 +11,11 @@ import streamlit.components.v1 as components
 
 try:
     from ..adapter import BaseCockpitAdapter
-except ImportError:
-    from adapter import BaseCockpitAdapter
+except (ImportError, ValueError):
+    try:
+        from adapter import BaseCockpitAdapter
+    except (ImportError, ValueError):
+        from cockpit_core.adapter import BaseCockpitAdapter
 
 
 def render_looker_enterprise_view(

@@ -10,8 +10,11 @@ import streamlit as st
 
 try:
     from ..adapter import BaseCockpitAdapter
-except ImportError:
-    from adapter import BaseCockpitAdapter
+except (ImportError, ValueError):
+    try:
+        from adapter import BaseCockpitAdapter
+    except (ImportError, ValueError):
+        from cockpit_core.adapter import BaseCockpitAdapter
 
 
 def render_sql_sandbox(

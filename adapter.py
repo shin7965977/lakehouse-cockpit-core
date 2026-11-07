@@ -185,29 +185,36 @@ class BaseCockpitAdapter(ABC):
         sql_query: str,
         data_dict: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
-        """Execute a user-entered SQL query against domain data tables (default DuckDB query)."""
+        """Execute a user-entered SQL query against domain data tables (DuckDB with SQLite fallback)."""
         import re
-        import duckdb
 
         # Enforce read-only FinOps safety check
         forbidden = re.search(r"\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE)\b", sql_query, re.IGNORECASE)
         if forbidden:
             raise ValueError(f"Security Alert: Destructive command '{forbidden.group(0)}' is prohibited in Read-Only Sandbox.")
 
-        con = duckdb.connect(database=":memory:")
-        for tbl_name, df_val in data_dict.items():
-            if isinstance(df_val, pd.DataFrame):
-                con.register(tbl_name, df_val)
-                # Register clean alias without project or schema prefix
-                clean_name = tbl_name.split(".")[-1]
-                con.register(clean_name, df_val)
-
         # Remove backticks and normalize schema qualifications for in-memory execution
         cleaned_sql = re.sub(r"`[^`]*\b([a-zA-Z0-9_]+)`", r"\1", sql_query)
         cleaned_sql = re.sub(r"\b[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
         cleaned_sql = re.sub(r"\b[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
 
-        return con.execute(cleaned_sql).df()
+        try:
+            import duckdb
+            con = duckdb.connect(database=":memory:")
+            for tbl_name, df_val in data_dict.items():
+                if isinstance(df_val, pd.DataFrame):
+                    con.register(tbl_name, df_val)
+                    clean_name = tbl_name.split(".")[-1]
+                    con.register(clean_name, df_val)
+            return con.execute(cleaned_sql).df()
+        except ImportError:
+            import sqlite3
+            con_sqlite = sqlite3.connect(":memory:")
+            for tbl_name, df_val in data_dict.items():
+                if isinstance(df_val, pd.DataFrame):
+                    clean_name = tbl_name.split(".")[-1]
+                    df_val.to_sql(clean_name, con_sqlite, if_exists="replace", index=False)
+            return pd.read_sql_query(cleaned_sql, con_sqlite)
 
     @property
     def default_sandbox_sql(self) -> str:

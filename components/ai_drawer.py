@@ -10,8 +10,11 @@ import streamlit as st
 
 try:
     from ..adapter import AnalyticalSpecContract, BaseCockpitAdapter
-except ImportError:
-    from adapter import AnalyticalSpecContract, BaseCockpitAdapter
+except (ImportError, ValueError):
+    try:
+        from adapter import AnalyticalSpecContract, BaseCockpitAdapter
+    except (ImportError, ValueError):
+        from cockpit_core.adapter import AnalyticalSpecContract, BaseCockpitAdapter
 
 
 def reset_inquiry_state(active_scope_id: str) -> None:
