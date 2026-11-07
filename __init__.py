@@ -7,6 +7,7 @@ try:
         ChartModuleSpec,
         KPICardSpec,
         MedallionTabSpec,
+        MetricComponent,
         OnDemandInsightResult,
     )
     from .engine import launch_cockpit_app
@@ -17,6 +18,7 @@ except ImportError:
         ChartModuleSpec,
         KPICardSpec,
         MedallionTabSpec,
+        MetricComponent,
         OnDemandInsightResult,
     )
     from engine import launch_cockpit_app
@@ -27,6 +29,7 @@ __all__ = [
     "ChartModuleSpec",
     "KPICardSpec",
     "MedallionTabSpec",
+    "MetricComponent",
     "OnDemandInsightResult",
     "launch_cockpit_app",
 ]

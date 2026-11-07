@@ -1,10 +1,12 @@
 """Main Cockpit Runtime Engine.
 
 Assembles UI layout, Medallion layer navigation, KPI grid, On-Demand Insight Panel,
-and AI drawer driven entirely by an injected BaseCockpitAdapter.
+Interactive SQL Sandbox, Looker Enterprise view, and Conversational Copilot drawer.
 """
 
 from __future__ import annotations
+
+from datetime import date
 
 import streamlit as st
 
@@ -12,13 +14,17 @@ try:
     from .adapter import BaseCockpitAdapter
     from .components.ai_drawer import render_ai_drawer
     from .components.kpi_grid import render_kpi_grid
+    from .components.looker_view import render_looker_enterprise_view
     from .components.on_demand_panel import render_on_demand_insight_panel
+    from .components.sql_sandbox import render_sql_sandbox
     from .styles import MODERN_COCKPIT_CSS
 except ImportError:
     from adapter import BaseCockpitAdapter
     from components.ai_drawer import render_ai_drawer
     from components.kpi_grid import render_kpi_grid
+    from components.looker_view import render_looker_enterprise_view
     from components.on_demand_panel import render_on_demand_insight_panel
+    from components.sql_sandbox import render_sql_sandbox
     from styles import MODERN_COCKPIT_CSS
 
 
@@ -60,7 +66,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         st.session_state["cockpit_lang"] = "en" if lang_choice == "English" else "zh"
         is_en = st.session_state["cockpit_lang"] == "en"
 
-        # Date Range Filter
+        # Date Range Filter (Fully linked across all charts and SQL templates)
         st.markdown("---")
         st.subheader("📅 Date Range Filter")
         date_range = st.date_input(
@@ -91,7 +97,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             ]
             st.rerun()
 
-    # Load Domain Data
+    # Load Domain Data strictly filtered by active Date Range
     data_dict = adapter.load_domain_data(start_date=start_date, end_date=end_date)
 
     # Top-Level Layout: Adaptive Columns depending on Advisor Drawer state
@@ -105,13 +111,13 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
     with main_col:
         st.title(adapter.brand_title)
         st.caption(
-            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Socratic Spec Engine"
+            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Conversational Analytics Copilot"
         )
 
-        # 1. Responsive KPI Grid
+        # 1. Responsive KPI Grid with ReadCall-style Hover Tooltips
         render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)
 
-        # 1.5 Conditional Stakeholder On-Demand Insight Panel (Directly beneath KPI Cards)
+        # 1.5 Conditional Stakeholder On-Demand Insight Panel
         active_insight = st.session_state.get("active_on_demand_insight")
         if active_insight is not None:
             st.markdown("---")
@@ -119,46 +125,68 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # 2. Medallion Layer Selector
-        st.subheader("🏛️ Medallion Data Lakehouse Layers")
+        # 2. Medallion Layer Selector + Looker Enterprise Option
+        st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
+        nav_options = ["gold", "silver", "bronze"]
+        if getattr(adapter, "supports_looker", False):
+            nav_options.append("looker")
+
         selected_layer = st.radio(
-            "Select Layer:",
-            options=["gold", "silver", "bronze"],
+            "Select View:",
+            options=nav_options,
             format_func=lambda x: {
                 "gold": "🥇 Gold Marts (Business Aggregations & KPIs)",
                 "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)",
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
+                "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
             }[x],
             horizontal=True,
         )
 
         st.markdown("---")
-        # Display layer preview
-        layer_specs = adapter.medallion_layers.get(selected_layer, {})
-        if isinstance(layer_specs, dict) and "tabs" in layer_specs:
-            tab_names = [
-                (
-                    t.title_en
-                    if is_en and getattr(t, "title_en", None)
-                    else getattr(t, "title_zh", getattr(t, "title_en", str(t)))
-                )
-                for t in layer_specs["tabs"]
-            ]
-            if tab_names:
-                rendered_tabs = st.tabs(tab_names)
-                for idx, tab_spec in enumerate(layer_specs["tabs"]):
-                    with rendered_tabs[idx]:
-                        tab_spec.render_content(data_dict, is_en, adapter)
 
-    # Right-Hand AI Copilot Drawer
+        # Render Looker Native Enterprise View
+        if selected_layer == "looker":
+            render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
+        else:
+            # Display Selected Medallion Layer Preview (with explicit start_date and end_date injection)
+            layer_specs = adapter.medallion_layers.get(selected_layer, {})
+            if isinstance(layer_specs, dict) and "tabs" in layer_specs:
+                tab_names = [
+                    (
+                        t.title_en
+                        if is_en and getattr(t, "title_en", None)
+                        else getattr(t, "title_zh", getattr(t, "title_en", str(t)))
+                    )
+                    for t in layer_specs["tabs"]
+                ]
+                if tab_names:
+                    rendered_tabs = st.tabs(tab_names)
+                    for idx, tab_spec in enumerate(layer_specs["tabs"]):
+                        with rendered_tabs[idx]:
+                            # Pass start_date and end_date into render_content for 1:1 SQL and Chart alignment
+                            tab_spec.render_content(
+                                data_dict, is_en, adapter, start_date, end_date
+                            )
+
+        # 3. Interactive SQL Sandbox (Permanent Footer Explorer for Data Verification)
+        st.markdown("---")
+        render_sql_sandbox(
+            adapter=adapter,
+            data_dict=data_dict,
+            start_date=start_date,
+            end_date=end_date,
+            is_en=is_en,
+        )
+
+    # Right-Hand AI Copilot Drawer (Open Conversational Understanding)
     if ai_col is not None:
         with ai_col:
             render_ai_drawer(
-                tools=adapter.get_fastmcp_tools(),
-                default_prompt_zh=adapter.default_system_prompt_zh,
-                default_prompt_en=adapter.default_system_prompt_en,
                 active_scope_id=selected_layer,
                 active_scope_title=selected_layer.upper(),
+                default_prompt_en=adapter.default_system_prompt_en,
+                default_prompt_zh=adapter.default_system_prompt_zh,
                 is_en=is_en,
                 quick_questions=(
                     adapter.quick_diagnosis_questions_zh
@@ -167,4 +195,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 ),
                 adapter=adapter,
                 data_dict=data_dict,
+                start_date=start_date,
+                end_date=end_date,
             )
