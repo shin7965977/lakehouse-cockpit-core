@@ -144,9 +144,12 @@ def render_ai_drawer(
                 key=f"quick_btn_{active_scope_id}_{idx}",
                 use_container_width=True,
             ):
-                st.session_state["pending_ai_query"] = q_text
                 if "workflow" in q_text.lower() or "全流程" in q_text:
                     st.session_state["cockpit_active_view"] = "workflow"
+                    st.session_state["main_cockpit_view_selector"] = "workflow"
+                    st.session_state["ae_workflow_step"] = 1
+                    st.rerun()
+                st.session_state["pending_ai_query"] = q_text
                 st.rerun()
 
     # Conversation History Container (Stretched to 700px with optimized typography)
