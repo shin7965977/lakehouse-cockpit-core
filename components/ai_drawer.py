@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+
 import streamlit as st
 
 
@@ -17,8 +18,14 @@ def render_ai_drawer(
     quick_questions: list[str] | None = None,
 ) -> None:
     """Render the collapsible right-side AI Advisor drawer with prompt playground and tool execution."""
-    st.markdown("### 🤖 " + ("AI Management Advisor" if is_en else "Gemini 智慧管理顧問"))
-    st.caption("⚡ Live FinOps 100MB Guard · MBB Methodology" if is_en else "⚡ 100MB FinOps 預算防護 · 麥肯錫顧問規範")
+    st.markdown(
+        "### 🤖 " + ("AI Management Advisor" if is_en else "Gemini 智慧管理顧問")
+    )
+    st.caption(
+        "⚡ Live FinOps 100MB Guard · MBB Methodology"
+        if is_en
+        else "⚡ 100MB FinOps 預算防護 · 麥肯錫顧問規範"
+    )
 
     # API Key Input (Strict BYOK)
     api_key_env = os.getenv("GEMINI_API_KEY", "")
@@ -37,18 +44,26 @@ def render_ai_drawer(
         q_cols = st.columns(len(quick_questions))
         for idx, q_text in enumerate(quick_questions):
             with q_cols[idx]:
-                if st.button(q_text, key=f"quick_btn_{active_scope_id}_{idx}", use_container_width=True):
+                if st.button(
+                    q_text,
+                    key=f"quick_btn_{active_scope_id}_{idx}",
+                    use_container_width=True,
+                ):
                     st.session_state["pending_ai_query"] = q_text
 
     # PROMINENT SYSTEM PROMPT PLAYGROUND
-    expander_title = "🛠️ " + ("View / Edit System Prompt" if is_en else "檢視 / 修改系統 Prompt")
+    expander_title = "🛠️ " + (
+        "View / Edit System Prompt" if is_en else "檢視 / 修改系統 Prompt"
+    )
     with st.expander(expander_title, expanded=False):
         st.caption(
             "Inspect or live-edit the underlying system instructions for the Gemini Advisor:"
             if is_en
             else "檢視或即時手動修改底層 Gemini 顧問 System Prompt（內建 100MB FinOps 防護）："
         )
-        prompt_session_key = "custom_system_prompt_en" if is_en else "custom_system_prompt_zh"
+        prompt_session_key = (
+            "custom_system_prompt_en" if is_en else "custom_system_prompt_zh"
+        )
         default_val = default_prompt_en if is_en else default_prompt_zh
         active_prompt = st.session_state.get(prompt_session_key, default_val)
 
@@ -60,11 +75,19 @@ def render_ai_drawer(
         )
         p_col1, p_col2 = st.columns(2)
         with p_col1:
-            if st.button("💾 " + ("Apply" if is_en else "套用"), key=f"btn_apply_{active_scope_id}", use_container_width=True):
+            if st.button(
+                "💾 " + ("Apply" if is_en else "套用"),
+                key=f"btn_apply_{active_scope_id}",
+                use_container_width=True,
+            ):
                 st.session_state[prompt_session_key] = edited_prompt
                 st.success("✅ " + ("Applied!" if is_en else "已套用！"))
         with p_col2:
-            if st.button("🔄 " + ("Reset" if is_en else "還原預設值"), key=f"btn_reset_{active_scope_id}", use_container_width=True):
+            if st.button(
+                "🔄 " + ("Reset" if is_en else "還原預設值"),
+                key=f"btn_reset_{active_scope_id}",
+                use_container_width=True,
+            ):
                 st.session_state[prompt_session_key] = default_val
                 st.rerun()
 
@@ -90,7 +113,9 @@ def render_ai_drawer(
                 st.markdown(msg["content"])
 
     # Query Input
-    query_input = st.chat_input("Enter business question..." if is_en else "輸入業務問題或異常諮詢...")
+    query_input = st.chat_input(
+        "Enter business question..." if is_en else "輸入業務問題或異常諮詢..."
+    )
     query_to_run = query_input or st.session_state.pop("pending_ai_query", None)
 
     if query_to_run:
@@ -110,4 +135,6 @@ def render_ai_drawer(
                     f"\n3. **Now What? (30-Day Plan)**：建議維持目前策略並持續監控。"
                 )
                 st.markdown(reply)
-                st.session_state[hist_key].append({"role": "assistant", "content": reply})
+                st.session_state[hist_key].append(
+                    {"role": "assistant", "content": reply}
+                )

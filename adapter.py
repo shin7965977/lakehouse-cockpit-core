@@ -7,9 +7,10 @@ from specific domain models (e.g. Platzi E-Commerce, ReadCall PLG SaaS).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable
+from typing import Any
 
 import pandas as pd
 import plotly.graph_objects as go

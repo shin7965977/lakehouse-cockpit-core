@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+
 import pandas as pd
 import streamlit as st
+
 from ..adapter import KPICardSpec
 
 
@@ -36,9 +38,7 @@ def render_kpi_grid(
                 if is_en
                 else ("正常" if status == "normal" else "警示")
             )
-            status_cls = (
-                "status-normal" if status == "normal" else "status-warning"
-            )
+            status_cls = "status-normal" if status == "normal" else "status-warning"
             title = card.title_en if is_en else card.title_zh
             accent = getattr(card, "accent_color", "#6366f1")
 

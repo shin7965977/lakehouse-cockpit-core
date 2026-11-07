@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Callable
+
 import pandas as pd
 import streamlit as st
 
@@ -23,9 +23,7 @@ def render_sql_snippet_module(
 
     accompanied by an aligned Table Data Snippet.
     """
-    expander_title = (
-        f"📄 {title_en}" if is_en else f"📄 {title_zh}"
-    )
+    expander_title = f"📄 {title_en}" if is_en else f"📄 {title_zh}"
 
     start_str = start_date.isoformat() if start_date else "2026-10-01"
     end_str = end_date.isoformat() if end_date else "2026-10-31"

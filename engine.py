@@ -7,6 +7,7 @@ driven entirely by an injected BaseCockpitAdapter.
 from __future__ import annotations
 
 import streamlit as st
+
 from .adapter import BaseCockpitAdapter
 from .components.ai_drawer import render_ai_drawer
 from .components.kpi_grid import render_kpi_grid
@@ -58,8 +59,16 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             "Filter Period:" if is_en else "選擇時間區間：",
             value=[],
         )
-        start_date = date_range[0] if isinstance(date_range, (list, tuple)) and len(date_range) > 0 else None
-        end_date = date_range[1] if isinstance(date_range, (list, tuple)) and len(date_range) > 1 else None
+        start_date = (
+            date_range[0]
+            if isinstance(date_range, (list, tuple)) and len(date_range) > 0
+            else None
+        )
+        end_date = (
+            date_range[1]
+            if isinstance(date_range, (list, tuple)) and len(date_range) > 1
+            else None
+        )
 
         # Advisor Drawer Toggle Button
         st.markdown("---")
@@ -69,7 +78,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             else ("🤖 Open AI Advisor" if is_en else "🤖 開啟 AI 顧問")
         )
         if st.button(drawer_btn_label, use_container_width=True, type="primary"):
-            st.session_state["advisor_drawer_open"] = not st.session_state["advisor_drawer_open"]
+            st.session_state["advisor_drawer_open"] = not st.session_state[
+                "advisor_drawer_open"
+            ]
             st.rerun()
 
     # Load Domain Data
@@ -93,14 +104,23 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         st.markdown("---")
 
         # 2. Medallion Layer Selector
-        st.subheader("🏛️ " + ("Medallion Data Lakehouse Layers" if is_en else "現代湖倉資料分層導覽"))
+        st.subheader(
+            "🏛️ "
+            + ("Medallion Data Lakehouse Layers" if is_en else "現代湖倉資料分層導覽")
+        )
         selected_layer = st.radio(
             "Select Layer / 選擇層級：",
             options=["gold", "silver", "bronze"],
             format_func=lambda x: {
-                "gold": "🥇 Gold Marts (Business Aggregations & KPIs)" if is_en else "🥇 金牌層 (業務聚合集市 & 核心 KPI)",
-                "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)" if is_en else "🥈 銀牌層 (標準化維度與事實表)",
-                "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)" if is_en else "🥉 銅牌層 (原始日誌與同步歷程)",
+                "gold": "🥇 Gold Marts (Business Aggregations & KPIs)"
+                if is_en
+                else "🥇 金牌層 (業務聚合集市 & 核心 KPI)",
+                "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)"
+                if is_en
+                else "🥈 銀牌層 (標準化維度與事實表)",
+                "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)"
+                if is_en
+                else "🥉 銅牌層 (原始日誌與同步歷程)",
             }[x],
             horizontal=True,
         )
