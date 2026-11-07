@@ -13,11 +13,16 @@ html, body, [class*="css"] {
     background: var(--secondary-background-color, #ffffff);
     border: 1px solid rgba(128, 128, 128, 0.2);
     border-radius: 14px;
-    padding: 1.25rem 1.5rem;
+    padding: 1.15rem 1.25rem;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
     margin-bottom: 1rem;
     position: relative;
     overflow: visible; /* Allows tooltips to pop out without clipping */
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 190px;
+    height: 100%;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 .metric-card:hover {
@@ -35,36 +40,40 @@ html, body, [class*="css"] {
     border-top-right-radius: 14px;
 }
 .metric-label {
-    font-size: 0.825rem;
+    font-size: 0.8rem;
     font-weight: 600;
     color: var(--text-color, #4b5563);
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.25rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
+    min-height: 2.2rem;
+    line-height: 1.25;
 }
 .metric-value {
-    font-size: 2.1rem;
+    font-size: 2rem;
     font-weight: 700;
     color: var(--text-color, #111827);
-    line-height: 1.2;
-    margin-bottom: 0.35rem;
+    line-height: 1.15;
+    margin: 0.25rem 0;
 }
 .metric-sub {
-    font-size: 0.775rem;
+    font-size: 0.75rem;
     color: #6b7280;
     display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-top: auto;
 }
 .status-pill {
-    padding: 2px 8px;
+    padding: 2px 7px;
     border-radius: 12px;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 600;
+    white-space: nowrap;
 }
 .status-normal {
     background-color: rgba(16, 185, 129, 0.15);
@@ -90,16 +99,18 @@ html, body, [class*="css"] {
 /* ========================================================================= */
 .formula-tag {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     background: rgba(128, 128, 128, 0.08);
     border: 1px solid rgba(128, 128, 128, 0.2);
     color: var(--text-color, #334155);
-    padding: 0.22rem 0.55rem;
+    padding: 0.18rem 0.45rem;
     border-radius: 6px;
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    margin-top: 0.25rem;
+    gap: 0.25rem;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: visible;
 }
 .formula-term {
     position: relative;
@@ -107,9 +118,10 @@ html, body, [class*="css"] {
     font-weight: 700;
     color: #2563eb;
     border-bottom: 1.5px dotted #3b82f6;
-    padding: 0 2px;
+    padding: 0 1px;
     display: inline-block;
     transition: all 0.15s ease-in-out;
+    white-space: nowrap;
 }
 .formula-term:hover {
     color: #1d4ed8;

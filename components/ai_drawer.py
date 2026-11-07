@@ -106,12 +106,11 @@ def render_ai_drawer(
         else "🚀 啟動 AE 需求交付全流程"
     )
     if st.button(wf_btn_label, key=f"btn_start_ae_wf_{active_scope_id}", use_container_width=True):
-        st.session_state["show_ae_workflow"] = not st.session_state.get("show_ae_workflow", False)
+        st.session_state["pending_ai_query"] = (
+            "🚀 Start AE Guided Workflow" if is_en else "🚀 啟動 AE 需求交付全流程"
+        )
+        st.session_state["cockpit_active_view"] = "workflow"
         st.rerun()
-
-    # If AE Workflow is active, render the 6-step stepper
-    if st.session_state.get("show_ae_workflow", False) and adapter is not None:
-        render_ae_workflow_stepper(adapter=adapter, data_dict=data_dict or {}, is_en=is_en)
 
     st.markdown("---")
 

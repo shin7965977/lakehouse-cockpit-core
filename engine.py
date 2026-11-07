@@ -133,9 +133,13 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         if getattr(adapter, "supports_ae_workflow", False):
             nav_options.append("workflow")
 
+        active_view_saved = st.session_state.get("cockpit_active_view", "gold")
+        default_idx = nav_options.index(active_view_saved) if active_view_saved in nav_options else 0
+
         selected_layer = st.radio(
             "Select View:",
             options=nav_options,
+            index=default_idx,
             format_func=lambda x: {
                 "gold": "🥇 Gold Marts (Business Aggregations & KPIs)",
                 "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)",
@@ -144,7 +148,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 "workflow": "🚀 AE Guided Workflow (6-Step Lifecycle & Customizable Looker)",
             }[x],
             horizontal=True,
+            key="main_cockpit_view_selector",
         )
+        st.session_state["cockpit_active_view"] = selected_layer
 
         st.markdown("---")
 

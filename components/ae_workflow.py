@@ -135,6 +135,17 @@ def _render_step_1_scoping(is_en: bool) -> None:
     )
     st.session_state["ae_workflow_scenario"] = selected
 
+    # Allow stakeholder to express custom criteria / opinions
+    custom_goal = st.text_input(
+        "💬 Or customize your own analytical goal & criteria (可自由輸入您的自訂需求與意見):"
+        if is_en
+        else "💬 或自由輸入您的自訂商業目標、關注維度與意見：",
+        value=st.session_state.get("custom_ae_goal", ""),
+        placeholder="e.g., Focus specifically on Nuts & Butters packaging defects or dried fruit margins...",
+    )
+    if custom_goal:
+        st.session_state["custom_ae_goal"] = custom_goal
+
     if selected == "bulk_returns":
         st.info(
             "📌 **Stakeholder Question**: *'Why do 1kg Organic Cashews show a 5.2% return rate (2.5x normal average)? Is it packaging damage or quality issue?'*\n\n"
