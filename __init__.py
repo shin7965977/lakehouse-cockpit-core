@@ -1,17 +1,32 @@
 """Lakehouse Cockpit Framework - Microkernel Architecture for BI & AI Operations."""
 
-from .adapter import (
-    BaseCockpitAdapter,
-    ChartModuleSpec,
-    KPICardSpec,
-    MedallionTabSpec,
-)
-from .engine import launch_cockpit_app
+try:
+    from .adapter import (
+        AnalyticalSpecContract,
+        BaseCockpitAdapter,
+        ChartModuleSpec,
+        KPICardSpec,
+        MedallionTabSpec,
+        OnDemandInsightResult,
+    )
+    from .engine import launch_cockpit_app
+except ImportError:
+    from adapter import (
+        AnalyticalSpecContract,
+        BaseCockpitAdapter,
+        ChartModuleSpec,
+        KPICardSpec,
+        MedallionTabSpec,
+        OnDemandInsightResult,
+    )
+    from engine import launch_cockpit_app
 
 __all__ = [
+    "AnalyticalSpecContract",
     "BaseCockpitAdapter",
     "ChartModuleSpec",
     "KPICardSpec",
     "MedallionTabSpec",
+    "OnDemandInsightResult",
     "launch_cockpit_app",
 ]

@@ -1,14 +1,14 @@
 """Base Domain Adapter Contract for Lakehouse Cockpit Framework.
 
-Decouples BI visual presentation, FastMCP AI Copilot, and SQL contract testing
-from specific domain models (e.g. Retail E-Commerce, PLG SaaS).
+Decouples BI visual presentation, FastMCP AI Copilot, Socratic Spec Guidance,
+and SQL contract testing from specific domain models (e.g. Retail E-Commerce, PLG SaaS).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -59,6 +59,37 @@ class MedallionTabSpec:
     title_zh: str = ""
 
 
+@dataclass
+class AnalyticalSpecContract:
+    """Immutable specification contract locked after a 2-round Socratic dialogue."""
+
+    spec_id: str
+    scenario_key: str
+    business_question: str
+    target_layer: str
+    target_mart: str
+    metrics: list[dict[str, str]]
+    dimensions: list[str]
+    filters: dict[str, Any]
+    chart_recommendation: str
+    governance_checks: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OnDemandInsightResult:
+    """Compiled insight payload rendered in the On-Demand Insight Panel with 3-Layer Inspector."""
+
+    spec_id: str
+    title: str
+    executive_takeaway: str
+    figure: go.Figure | None
+    executed_sql: str
+    source_table_label: str
+    lineage_markdown: str
+    df_snippet: pd.DataFrame
+    governance_badges: list[str] = field(default_factory=list)
+
+
 class BaseCockpitAdapter(ABC):
     """Abstract Base Class for Domain Adapters.
 
@@ -100,6 +131,11 @@ class BaseCockpitAdapter(ABC):
         """List of 4 executive KPI cards."""
         ...
 
+    @property
+    def medallion_layers(self) -> dict[str, Any]:
+        """Dictionary mapping 'gold', 'silver', 'bronze' to layer specs."""
+        return {"gold": {"tabs": []}, "silver": {"tabs": []}, "bronze": {"tabs": []}}
+
     @abstractmethod
     def load_domain_data(
         self, start_date: date | None = None, end_date: date | None = None
@@ -136,3 +172,43 @@ class BaseCockpitAdapter(ABC):
     def quick_diagnosis_questions_zh(self) -> list[str]:
         """Suggested localized quick questions (defaults to English)."""
         return self.quick_diagnosis_questions_en
+
+    # =========================================================================
+    # Conversational Spec Guidance & On-Demand Insight Hooks (Optional)
+    # =========================================================================
+
+    @property
+    def supports_spec_guidance(self) -> bool:
+        """Whether this adapter supports 2-round Socratic Spec Guidance & On-Demand Insights."""
+        return False
+
+    def handle_spec_inquiry_turn(
+        self,
+        user_query: str,
+        current_round: int,
+        session_context: dict[str, Any] | None = None,
+        is_en: bool = True,
+    ) -> dict[str, Any]:
+        """Process one turn in the 2-round Socratic Spec Guidance state machine.
+
+        Returns a dict containing:
+          - 'reply': assistant markdown message
+          - 'next_round': int (1 for clarifying, 2 for locked spec)
+          - 'spec_contract': AnalyticalSpecContract | None
+          - 'scenario_key': str | None
+        """
+        return {
+            "reply": "Spec guidance is not enabled for this domain adapter.",
+            "next_round": 0,
+            "spec_contract": None,
+            "scenario_key": None,
+        }
+
+    def compile_spec_to_insight(
+        self,
+        spec_contract: AnalyticalSpecContract | None,
+        data_dict: dict[str, pd.DataFrame],
+        is_en: bool = True,
+    ) -> OnDemandInsightResult | None:
+        """Compile a confirmed AnalyticalSpecContract into an OnDemandInsightResult."""
+        return None

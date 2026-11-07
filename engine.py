@@ -1,17 +1,25 @@
 """Main Cockpit Runtime Engine.
 
-Assembles UI layout, Medallion layer navigation, KPI grid, and AI drawer
-driven entirely by an injected BaseCockpitAdapter.
+Assembles UI layout, Medallion layer navigation, KPI grid, On-Demand Insight Panel,
+and AI drawer driven entirely by an injected BaseCockpitAdapter.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
-from .adapter import BaseCockpitAdapter
-from .components.ai_drawer import render_ai_drawer
-from .components.kpi_grid import render_kpi_grid
-from .styles import MODERN_COCKPIT_CSS
+try:
+    from .adapter import BaseCockpitAdapter
+    from .components.ai_drawer import render_ai_drawer
+    from .components.kpi_grid import render_kpi_grid
+    from .components.on_demand_panel import render_on_demand_insight_panel
+    from .styles import MODERN_COCKPIT_CSS
+except ImportError:
+    from adapter import BaseCockpitAdapter
+    from components.ai_drawer import render_ai_drawer
+    from components.kpi_grid import render_kpi_grid
+    from components.on_demand_panel import render_on_demand_insight_panel
+    from styles import MODERN_COCKPIT_CSS
 
 
 def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
@@ -33,7 +41,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
     if "cockpit_lang" not in st.session_state:
         st.session_state["cockpit_lang"] = adapter.default_language
     if "advisor_drawer_open" not in st.session_state:
-        st.session_state["advisor_drawer_open"] = False
+        st.session_state["advisor_drawer_open"] = True
 
     is_en = st.session_state["cockpit_lang"] == "en"
 
@@ -96,10 +104,18 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
     # Main BI Dashboard
     with main_col:
         st.title(adapter.brand_title)
-        st.caption("Live Lakehouse Intelligence · Enterprise Medallion Architecture")
+        st.caption(
+            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Socratic Spec Engine"
+        )
 
         # 1. Responsive KPI Grid
         render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)
+
+        # 1.5 Conditional Stakeholder On-Demand Insight Panel (Directly beneath KPI Cards)
+        active_insight = st.session_state.get("active_on_demand_insight")
+        if active_insight is not None:
+            st.markdown("---")
+            render_on_demand_insight_panel(insight=active_insight, is_en=is_en)
 
         st.markdown("---")
 
@@ -149,4 +165,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                     if not is_en
                     else adapter.quick_diagnosis_questions_en
                 ),
+                adapter=adapter,
+                data_dict=data_dict,
             )
