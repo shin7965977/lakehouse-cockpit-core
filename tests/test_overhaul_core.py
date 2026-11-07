@@ -89,3 +89,19 @@ def test_sql_sandbox_executes_safe_queries_and_blocks_destructive_ddl() -> None:
     # Destructive DROP should be blocked
     with pytest.raises(ValueError, match="Security Alert"):
         adapter.execute_custom_sql("DROP TABLE test_table", data)
+
+
+def test_gemini_key_validation_and_ae_workflow_flag() -> None:
+    """Verify Gemini API key preflight validation and adapter AE workflow capability."""
+    from components.ai_drawer import _validate_gemini_key
+
+    # Invalid keys
+    assert _validate_gemini_key("") is False
+    assert _validate_gemini_key("your_api_key_here") is False
+    assert _validate_gemini_key("short") is False
+
+    # Valid Google AI Studio format
+    assert _validate_gemini_key("AIzaSyD-1234567890abcdefghijklmnop") is True
+
+    adapter = DummyAdapter()
+    assert adapter.supports_ae_workflow is True

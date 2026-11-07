@@ -183,5 +183,51 @@ html, body, [class*="css"] {
     color: #e2e8f0;
     font-size: 0.72rem;
 }
+/* BYOK Security Badge & Warning Callout */
+.key-badge-required {
+    background-color: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+    font-size: 0.72rem;
+    font-weight: 700;
+    border-radius: 6px;
+    padding: 3px 8px;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.key-badge-active {
+    background-color: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+    font-size: 0.72rem;
+    font-weight: 700;
+    border-radius: 6px;
+    padding: 3px 8px;
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.byok-callout-warning {
+    background-color: #fffbeb;
+    border: 1px solid #fef3c7;
+    border-left: 4px solid #f59e0b;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 12px 0;
+    color: #92400e;
+    font-size: 0.88rem;
+    line-height: 1.5;
+}
+.ae-step-badge {
+    background-color: #e0e7ff;
+    color: #3730a3;
+    font-weight: 700;
+    border-radius: 9999px;
+    padding: 2px 10px;
+    font-size: 0.8rem;
+}
 </style>
 """

@@ -248,12 +248,19 @@ class BaseCockpitAdapter(ABC):
     def supports_spec_guidance(self) -> bool:
         return False
 
+    @property
+    def supports_ae_workflow(self) -> bool:
+        """Whether this adapter supports the 6-step End-to-End Analytics Engineering Workflow."""
+        return True
+
     def handle_spec_inquiry_turn(
         self,
         user_query: str,
-        chat_history: list[dict[str, str]],
-        data_dict: dict[str, pd.DataFrame],
+        chat_history: list[dict[str, str]] | None = None,
+        data_dict: dict[str, pd.DataFrame] | None = None,
         is_en: bool = True,
+        api_key: str = "",
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Process one conversational turn in the semantic guidance flow."""
         return {

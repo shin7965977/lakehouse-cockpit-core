@@ -130,6 +130,8 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         nav_options = ["gold", "silver", "bronze"]
         if getattr(adapter, "supports_looker", False):
             nav_options.append("looker")
+        if getattr(adapter, "supports_ae_workflow", False):
+            nav_options.append("workflow")
 
         selected_layer = st.radio(
             "Select View:",
@@ -139,14 +141,24 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)",
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
                 "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
+                "workflow": "🚀 AE Guided Workflow (6-Step Lifecycle & Customizable Looker)",
             }[x],
             horizontal=True,
         )
 
         st.markdown("---")
 
-        # Render Looker Native Enterprise View
-        if selected_layer == "looker":
+        # Render AE Guided Workflow or Looker Native View
+        if selected_layer == "workflow":
+            try:
+                from .components.ae_workflow import render_ae_workflow_stepper
+            except (ImportError, ValueError):
+                try:
+                    from components.ae_workflow import render_ae_workflow_stepper
+                except (ImportError, ValueError):
+                    from cockpit_core.components.ae_workflow import render_ae_workflow_stepper
+            render_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)
+        elif selected_layer == "looker":
             render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
         else:
             # Display Selected Medallion Layer Preview (with explicit start_date and end_date injection)
