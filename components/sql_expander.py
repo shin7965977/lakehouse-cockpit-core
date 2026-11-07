@@ -23,13 +23,18 @@ def render_sql_snippet_module(
 
     accompanied by an aligned Table Data Snippet.
     """
-    display_title = title_en or title_zh or module_id
+    display_title = (
+        title_en
+        if is_en
+        else (title_zh or title_en or module_id)
+    )
     expander_title = f"📄 {display_title}"
 
-    start_str = start_date.isoformat() if start_date else "2026-10-01"
+    # Use actual selected dates or default to full reporting window
+    start_str = start_date.isoformat() if start_date else "2026-08-03"
     end_str = end_date.isoformat() if end_date else "2026-10-31"
 
-    # Inject dynamic dates into template
+    # Inject dynamic dates into template safely
     formatted_sql = sql_template.format(
         start_str=start_str,
         end_str=end_str,

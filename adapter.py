@@ -1,7 +1,7 @@
 """Base Domain Adapter Contract for Lakehouse Cockpit Framework.
 
-Decouples BI visual presentation, FastMCP AI Copilot, Socratic Spec Guidance,
-and SQL contract testing from specific domain models (e.g. Retail E-Commerce, PLG SaaS).
+Decouples BI visual presentation, Interactive SQL Sandbox, Looker Enterprise Views,
+Socratic Spec Guidance, and SQL contract testing from specific domain models.
 """
 
 from __future__ import annotations
@@ -17,6 +17,16 @@ import plotly.graph_objects as go
 
 
 @dataclass
+class MetricComponent:
+    """Structure for a formula term (numerator or denominator) with hover tooltip (excluding Unit)."""
+
+    label: str  # Display text in formula tag (e.g. "returned_units")
+    role: str  # e.g. "Numerator" or "Denominator"
+    description: str  # Plain English business explanation shown on hover
+    description_zh: str = ""
+
+
+@dataclass
 class KPICardSpec:
     """Specification for a responsive top-level KPI card."""
 
@@ -24,11 +34,11 @@ class KPICardSpec:
     title_en: str
     metric_formula: str
     target_rule: str
-    # calculate takes the loaded data dictionary and returns a dict with:
-    # {"value": str, "status": "normal" | "warning", "caption": str}
     calculate: Callable[[dict[str, pd.DataFrame]], dict[str, Any]]
     title_zh: str = ""
     accent_color: str = "#6366f1"
+    formula_numerator: MetricComponent | None = None
+    formula_denominator: MetricComponent | None = None
 
 
 @dataclass
@@ -38,9 +48,8 @@ class ChartModuleSpec:
     module_id: str
     title_en: str
     source_table_label: str
-    # sql_template can contain placeholders: {start_str}, {end_str}, {project_id}
     sql_template: str
-    render_chart: Callable[[dict[str, pd.DataFrame], bool], go.Figure | None]
+    render_chart: Callable[[dict[str, pd.DataFrame], bool, date | None, date | None], go.Figure | None]
     get_table_snippet: Callable[
         [dict[str, pd.DataFrame], date | None, date | None], pd.DataFrame
     ]
@@ -55,13 +64,13 @@ class MedallionTabSpec:
 
     tab_id: str
     title_en: str
-    render_content: Callable[[dict[str, pd.DataFrame], bool, Any], None]
+    render_content: Callable[[dict[str, pd.DataFrame], bool, Any, date | None, date | None], None]
     title_zh: str = ""
 
 
 @dataclass
 class AnalyticalSpecContract:
-    """Immutable specification contract locked after a 2-round Socratic dialogue."""
+    """Immutable specification contract locked after an interactive Socratic dialogue."""
 
     spec_id: str
     scenario_key: str
@@ -143,16 +152,10 @@ class BaseCockpitAdapter(ABC):
         """Fetch all Gold, Silver, and Bronze datasets needed by the dashboard."""
         ...
 
-    @abstractmethod
-    def get_fastmcp_tools(self) -> list[Callable]:
-        """List of callable tool functions exposed to the Gemini Advisor."""
-        ...
-
     @property
-    @abstractmethod
     def default_system_prompt_en(self) -> str:
         """Default MBB consulting system prompt in English."""
-        ...
+        return "You are an analytics engineering advisor."
 
     @property
     def default_system_prompt_zh(self) -> str:
@@ -174,40 +177,89 @@ class BaseCockpitAdapter(ABC):
         return self.quick_diagnosis_questions_en
 
     # =========================================================================
-    # Conversational Spec Guidance & On-Demand Insight Hooks (Optional)
+    # Interactive SQL Sandbox Hook
+    # =========================================================================
+
+    def execute_custom_sql(
+        self,
+        sql_query: str,
+        data_dict: dict[str, pd.DataFrame],
+    ) -> pd.DataFrame:
+        """Execute a user-entered SQL query against domain data tables (default DuckDB query)."""
+        import re
+        import duckdb
+
+        # Enforce read-only FinOps safety check
+        forbidden = re.search(r"\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE)\b", sql_query, re.IGNORECASE)
+        if forbidden:
+            raise ValueError(f"Security Alert: Destructive command '{forbidden.group(0)}' is prohibited in Read-Only Sandbox.")
+
+        con = duckdb.connect(database=":memory:")
+        for tbl_name, df_val in data_dict.items():
+            if isinstance(df_val, pd.DataFrame):
+                con.register(tbl_name, df_val)
+                # Register clean alias without project or schema prefix
+                clean_name = tbl_name.split(".")[-1]
+                con.register(clean_name, df_val)
+
+        # Remove backticks and normalize schema qualifications for in-memory execution
+        cleaned_sql = re.sub(r"`[^`]*\b([a-zA-Z0-9_]+)`", r"\1", sql_query)
+        cleaned_sql = re.sub(r"\b[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
+        cleaned_sql = re.sub(r"\b[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
+
+        return con.execute(cleaned_sql).df()
+
+    @property
+    def default_sandbox_sql(self) -> str:
+        """Default query prefilled in the SQL Verification Sandbox."""
+        return "SELECT * FROM mart_product_performance LIMIT 10;"
+
+    # =========================================================================
+    # Looker Enterprise BI Hooks (Optional / Native)
+    # =========================================================================
+
+    @property
+    def supports_looker(self) -> bool:
+        """Whether this adapter provides Looker / LookML enterprise integration."""
+        return True
+
+    @property
+    def looker_embed_url(self) -> str:
+        """Default Looker / Looker Studio embed URL if configured."""
+        return ""
+
+    @property
+    def lookml_view_definition(self) -> str:
+        """LookML code definition string for the primary Gold Mart."""
+        return ""
+
+    # =========================================================================
+    # Socratic Spec Guidance & On-Demand Insight Hooks
     # =========================================================================
 
     @property
     def supports_spec_guidance(self) -> bool:
-        """Whether this adapter supports 2-round Socratic Spec Guidance & On-Demand Insights."""
-        return False
+        return True
 
     def handle_spec_inquiry_turn(
         self,
         user_query: str,
-        current_round: int,
-        session_context: dict[str, Any] | None = None,
+        chat_history: list[dict[str, str]],
+        data_dict: dict[str, pd.DataFrame],
         is_en: bool = True,
     ) -> dict[str, Any]:
-        """Process one turn in the 2-round Socratic Spec Guidance state machine.
-
-        Returns a dict containing:
-          - 'reply': assistant markdown message
-          - 'next_round': int (1 for clarifying, 2 for locked spec)
-          - 'spec_contract': AnalyticalSpecContract | None
-          - 'scenario_key': str | None
-        """
+        """Process one conversational turn in the semantic guidance flow."""
         return {
-            "reply": "Spec guidance is not enabled for this domain adapter.",
-            "next_round": 0,
+            "reply": "Spec guidance is not configured.",
             "spec_contract": None,
-            "scenario_key": None,
         }
 
     def compile_spec_to_insight(
         self,
         spec_contract: AnalyticalSpecContract | None,
         data_dict: dict[str, pd.DataFrame],
+        start_date: date | None = None,
+        end_date: date | None = None,
         is_en: bool = True,
     ) -> OnDemandInsightResult | None:
         """Compile a confirmed AnalyticalSpecContract into an OnDemandInsightResult."""
