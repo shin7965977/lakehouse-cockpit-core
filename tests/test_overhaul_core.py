@@ -105,3 +105,36 @@ def test_gemini_key_validation_and_ae_workflow_flag() -> None:
 
     adapter = DummyAdapter()
     assert adapter.supports_ae_workflow is True
+
+
+def test_ae_workflow_synthesizes_dynamic_context_for_sales() -> None:
+    """Verify that inputting sales goal synthesizes revenue metric and orders contract (NOT returns)."""
+    from components.ae_workflow import synthesize_ae_lifecycle
+
+    # User input: 我想知道這一季產品的銷售額
+    sales_state = synthesize_ae_lifecycle("我想知道這一季產品的銷售額")
+    assert sales_state["intent"] == "sales_revenue"
+    assert sales_state["metric_name"] == "net_revenue_eur"
+    assert "gross_revenue_eur" in sales_state["formula"]
+    assert "orders" in sales_state["contract_file"]
+    assert "raw_shopware_orders" in sales_state["upstream_table"]
+    assert "total_net_revenue" in sales_state["lookml_view"]
+
+    # User input: 1kg 腰果退貨
+    return_state = synthesize_ae_lifecycle("1kg 腰果退貨")
+    assert return_state["intent"] == "bulk_returns"
+    assert return_state["metric_name"] == "return_rate_pct"
+    assert "returned_units" in return_state["formula"]
+    assert "returns.yaml" in return_state["contract_file"]
+
+
+def test_step6_looker_studio_embed_removes_plotly() -> None:
+    """Verify that ae_workflow file does not import plotly.express and references Looker Studio."""
+    import inspect
+    from components import ae_workflow
+
+    source = inspect.getsource(ae_workflow)
+    assert "plotly.express" not in source, "Step 6 must not use Plotly Express facade!"
+    assert "lookerstudio.google.com" in source
+    assert "components.iframe" in source
+
