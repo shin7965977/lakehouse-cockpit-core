@@ -117,6 +117,7 @@ from typing import Any, Callable
 import pandas as pd
 from cockpit_core import BaseCockpitAdapter, KPICardSpec, MedallionTabSpec
 
+
 class MyDomainAdapter(BaseCockpitAdapter):
     @property
     def project_id(self) -> str:
@@ -139,10 +140,6 @@ class MyDomainAdapter(BaseCockpitAdapter):
         return "en"
 
     @property
-    def default_system_prompt_zh(self) -> str:
-        return "你是資深零售商業顧問..."
-
-    @property
     def default_system_prompt_en(self) -> str:
         return "You are a senior retail management consultant..."
 
@@ -151,18 +148,19 @@ class MyDomainAdapter(BaseCockpitAdapter):
         return [
             KPICardSpec(
                 key="gmv",
-                title_zh="商品交易總額",
                 title_en="Gross Merchandise Value",
                 metric_formula="SUM(gross_amount)",
                 target_rule="≥ $100,000",
                 calculate=lambda data: {
                     "value": f"${data['kpi']['gmv'].sum():,.2f}",
-                    "status": "normal"
-                }
+                    "status": "normal",
+                },
             )
         ]
 
-    def load_domain_data(self, start_date: date | None = None, end_date: date | None = None) -> dict[str, pd.DataFrame]:
+    def load_domain_data(
+        self, start_date: date | None = None, end_date: date | None = None
+    ) -> dict[str, pd.DataFrame]:
         # Connect to BigQuery or DuckDB and return domain tables
         return {"kpi": pd.DataFrame({"gmv": [125000.0]})}
 
@@ -176,9 +174,8 @@ class MyDomainAdapter(BaseCockpitAdapter):
                 "tabs": [
                     MedallionTabSpec(
                         tab_id="overview",
-                        title_zh="📊 總覽",
                         title_en="📊 Overview",
-                        render_content=lambda data, is_en, adapter: None
+                        render_content=lambda data, is_en, adapter: None,
                     )
                 ]
             }

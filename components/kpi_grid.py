@@ -13,7 +13,7 @@ from ..adapter import KPICardSpec
 def render_kpi_grid(
     cards: list[KPICardSpec],
     data_dict: dict[str, pd.DataFrame],
-    is_en: bool = False,
+    is_en: bool = True,
 ) -> None:
     """Render a responsive 4-column KPI grid with glassmorphism cards and top accent highlights."""
     if not cards:
@@ -33,13 +33,9 @@ def render_kpi_grid(
 
             val_str = str(res.get("value", "--"))
             status = res.get("status", "normal")
-            status_label = (
-                ("Normal" if status == "normal" else "Warning")
-                if is_en
-                else ("正常" if status == "normal" else "警示")
-            )
+            status_label = "Normal" if status == "normal" else "Warning"
             status_cls = "status-normal" if status == "normal" else "status-warning"
-            title = card.title_en if is_en else card.title_zh
+            title = card.title_en or getattr(card, "title_zh", card.key)
             accent = getattr(card, "accent_color", "#6366f1")
 
             st.markdown(

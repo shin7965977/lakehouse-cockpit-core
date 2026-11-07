@@ -42,10 +42,10 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         st.title(f"{adapter.brand_icon} {adapter.brand_title}")
         st.caption(f"⚡ {adapter.brand_badge_text}")
 
-        # Language Toggle
+        # Language Selector
         lang_choice = st.radio(
-            "Language / 語系",
-            options=["English", "繁體中文"],
+            "Language",
+            options=["English", "Traditional Chinese"],
             index=0 if is_en else 1,
             horizontal=True,
         )
@@ -54,9 +54,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         # Date Range Filter
         st.markdown("---")
-        st.subheader("📅 " + ("Date Range Filter" if is_en else "日期區間篩選"))
+        st.subheader("📅 Date Range Filter")
         date_range = st.date_input(
-            "Filter Period:" if is_en else "選擇時間區間：",
+            "Filter Period:",
             value=[],
         )
         start_date = (
@@ -73,9 +73,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         # Advisor Drawer Toggle Button
         st.markdown("---")
         drawer_btn_label = (
-            ("🤖 Close Advisor" if is_en else "🤖 關閉 AI 顧問")
+            "🤖 Close Advisor"
             if st.session_state["advisor_drawer_open"]
-            else ("🤖 Open AI Advisor" if is_en else "🤖 開啟 AI 顧問")
+            else "🤖 Open AI Advisor"
         )
         if st.button(drawer_btn_label, use_container_width=True, type="primary"):
             st.session_state["advisor_drawer_open"] = not st.session_state[
@@ -104,23 +104,14 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         st.markdown("---")
 
         # 2. Medallion Layer Selector
-        st.subheader(
-            "🏛️ "
-            + ("Medallion Data Lakehouse Layers" if is_en else "現代湖倉資料分層導覽")
-        )
+        st.subheader("🏛️ Medallion Data Lakehouse Layers")
         selected_layer = st.radio(
-            "Select Layer / 選擇層級：",
+            "Select Layer:",
             options=["gold", "silver", "bronze"],
             format_func=lambda x: {
-                "gold": "🥇 Gold Marts (Business Aggregations & KPIs)"
-                if is_en
-                else "🥇 金牌層 (業務聚合集市 & 核心 KPI)",
-                "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)"
-                if is_en
-                else "🥈 銀牌層 (標準化維度與事實表)",
-                "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)"
-                if is_en
-                else "🥉 銅牌層 (原始日誌與同步歷程)",
+                "gold": "🥇 Gold Marts (Business Aggregations & KPIs)",
+                "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)",
+                "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
             }[x],
             horizontal=True,
         )
@@ -130,7 +121,12 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         layer_specs = adapter.medallion_layers.get(selected_layer, {})
         if isinstance(layer_specs, dict) and "tabs" in layer_specs:
             tab_names = [
-                (t.title_en if is_en else t.title_zh) for t in layer_specs["tabs"]
+                (
+                    t.title_en
+                    if is_en and getattr(t, "title_en", None)
+                    else getattr(t, "title_zh", getattr(t, "title_en", str(t)))
+                )
+                for t in layer_specs["tabs"]
             ]
             if tab_names:
                 rendered_tabs = st.tabs(tab_names)
@@ -149,8 +145,8 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 active_scope_title=selected_layer.upper(),
                 is_en=is_en,
                 quick_questions=(
-                    adapter.quick_diagnosis_questions_en
-                    if is_en
-                    else adapter.quick_diagnosis_questions_zh
+                    adapter.quick_diagnosis_questions_zh
+                    if not is_en
+                    else adapter.quick_diagnosis_questions_en
                 ),
             )

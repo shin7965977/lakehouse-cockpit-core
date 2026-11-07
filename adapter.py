@@ -1,7 +1,7 @@
 """Base Domain Adapter Contract for Lakehouse Cockpit Framework.
 
 Decouples BI visual presentation, FastMCP AI Copilot, and SQL contract testing
-from specific domain models (e.g. Platzi E-Commerce, ReadCall PLG SaaS).
+from specific domain models (e.g. Retail E-Commerce, PLG SaaS).
 """
 
 from __future__ import annotations
@@ -21,13 +21,13 @@ class KPICardSpec:
     """Specification for a responsive top-level KPI card."""
 
     key: str
-    title_zh: str
     title_en: str
     metric_formula: str
     target_rule: str
     # calculate takes the loaded data dictionary and returns a dict with:
     # {"value": str, "status": "normal" | "warning", "caption": str}
     calculate: Callable[[dict[str, pd.DataFrame]], dict[str, Any]]
+    title_zh: str = ""
     accent_color: str = "#6366f1"
 
 
@@ -36,7 +36,6 @@ class ChartModuleSpec:
     """Specification for an interactive chart module with aligned SQL and snippet."""
 
     module_id: str
-    title_zh: str
     title_en: str
     source_table_label: str
     # sql_template can contain placeholders: {start_str}, {end_str}, {project_id}
@@ -45,6 +44,7 @@ class ChartModuleSpec:
     get_table_snippet: Callable[
         [dict[str, pd.DataFrame], date | None, date | None], pd.DataFrame
     ]
+    title_zh: str = ""
     description_zh: str = ""
     description_en: str = ""
 
@@ -54,9 +54,9 @@ class MedallionTabSpec:
     """Specification for a tab within Gold/Silver/Bronze layers."""
 
     tab_id: str
-    title_zh: str
     title_en: str
     render_content: Callable[[dict[str, pd.DataFrame], bool, Any], None]
+    title_zh: str = ""
 
 
 class BaseCockpitAdapter(ABC):
@@ -90,10 +90,9 @@ class BaseCockpitAdapter(ABC):
         ...
 
     @property
-    @abstractmethod
     def default_language(self) -> str:
-        """Default language: 'zh' or 'en'."""
-        ...
+        """Default language: 'en' or 'zh'."""
+        return "en"
 
     @property
     @abstractmethod
@@ -115,20 +114,14 @@ class BaseCockpitAdapter(ABC):
 
     @property
     @abstractmethod
-    def default_system_prompt_zh(self) -> str:
-        """Default MBB consulting system prompt in Traditional Chinese."""
-        ...
-
-    @property
-    @abstractmethod
     def default_system_prompt_en(self) -> str:
         """Default MBB consulting system prompt in English."""
         ...
 
     @property
-    def quick_diagnosis_questions_zh(self) -> list[str]:
-        """Suggested quick questions in Chinese."""
-        return ["營收與利潤全盤診斷", "熱銷商品與客群洞察", "異常指標與流失歸因"]
+    def default_system_prompt_zh(self) -> str:
+        """Optional localized system prompt."""
+        return self.default_system_prompt_en
 
     @property
     def quick_diagnosis_questions_en(self) -> list[str]:
@@ -138,3 +131,8 @@ class BaseCockpitAdapter(ABC):
             "Customer Cohort Diagnostics",
             "Root-Cause Anomaly Detection",
         ]
+
+    @property
+    def quick_diagnosis_questions_zh(self) -> list[str]:
+        """Suggested localized quick questions (defaults to English)."""
+        return self.quick_diagnosis_questions_en
