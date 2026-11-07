@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 import pandas as pd
 import streamlit as st
-from cockpit_core.adapter import KPICardSpec
+from ..adapter import KPICardSpec
 
 
 def render_kpi_grid(

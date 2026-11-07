@@ -7,10 +7,10 @@ driven entirely by an injected BaseCockpitAdapter.
 from __future__ import annotations
 
 import streamlit as st
-from cockpit_core.adapter import BaseCockpitAdapter
-from cockpit_core.components.ai_drawer import render_ai_drawer
-from cockpit_core.components.kpi_grid import render_kpi_grid
-from cockpit_core.styles import MODERN_COCKPIT_CSS
+from .adapter import BaseCockpitAdapter
+from .components.ai_drawer import render_ai_drawer
+from .components.kpi_grid import render_kpi_grid
+from .styles import MODERN_COCKPIT_CSS
 
 
 def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
