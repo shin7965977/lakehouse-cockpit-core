@@ -125,13 +125,15 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer Option
+        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer + Data Center Option
         st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
         nav_options = ["gold", "silver", "bronze"]
         if getattr(adapter, "supports_looker", False):
             nav_options.append("looker")
         if getattr(adapter, "supports_schema_designer", False):
             nav_options.append("schema_designer")
+        if getattr(adapter, "supports_data_center", True):
+            nav_options.append("data_center")
 
         active_view_saved = st.session_state.get("cockpit_active_view", "gold")
         default_idx = nav_options.index(active_view_saved) if active_view_saved in nav_options else 0
@@ -146,6 +148,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
                 "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
                 "schema_designer": "🏗️ Autonomous Schema Designer & dbt Engine",
+                "data_center": "🏛️ Data Center (dbt Docs & Elementary)",
             }[x],
             horizontal=True,
             key="main_cockpit_view_selector",
@@ -154,8 +157,17 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # Render Autonomous Schema Designer or Looker Native View
-        if selected_layer == "schema_designer":
+        # Render Autonomous Schema Designer, Looker Native View, or Data Center
+        if selected_layer == "data_center":
+            try:
+                from .components.data_center import render_data_center_view
+            except (ImportError, ValueError):
+                try:
+                    from components.data_center import render_data_center_view
+                except (ImportError, ValueError):
+                    from cockpit_core.components.data_center import render_data_center_view
+            render_data_center_view()
+        elif selected_layer == "schema_designer":
             try:
                 from .components.schema_designer import render_schema_designer_view
             except (ImportError, ValueError):
