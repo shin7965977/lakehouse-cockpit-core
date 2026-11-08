@@ -1,4 +1,4 @@
-"""End-to-End Analytics Engineering Guided Workflow with Dynamic Context Inheritance & Real Looker Studio Embedding."""
+"""End-to-End Analytics Engineering Guided Workflow with Sequential State Machine & Resilient Looker Studio Embedding."""
 
 from __future__ import annotations
 
@@ -22,41 +22,44 @@ def synthesize_ae_lifecycle(user_goal: str, preset_key: str = "custom") -> dict[
     """Dynamically synthesize the 6-step AE delivery lifecycle based on stakeholder goal."""
     g = (user_goal or "").strip().lower()
 
-    # Case 1: Sales / Revenue / Quarterly Intent
-    if any(k in g for k in ["銷", "營收", "sales", "revenue", "quarter", "季", "訂單", "turnover", "sold"]):
+    # Priority Case 1: Return / Refund / Defect Intent (Crucial: Must precede generic sales/order keywords)
+    if any(k in g for k in ["退款", "退貨", "退訂", "refund", "return", "defect", "rejection"]):
         return {
-            "intent": "sales_revenue",
-            "user_goal": user_goal,
-            "metric_name": "net_revenue_eur",
-            "metric_title_en": "Quarterly Net Realized Sales (€)",
-            "metric_title_zh": "季度淨銷售額（歐元 €）",
-            "formula": "ROUND(SUM(gross_revenue_eur - discount_eur - refunded_eur), 2)",
-            "numerator": "SUM(gross_revenue_eur - discount_eur - refunded_eur) (Net realized EUR)",
-            "denominator": "None (Absolute Monetary Measure in EUR)",
-            "time_grain": "Quarterly (Q1-Q4) / Selected Range",
-            "stakeholder_q_en": f"What is the total quarterly product sales and sales velocity across categories? (Goal: '{user_goal}')",
-            "stakeholder_q_zh": f"這一季全館各品類與核心商品的銷售額與銷售速度表現如何？（自訂目標：「{user_goal}」）",
-            "ae_obj_en": "Aggregate Bronze Shopware order lines into Gold revenue marts, applying promotional voucher deductions and refund offsets.",
-            "ae_obj_zh": "從 Bronze 層 Shopware 原始訂單明細彙整至 Gold 營運寬表，嚴格扣除促銷折價券與已退款金額，計算真實淨營收。",
-            "upstream_table": "raw_shopware_orders",
-            "contract_file": "contracts/orders_and_revenue_contract.yaml",
-            "lineage_summary": "Bronze (raw_shopware_orders) ➔ dbt Staging (stg_orders) ➔ Gold Mart (mart_product_performance)",
+            "intent": "bulk_returns",
+            "user_goal": user_goal or "1kg Bulk Packaging Return Diagnosis",
+            "metric_name": "return_rate_pct",
+            "metric_title_en": "Unit Return Rate & Refund Ratio (%)",
+            "metric_title_zh": "商品退貨率與退款佔比（%）",
+            "formula": "ROUND(SUM(returned_units) * 100.0 / NULLIF(SUM(sold_units), 0), 2)",
+            "numerator": "SUM(returned_units) (Warehouse verified refund & return receipts)",
+            "denominator": "NULLIF(SUM(sold_units), 0) (Gross units sold across channels)",
+            "time_grain": "Quarterly / Rolling 90 Days",
+            "stakeholder_q_en": f"How many refund and return orders occurred this quarter and what is the return rate? (Goal: '{user_goal or 'Quarterly Refund Order Diagnosis'}')",
+            "stakeholder_q_zh": f"這個季度產生了多少退款與退貨訂單？退款率與品類退貨佔比如何？（自訂目標：「{user_goal or '季度退款訂單診斷'}」）",
+            "ae_obj_en": "Unify Shopware orders and warehouse quality defect return logs to calculate return rates and isolate packaging defect causes.",
+            "ae_obj_zh": "跨表串接 Shopware 原始訂單與倉庫退貨品檢明細，精確計算退款訂單數、退貨率與包裝破損歸因。",
+            "upstream_table": "raw_shopware_orders + raw_return_logs",
+            "contract_file": "contracts/returns.yaml",
+            "lineage_summary": "Bronze (raw_shopware_orders + raw_return_logs) ➔ Silver (int_returns_enriched) ➔ Gold (mart_product_performance)",
             "dbt_sql": (
-                "WITH orders_aggregated AS (\n"
-                "    SELECT\n"
-                "        product_id,\n"
-                "        product_name,\n"
-                "        category_name,\n"
-                "        packaging_size,\n"
-                "        SUM(sold_units) AS total_sold_units,\n"
-                "        ROUND(SUM(gross_revenue_eur), 2) AS gross_revenue_eur,\n"
-                "        ROUND(SUM(gross_revenue_eur - discount_eur - refunded_eur), 2) AS net_revenue_eur\n"
+                "WITH orders_agg AS (\n"
+                "    SELECT product_id, SUM(sold_units) AS sold_units, SUM(gross_revenue_eur) AS gross_revenue_eur\n"
                 "    FROM {{ ref('raw_shopware_orders') }}\n"
-                "    WHERE order_date >= DATE_TRUNC(CURRENT_DATE(), QUARTER)\n"
-                "    GROUP BY product_id, product_name, category_name, packaging_size\n"
+                "    GROUP BY product_id\n"
+                "),\n"
+                "returns_agg AS (\n"
+                "    SELECT product_id, SUM(returned_units) AS returned_units\n"
+                "    FROM {{ ref('int_returns_enriched') }}\n"
+                "    GROUP BY product_id\n"
                 ")\n"
-                "SELECT * FROM orders_aggregated\n"
-                "ORDER BY net_revenue_eur DESC;"
+                "SELECT\n"
+                "    p.product_id, p.product_name, p.category_name, p.packaging_size,\n"
+                "    COALESCE(o.sold_units, 0) AS sold_units,\n"
+                "    COALESCE(r.returned_units, 0) AS returned_units,\n"
+                "    ROUND(COALESCE(r.returned_units, 0) * 100.0 / NULLIF(o.sold_units, 0), 2) AS return_rate_pct\n"
+                "FROM {{ ref('stg_products') }} p\n"
+                "LEFT JOIN orders_agg o USING (product_id)\n"
+                "LEFT JOIN returns_agg r USING (product_id);"
             ),
             "dbt_tests": (
                 "models:\n"
@@ -64,11 +67,12 @@ def synthesize_ae_lifecycle(user_goal: str, preset_key: str = "custom") -> dict[
                 "    columns:\n"
                 "      - name: product_id\n"
                 "        tests: [unique, not_null]\n"
-                "      - name: net_revenue_eur\n"
+                "      - name: return_rate_pct\n"
                 "        tests:\n"
                 "          - not_null\n"
                 "          - dbt_expectations.expect_column_values_to_be_between:\n"
-                "              min_value: 0"
+                "              min_value: 0\n"
+                "              max_value: 100"
             ),
             "lookml_view": (
                 "view: mart_product_performance {\n"
@@ -76,21 +80,21 @@ def synthesize_ae_lifecycle(user_goal: str, preset_key: str = "custom") -> dict[
                 "  dimension: product_name { type: string sql: ${TABLE}.product_name ;; }\n"
                 "  dimension: category_name { type: string sql: ${TABLE}.category_name ;; }\n"
                 "  dimension: packaging_size { type: string sql: ${TABLE}.packaging_size ;; }\n\n"
-                "  measure: total_sold_units {\n"
+                "  measure: total_returned_units {\n"
                 "    type: sum\n"
-                "    sql: ${TABLE}.sold_units ;;\n"
-                "    description: 'Total product units sold in the period.'\n"
+                "    sql: ${TABLE}.returned_units ;;\n"
+                "    description: 'Total units returned or refunded by customers.'\n"
                 "  }\n\n"
-                "  measure: total_net_revenue {\n"
-                "    type: sum\n"
-                "    sql: ${TABLE}.net_revenue_eur ;;\n"
-                "    value_format_name: eur\n"
-                "    description: 'Governed Net Realized Revenue after discounts and refunds.'\n"
+                "  measure: return_rate_pct {\n"
+                "    type: number\n"
+                "    sql: ROUND(SUM(${TABLE}.returned_units) * 100.0 / NULLIF(SUM(${TABLE}.sold_units), 0), 2) ;;\n"
+                "    value_format: '0.00\\%'\n"
+                "    description: 'Governed Return Rate Percentage.'\n"
                 "  }\n"
                 "}"
             ),
             "primary_dim": "product_name",
-            "primary_msr": "net_revenue_eur",
+            "primary_msr": "return_rate_pct",
         }
 
     # Case 2: Margin / Profit Intent
@@ -202,75 +206,111 @@ def synthesize_ae_lifecycle(user_goal: str, preset_key: str = "custom") -> dict[
             "primary_msr": "days_of_supply",
         }
 
-    # Case 4: Default or Return Defect Intent (bulk_returns)
-    return {
-        "intent": "bulk_returns",
-        "user_goal": user_goal or "1kg Bulk Packaging Return Diagnosis",
-        "metric_name": "return_rate_pct",
-        "metric_title_en": "Unit Return Rate (%)",
-        "metric_title_zh": "商品退貨率（%）",
-        "formula": "ROUND(SUM(returned_units) * 100.0 / NULLIF(SUM(sold_units), 0), 2)",
-        "numerator": "SUM(returned_units) (Warehouse accepted returns)",
-        "denominator": "NULLIF(SUM(sold_units), 0) (Gross units sold)",
-        "time_grain": "Rolling 90 Days / Selected Range",
-        "stakeholder_q_en": f"Why do bulk packaging items show elevated return rates? (Goal: '{user_goal or '1kg Cashews Return Diagnosis'}')",
-        "stakeholder_q_zh": f"為什麼大包裝堅果出現異常退貨率？（自訂目標：「{user_goal or '1kg 腰果退貨診斷'}」）",
-        "ae_obj_en": "Unify Shopware orders and warehouse quality defect logs to isolate packaging vacuum seal failure rates.",
-        "ae_obj_zh": "跨表串接 Shopware 訂單與倉庫退貨明細，依包裝規格（1kg vs 500g）與退貨原因拆解退貨率與退款金額。",
-        "upstream_table": "raw_shopware_orders + raw_return_logs",
-        "contract_file": "contracts/returns.yaml",
-        "lineage_summary": "Bronze (raw_shopware_orders) ➔ Silver (int_returns_enriched) ➔ Gold (mart_product_performance)",
-        "dbt_sql": (
-            "WITH orders_agg AS (\n"
-            "    SELECT product_id, SUM(sold_units) AS sold_units, SUM(gross_revenue_eur) AS gross_revenue_eur\n"
-            "    FROM {{ ref('raw_shopware_orders') }}\n"
-            "    GROUP BY product_id\n"
-            "),\n"
-            "returns_agg AS (\n"
-            "    SELECT product_id, SUM(returned_units) AS returned_units\n"
-            "    FROM {{ ref('int_returns_enriched') }}\n"
-            "    GROUP BY product_id\n"
-            ")\n"
-            "SELECT\n"
-            "    p.product_id, p.product_name, p.category_name, p.packaging_size,\n"
-            "    COALESCE(o.sold_units, 0) AS sold_units,\n"
-            "    COALESCE(r.returned_units, 0) AS returned_units,\n"
-            "    ROUND(COALESCE(r.returned_units, 0) * 100.0 / NULLIF(o.sold_units, 0), 2) AS return_rate_pct\n"
-            "FROM {{ ref('stg_products') }} p\n"
-            "LEFT JOIN orders_agg o USING (product_id)\n"
-            "LEFT JOIN returns_agg r USING (product_id);"
-        ),
-        "dbt_tests": (
-            "models:\n"
-            "  - name: mart_product_performance\n"
-            "    columns:\n"
-            "      - name: product_id\n"
-            "        tests: [unique, not_null]\n"
-            "      - name: return_rate_pct\n"
-            "        tests:\n"
-            "          - not_null\n"
-            "          - dbt_expectations.expect_column_values_to_be_between:\n"
-            "              min_value: 0\n"
-            "              max_value: 100"
-        ),
-        "lookml_view": (
-            "view: mart_product_performance {\n"
-            "  sql_table_name: `koro_marts.mart_product_performance` ;;\n\n"
-            "  dimension: product_name { type: string sql: ${TABLE}.product_name ;; }\n"
-            "  dimension: packaging_size { type: string sql: ${TABLE}.packaging_size ;; }\n"
-            "  dimension: category_name { type: string sql: ${TABLE}.category_name ;; }\n\n"
-            "  measure: total_sold_units { type: sum sql: ${TABLE}.sold_units ;; }\n"
-            "  measure: total_returned_units { type: sum sql: ${TABLE}.returned_units ;; }\n"
-            "  measure: unit_return_rate {\n"
-            "    type: number\n"
-            "    sql: ROUND(SAFE_DIVIDE(${total_returned_units} * 100.0, ${total_sold_units}), 2) ;;\n"
-            "    value_format: '0.00\\%'\n"
-            "  }\n"
-            "}"
-        ),
-        "primary_dim": "product_name",
-        "primary_msr": "return_rate_pct",
-    }
+    # Case 4: Sales / Revenue / Quarterly Intent
+    if any(k in g for k in ["銷", "營收", "sales", "revenue", "quarter", "季", "訂單", "turnover", "sold"]):
+        return {
+            "intent": "sales_revenue",
+            "user_goal": user_goal,
+            "metric_name": "net_revenue_eur",
+            "metric_title_en": "Quarterly Net Realized Sales (€)",
+            "metric_title_zh": "季度淨銷售額（歐元 €）",
+            "formula": "ROUND(SUM(gross_revenue_eur - discount_eur - refunded_eur), 2)",
+            "numerator": "SUM(gross_revenue_eur - discount_eur - refunded_eur) (Net realized EUR)",
+            "denominator": "None (Absolute Monetary Measure in EUR)",
+            "time_grain": "Quarterly (Q1-Q4) / Selected Range",
+            "stakeholder_q_en": f"What is the total quarterly product sales and sales velocity across categories? (Goal: '{user_goal}')",
+            "stakeholder_q_zh": f"這一季全館各品類與核心商品的銷售額與銷售速度表現如何？（自訂目標：「{user_goal}」）",
+            "ae_obj_en": "Aggregate Bronze Shopware order lines into Gold revenue marts, applying promotional voucher deductions and refund offsets.",
+            "ae_obj_zh": "從 Bronze 層 Shopware 原始訂單明細彙整至 Gold 營運寬表，嚴格扣除促銷折價券與已退款金額，計算真實淨營收。",
+            "upstream_table": "raw_shopware_orders",
+            "contract_file": "contracts/orders_and_revenue_contract.yaml",
+            "lineage_summary": "Bronze (raw_shopware_orders) ➔ dbt Staging (stg_orders) ➔ Gold Mart (mart_product_performance)",
+            "dbt_sql": (
+                "WITH orders_aggregated AS (\n"
+                "    SELECT\n"
+                "        product_id,\n"
+                "        product_name,\n"
+                "        category_name,\n"
+                "        packaging_size,\n"
+                "        SUM(sold_units) AS total_sold_units,\n"
+                "        ROUND(SUM(gross_revenue_eur), 2) AS gross_revenue_eur,\n"
+                "        ROUND(SUM(gross_revenue_eur - discount_eur - refunded_eur), 2) AS net_revenue_eur\n"
+                "    FROM {{ ref('raw_shopware_orders') }}\n"
+                "    WHERE order_date >= DATE_TRUNC(CURRENT_DATE(), QUARTER)\n"
+                "    GROUP BY product_id, product_name, category_name, packaging_size\n"
+                ")\n"
+                "SELECT * FROM orders_aggregated\n"
+                "ORDER BY net_revenue_eur DESC;"
+            ),
+            "dbt_tests": (
+                "models:\n"
+                "  - name: mart_product_performance\n"
+                "    columns:\n"
+                "      - name: product_id\n"
+                "        tests: [unique, not_null]\n"
+                "      - name: net_revenue_eur\n"
+                "        tests:\n"
+                "          - not_null\n"
+                "          - dbt_expectations.expect_column_values_to_be_between:\n"
+                "              min_value: 0"
+            ),
+            "lookml_view": (
+                "view: mart_product_performance {\n"
+                "  sql_table_name: `koro_marts.mart_product_performance` ;;\n\n"
+                "  dimension: product_name { type: string sql: ${TABLE}.product_name ;; }\n"
+                "  dimension: category_name { type: string sql: ${TABLE}.category_name ;; }\n"
+                "  dimension: packaging_size { type: string sql: ${TABLE}.packaging_size ;; }\n\n"
+                "  measure: total_sold_units {\n"
+                "    type: sum\n"
+                "    sql: ${TABLE}.sold_units ;;\n"
+                "    description: 'Total product units sold in the period.'\n"
+                "  }\n\n"
+                "  measure: total_net_revenue {\n"
+                "    type: sum\n"
+                "    sql: ${TABLE}.net_revenue_eur ;;\n"
+                "    value_format_name: eur\n"
+                "    description: 'Governed Net Realized Revenue after discounts and refunds.'\n"
+                "  }\n"
+                "}"
+            ),
+            "primary_dim": "product_name",
+            "primary_msr": "net_revenue_eur",
+        }
+
+    # Case 5: Default preset selection
+    if preset_key == "category_margin":
+        return synthesize_ae_lifecycle("Category Net Margin & Discount Impact", preset_key="custom")
+    if preset_key == "inventory_health":
+        return synthesize_ae_lifecycle("Inventory Availability & Stockout Risk", preset_key="custom")
+
+    # Default to return defect diagnosis
+    return synthesize_ae_lifecycle("1kg Bulk Packaging Return Diagnosis", preset_key="custom")
+
+
+def _render_educational_banner(
+    step_num: int,
+    headline_en: str,
+    headline_zh: str,
+    description_en: str,
+    description_zh: str,
+    is_en: bool,
+) -> None:
+    """Render an educational enterprise banner explaining why this AE step matters for the final dashboard."""
+    h = headline_en if is_en else headline_zh
+    d = description_en if is_en else description_zh
+    st.markdown(
+        f"""
+        <div style="background-color: #F8FAFC; border-left: 4px solid #2563EB; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px;">
+            <div style="font-weight: 600; color: #1E293B; font-size: 0.95rem; margin-bottom: 4px;">
+                💡 {h}
+            </div>
+            <div style="color: #475569; font-size: 0.88rem; line-height: 1.5;">
+                {d}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_step_dialogue_box(
@@ -306,7 +346,7 @@ def render_ae_workflow_stepper(
     data_dict: dict[str, pd.DataFrame],
     is_en: bool = True,
 ) -> None:
-    """Render the dynamic 6-step Analytics Engineering lifecycle with context inheritance and Looker Studio embedding."""
+    """Render the dynamic 6-step Analytics Engineering lifecycle with progressive locking and Looker Studio embedding."""
     st.markdown("---")
     hdr_title = (
         "🚀 End-to-End Analytics Engineering Workflow"
@@ -320,12 +360,20 @@ def render_ae_workflow_stepper(
         else "現代分析工程生命週期：商業需求澄清 → 語意指標合約 → 數據契約血緣 → dbt SQL 轉換 → LookML 建模 → 可自訂 Looker Studio 儀表板"
     )
 
+    # Initialize State Machine Variables
     if "ae_workflow_step" not in st.session_state:
         st.session_state["ae_workflow_step"] = 1
+    if "ae_max_unlocked_step" not in st.session_state:
+        st.session_state["ae_max_unlocked_step"] = 1
+    if "step_1_confirmed" not in st.session_state:
+        st.session_state["step_1_confirmed"] = False
     if "custom_ae_goal" not in st.session_state:
         st.session_state["custom_ae_goal"] = ""
 
-    # Synthesize dynamic state based on active stakeholder input
+    current_step = st.session_state["ae_workflow_step"]
+    max_unlocked = st.session_state["ae_max_unlocked_step"]
+
+    # Synthesize dynamic state strictly when Step 1 is active or confirmed
     current_goal = st.session_state.get("custom_ae_goal", "")
     current_preset = st.session_state.get("ae_workflow_scenario", "bulk_returns")
     state = synthesize_ae_lifecycle(user_goal=current_goal, preset_key=current_preset)
@@ -341,19 +389,47 @@ def render_ae_workflow_stepper(
         ("6. Looker Studio", "6. Looker 視覺化"),
     ]
 
-    current_step = st.session_state["ae_workflow_step"]
-
     for idx, (en_lbl, zh_lbl) in enumerate(step_labels, start=1):
         with step_cols[idx - 1]:
             btn_lbl = en_lbl if is_en else zh_lbl
-            if idx == current_step:
+            is_active = (idx == current_step)
+            is_locked = (idx > max_unlocked)
+
+            if is_active:
                 st.button(f"👉 **{btn_lbl}**", key=f"step_btn_{idx}", use_container_width=True, type="primary")
+            elif is_locked:
+                st.button(f"🔒 {btn_lbl}", key=f"step_btn_{idx}", use_container_width=True, disabled=False, help="Complete previous step to unlock")
             else:
                 if st.button(btn_lbl, key=f"step_btn_{idx}", use_container_width=True):
                     st.session_state["ae_workflow_step"] = idx
                     st.rerun()
 
-    # Step Content Rendering
+    # Sequential State Gate: Check if current step is locked
+    if current_step > max_unlocked:
+        with st.container(border=True):
+            st.markdown(
+                f"""
+                <div style="text-align: center; padding: 40px 20px;">
+                    <div style="font-size: 2.8rem; margin-bottom: 12px;">🔒</div>
+                    <h3 style="color: #1E293B; margin-bottom: 8px;">
+                        {'Step Locked: Prerequisite Sign-Off Required' if is_en else '步驟尚未解鎖：需要先完成前置步驟審查'}
+                    </h3>
+                    <p style="color: #64748B; max-width: 600px; margin: 0 auto 24px auto; font-size: 0.95rem; line-height: 1.6;">
+                        {'Analytics Engineering follows a strict governance lifecycle. Downstream data contracts, dbt models, and Looker dashboards are dynamically compiled from verified business requirements. Please navigate back to Step 1 to confirm your analytical goal.' if is_en else '現代分析工程遵循嚴格的治理生命週期。下游的數據契約、dbt 轉換與 Looker 報表皆是由經過審查的業務需求動態編譯而成。請先返回第一步確認您的商業目標。'}
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            b1, b2, b3 = st.columns([4, 4, 4])
+            with b2:
+                back_label = "⬅️ Return to Step 1 Scoping" if is_en else "⬅️ 返回第一步進行需求對齊"
+                if st.button(back_label, use_container_width=True, type="primary"):
+                    st.session_state["ae_workflow_step"] = 1
+                    st.rerun()
+        return
+
+    # Step Content Rendering (When Unlocked)
     with st.container(border=True):
         if current_step == 1:
             _render_step_1_scoping(state, is_en)
@@ -368,8 +444,8 @@ def render_ae_workflow_stepper(
         elif current_step == 6:
             _render_step_6_customizable_looker(state, adapter, data_dict, is_en)
 
-    # Navigation Footer (Previous / Next)
-    f_col1, f_col2, f_col3 = st.columns([2, 6, 2])
+    # Navigation Footer (Previous / Next with State Machine Transition)
+    f_col1, f_col2, f_col3 = st.columns([3, 5, 4])
     with f_col1:
         if current_step > 1:
             prev_label = "⬅️ Previous Step" if is_en else "⬅️ 上一步"
@@ -377,15 +453,25 @@ def render_ae_workflow_stepper(
                 st.session_state["ae_workflow_step"] = current_step - 1
                 st.rerun()
     with f_col3:
-        if current_step < 6:
-            next_label = "Next Step ➡️" if is_en else "下一步 ➡️"
+        if current_step == 1:
+            confirm_label = "✅ Confirm Scope & Compile Metric ➡️" if is_en else "✅ 確認商業需求並編譯指標 ➡️"
+            if st.button(confirm_label, use_container_width=True, type="primary"):
+                st.session_state["step_1_confirmed"] = True
+                st.session_state["ae_max_unlocked_step"] = max(st.session_state["ae_max_unlocked_step"], 2)
+                st.session_state["ae_workflow_step"] = 2
+                st.rerun()
+        elif current_step < 6:
+            next_label = f"Sign-Off Step {current_step} & Proceed ➡️" if is_en else f"確認第 {current_step} 步並推進 ➡️"
             if st.button(next_label, use_container_width=True, type="primary"):
+                st.session_state["ae_max_unlocked_step"] = max(st.session_state["ae_max_unlocked_step"], current_step + 1)
                 st.session_state["ae_workflow_step"] = current_step + 1
                 st.rerun()
         else:
             reset_label = "🔄 Restart Workflow" if is_en else "🔄 重新啟動流程"
             if st.button(reset_label, use_container_width=True):
                 st.session_state["ae_workflow_step"] = 1
+                st.session_state["ae_max_unlocked_step"] = 1
+                st.session_state["step_1_confirmed"] = False
                 st.session_state["custom_ae_goal"] = ""
                 st.rerun()
 
@@ -396,10 +482,13 @@ def _render_step_1_scoping(state: dict[str, Any], is_en: bool) -> None:
         if is_en
         else "#### 🎯 第一步：商業需求澄清與利害關係人對齊"
     )
-    st.markdown(
-        "As an **Analytics Engineer**, we interview stakeholders to identify concrete operational pain points and translate them into governed analytical goals."
-        if is_en
-        else "作為 **Analytics Engineer（分析工程師）**，第一步是與業務主管/利害關係人對齊具體痛點，將模糊的商業想法轉化為清晰的分析目標。"
+    _render_educational_banner(
+        step_num=1,
+        headline_en="Why This Step Matters: The Business Foundation",
+        headline_zh="為什麼這一步至關重要：業務基礎定義",
+        description_en="Every Analytics Engineering project starts with human alignment. Unclear scoping produces conflicting dashboards. Here, we clarify the business pain point and define the target analytical entity before writing a single line of SQL.",
+        description_zh="所有分析工程的起點都是人與業務的對齊。模糊的需求是報表混亂的元兇。在此步驟，AE 將業務痛點精確轉譯為治理目標，在撰寫任何 SQL 前鎖定分析實體。",
+        is_en=is_en,
     )
 
     scenario_options = {
@@ -425,13 +514,13 @@ def _render_step_1_scoping(state: dict[str, Any], is_en: bool) -> None:
     )
     st.session_state["ae_workflow_scenario"] = selected
 
-    # Custom Goal Input
+    # Single Unified Input Box for Step 1 (Eliminates confusing duplicate bottom box)
     custom_goal_input = st.text_input(
         "💬 Or customize your own analytical goal & criteria (可自由輸入您的自訂需求與意見):"
         if is_en
         else "💬 或自由輸入您的自訂商業目標、關注維度與意見：",
         value=st.session_state.get("custom_ae_goal", ""),
-        placeholder="例如：我想知道這一季產品的銷售額，或是特定品類毛利...",
+        placeholder="例如：我想知道這個季度產生多少退款訂單，或是特定品類毛利...",
         key="custom_goal_text_input",
     )
     if custom_goal_input != st.session_state.get("custom_ae_goal", ""):
@@ -444,13 +533,6 @@ def _render_step_1_scoping(state: dict[str, Any], is_en: bool) -> None:
         f"🎯 **{'AE Objective' if is_en else '分析工程目標'}**: {state['ae_obj_en'] if is_en else state['ae_obj_zh']}"
     )
 
-    _render_step_dialogue_box(
-        step_num=1,
-        step_title="Business Scoping Alignment" if is_en else "商業需求對齊確認",
-        inherited_summary=f"Active Goal: {state['user_goal'] or 'Standard Scenario'}",
-        is_en=is_en,
-    )
-
 
 def _render_step_2_metric_contract(state: dict[str, Any], is_en: bool) -> None:
     st.markdown(
@@ -458,20 +540,44 @@ def _render_step_2_metric_contract(state: dict[str, Any], is_en: bool) -> None:
         if is_en
         else "#### 📐 第二步：指標口徑公式與語意合約鎖定"
     )
-    st.markdown(
-        "Analytics Engineers eliminate metric ambiguity by defining strict numerator, denominator, and aggregation formulas in `semantic/business_rules.yaml`."
-        if is_en
-        else "AE 必須在代碼中消除口徑模糊（避免不同部門各算各的），並將單一真理口徑固化在 `semantic/business_rules.yaml`。"
+    _render_educational_banner(
+        step_num=2,
+        headline_en="How This Connects to Your Dashboard: Unified Truth",
+        headline_zh="這一步如何連結至最終圖表：單一指標真理口徑",
+        description_en="Disagreements on revenue or return rates happen when teams calculate numbers differently. By formalizing numerators, denominators, and NULLIF guards in the semantic layer, we guarantee that Step 6's Looker charts match financial reality.",
+        description_zh="財務與營運部門對數字產生分歧，往往是因為公式定義不同。在此步驟將分子、分母與防除以零邏輯固化於語意層，能確保第 6 步 Looker 圖表中的數字與官方財務報表 100% 一致。",
+        is_en=is_en,
     )
 
-    m_col1, m_col2 = st.columns(2)
+    # CSS to guarantee no text truncation in code blocks
+    st.markdown(
+        """
+        <style>
+        .metric-code-container {
+            background-color: #F1F5F9;
+            border: 1px solid #CBD5E1;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: monospace;
+            font-size: 0.88rem;
+            color: #0F172A;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    m_col1, m_col2 = st.columns([6, 4])
     with m_col1:
         st.markdown(
             f"**{'Official Metric Formula' if is_en else '官方指標計算公式'}** (`{state['metric_name']}`):"
         )
-        st.code(
-            f"{state['metric_name']} = {state['formula']}",
-            language="sql",
+        st.markdown(
+            f'<div class="metric-code-container">{state["metric_name"]} = {state["formula"]}</div>',
+            unsafe_allow_html=True,
         )
         st.markdown(f"- **Numerator (分子)**: `{state['numerator']}`")
         st.markdown(f"- **Denominator (分母)**: `{state['denominator']}`")
@@ -501,10 +607,13 @@ def _render_step_3_data_contract(state: dict[str, Any], adapter: BaseCockpitAdap
         if is_en
         else "#### 🧬 第三步：數據契約、欄位血緣與 GDPR 隱私審查"
     )
-    st.markdown(
-        "Verify upstream table contracts, schema compatibility, and enforce GDPR compliance (`contains_pii: false`) before ingestion."
-        if is_en
-        else "在進入 SQL 轉換前，AE 必須校驗源頭資料契約（Data Contracts），確保資料欄位格式正確且 100% 杜絕個資洩漏。"
+    _render_educational_banner(
+        step_num=3,
+        headline_en="How This Connects to Your Dashboard: Data Quality & Legal Guardrails",
+        headline_zh="這一步如何連結至最終圖表：源頭資料品質與合規守門員",
+        description_en="If upstream Shopware or ERP systems change column formats without notice, dashboards break silently. Data Contracts enforce strict schemas at the Bronze ingestion boundary, while ensuring GDPR privacy compliance (no PII leakage).",
+        description_zh="若源頭 Shopware 或 ERP 系統任意更動欄位格式，報表就會無預警壞損。數據契約在 Bronze 銅牌層設立門禁，校驗欄位型態，同時確保沒有使用者個資（PII）流入後續報表。",
+        is_en=is_en,
     )
 
     st.markdown(
@@ -535,10 +644,13 @@ def _render_step_4_dbt_transformation(state: dict[str, Any], adapter: BaseCockpi
         if is_en
         else "#### ⚙️ 第四步：SQL 轉換模型與 dbt 自動化資料品質測試"
     )
-    st.markdown(
-        "Write idempotent dbt SQL models to aggregate Silver tables into Gold Marts, paired with automated dbt tests."
-        if is_en
-        else "撰寫等冪的 dbt SQL 模型將源頭數據加工為金牌寬表，並配置自動化 dbt test 測試套件。"
+    _render_educational_banner(
+        step_num=4,
+        headline_en="How This Connects to Your Dashboard: High-Performance Data Marts",
+        headline_zh="這一步如何連結至最終圖表：高效能金牌數據寬表",
+        description_en="Dashboards should never run raw, expensive queries against messy bronze data. This idempotent dbt SQL model pre-aggregates and materializes Gold Mart tables, ensuring Step 6 Looker charts load in milliseconds at minimal FinOps cost.",
+        description_zh="BI 報表絕不能直接向原始資料庫下達昂貴且緩慢的 SQL。dbt 模型將業務規則加工並物化為金牌層寬表，確保第 6 步的 Looker 儀表板能在毫秒級迅速載入，大幅降低雲端運算費用。",
+        is_en=is_en,
     )
 
     t_col1, t_col2 = st.columns([6, 4])
@@ -563,10 +675,13 @@ def _render_step_5_lookml_modeling(state: dict[str, Any], adapter: BaseCockpitAd
         if is_en
         else "#### 📜 第五步：LookML 語意建模（Semantic Layer as Code）"
     )
-    st.markdown(
-        "LookML models dimensions and measures as version-controlled code, allowing stakeholders to self-serve in Looker Studio without writing raw SQL."
-        if is_en
-        else "LookML 將商業維度與指標寫成版本控管的代碼，讓業務端能自由拖拉探索，同時杜絕自創公式。"
+    _render_educational_banner(
+        step_num=5,
+        headline_en="How This Connects to Your Dashboard: Self-Serve Power for Stakeholders",
+        headline_zh="這一步如何連結至最終圖表：賦能業務端的自助拖拉語意層",
+        description_en="LookML defines the exact dimensions (e.g. Category, Packaging Size) and measures (e.g. Return Rate, Net Revenue) available to business users. It bridges the gap between raw SQL tables and the drag-and-drop Looker Studio interface in Step 6.",
+        description_zh="LookML 將數據庫欄位定義為受控管的維度（如品類、包裝規格）與度量（如退貨率、營收）。它扮演橋樑，決定了利害關係人在第 6 步 Looker Studio 畫面上能夠自由拖拉哪些分析欄位。",
+        is_en=is_en,
     )
 
     st.caption("📄 `warehouse/lookml/mart_product_performance.view.lkml`")
@@ -606,6 +721,24 @@ def _render_step_6_customizable_looker(
         is_en=is_en,
     )
 
+    # Permission Guidance & Mode Toggle
+    perm_col1, perm_col2 = st.columns([7, 3])
+    with perm_col1:
+        st.markdown(
+            "🔒 **Google Looker Studio Embedding Permissions Notice**:\n"
+            "Google Looker Studio embeds require the underlying report to have sharing set to **'Anyone with the link can view'** and **'Enable embedding'** toggled ON in File → Embed Report. If your organization enforces SSO or blocks 3rd-party cookies, please use the direct link or toggle Safe Preview below."
+            if is_en
+            else "🔒 **Google Looker Studio 內嵌權限說明**：\n"
+            "Google Looker Studio 的 iframe 內嵌機制要求報表必須在 Google 後台設定為**「知道連結的任何人皆可檢視」**，並在「檔案 ➔ 嵌入報表」中開啟。若您遇到公司組織權限或第三方 Cookie 限制，可直接點擊全螢幕開啟，或切換下方之安全預覽模式。"
+        )
+    with perm_col2:
+        safe_mode = st.toggle(
+            "Safe Interactive View" if is_en else "安全互動預覽模式",
+            value=st.session_state.get("looker_safe_mode", False),
+            key="looker_safe_mode_toggle",
+            help="Toggle this if Google shows 'Can't access report' due to corporate cookie permissions.",
+        )
+
     # Resolve Looker Studio Embed URL
     default_embed = (
         getattr(adapter, "looker_embed_url", "")
@@ -621,8 +754,9 @@ def _render_step_6_customizable_looker(
     if embed_url:
         st.session_state["custom_looker_studio_url"] = embed_url
 
-    # Action Toolbar
     clean_url = embed_url.replace("/embed", "").strip() or "https://lookerstudio.google.com"
+
+    # Action Toolbar
     b_col1, b_col2, b_col3 = st.columns(3)
     with b_col1:
         st.link_button(
@@ -645,11 +779,28 @@ def _render_step_6_customizable_looker(
             use_container_width=True,
         )
 
-    # Real Looker Studio Embed (Iframe, 100% elimination of Plotly Express)
-    st.info(
-        f"🔗 **{'Live Looker Studio Embed Active' if is_en else 'Looker Studio 實時內嵌儀表板加載中'}**: `{clean_url}`"
-    )
-    components.iframe(src=embed_url, height=720, scrolling=True)
+    if safe_mode:
+        st.markdown(
+            f"""
+            <div style="background-color: #F8FAFC; border: 1px solid #CBD5E1; border-radius: 8px; padding: 24px; text-align: center; margin: 16px 0;">
+                <div style="font-size: 2rem; margin-bottom: 8px;">📊</div>
+                <h4 style="color: #1E293B; margin-bottom: 8px;">Looker Studio Governed Operational Visualizer</h4>
+                <p style="color: #64748B; font-size: 0.9rem; max-width: 650px; margin: 0 auto 16px auto;">
+                    Displaying active compiled metric: <strong>{state['metric_name']}</strong> across <strong>mart_product_performance</strong>.<br>
+                    To view the native Google-hosted canvas, click below or ensure Google login authorization.
+                </p>
+                <a href="{clean_url}" target="_blank" style="background-color: #2563EB; color: white; padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 0.9rem; font-weight: 500;">
+                    🚀 Open Governed Canvas in Google Looker Studio
+                </a>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info(
+            f"🔗 **{'Live Looker Studio Embed Active' if is_en else 'Looker Studio 實時內嵌儀表板加載中'}**: `{clean_url}`"
+        )
+        components.iframe(src=embed_url, height=720, scrolling=True)
 
     # Looker Underneath Data Table (Tabular Data Verification)
     with st.expander(
