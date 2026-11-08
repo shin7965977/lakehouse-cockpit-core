@@ -92,7 +92,7 @@ def test_sql_sandbox_executes_safe_queries_and_blocks_destructive_ddl() -> None:
 
 
 def test_gemini_key_validation_and_ae_workflow_flag() -> None:
-    """Verify Gemini API key preflight validation and adapter AE workflow capability."""
+    """Verify Gemini API key preflight validation and adapter AE schema designer capability."""
     from components.ai_drawer import _validate_gemini_key
 
     # Invalid keys
@@ -104,7 +104,7 @@ def test_gemini_key_validation_and_ae_workflow_flag() -> None:
     assert _validate_gemini_key("AIzaSyD-1234567890abcdefghijklmnop") is True
 
     adapter = DummyAdapter()
-    assert adapter.supports_ae_workflow is False
+    assert adapter.supports_schema_designer is True
 
 
 def test_ae_workflow_synthesizes_dynamic_context_for_sales() -> None:

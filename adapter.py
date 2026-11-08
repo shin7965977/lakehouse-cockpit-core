@@ -249,9 +249,9 @@ class BaseCockpitAdapter(ABC):
         return False
 
     @property
-    def supports_ae_workflow(self) -> bool:
-        """Whether this adapter supports the 6-step End-to-End Analytics Engineering Workflow."""
-        return False
+    def supports_schema_designer(self) -> bool:
+        """Whether this adapter supports the Autonomous Schema Designer & dbt Engine."""
+        return True
 
     def handle_spec_inquiry_turn(
         self,

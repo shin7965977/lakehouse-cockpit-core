@@ -125,13 +125,13 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # 2. Medallion Layer Selector + Looker Enterprise Option
+        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer Option
         st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
         nav_options = ["gold", "silver", "bronze"]
         if getattr(adapter, "supports_looker", False):
             nav_options.append("looker")
-        if getattr(adapter, "supports_ae_workflow", False):
-            nav_options.append("workflow")
+        if getattr(adapter, "supports_schema_designer", False):
+            nav_options.append("schema_designer")
 
         active_view_saved = st.session_state.get("cockpit_active_view", "gold")
         default_idx = nav_options.index(active_view_saved) if active_view_saved in nav_options else 0
@@ -142,10 +142,10 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             index=default_idx,
             format_func=lambda x: {
                 "gold": "🥇 Gold Marts (Business Aggregations & KPIs)",
-                "silver": "🥈 Silver Layer (Normalized Facts & Dimensions)",
+                "silver": "🥈 Silver Layer (Kimball Conformed Facts & Dims)",
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
                 "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
-                "workflow": "🚀 AE Guided Workflow (6-Step Lifecycle & Customizable Looker)",
+                "schema_designer": "🏗️ Autonomous Schema Designer & dbt Engine",
             }[x],
             horizontal=True,
             key="main_cockpit_view_selector",
@@ -154,16 +154,16 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # Render AE Guided Workflow or Looker Native View
-        if selected_layer == "workflow":
+        # Render Autonomous Schema Designer or Looker Native View
+        if selected_layer == "schema_designer":
             try:
-                from .components.ae_workflow import render_ae_workflow_stepper
+                from .components.schema_designer import render_schema_designer_view
             except (ImportError, ValueError):
                 try:
-                    from components.ae_workflow import render_ae_workflow_stepper
+                    from components.schema_designer import render_schema_designer_view
                 except (ImportError, ValueError):
-                    from cockpit_core.components.ae_workflow import render_ae_workflow_stepper
-            render_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)
+                    from cockpit_core.components.schema_designer import render_schema_designer_view
+            render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
         elif selected_layer == "looker":
             render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
         else:
