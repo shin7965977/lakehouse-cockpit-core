@@ -96,7 +96,8 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         if is_data_center_active:
             if st.button("⬅️ Return to Medallion BI", use_container_width=True):
-                st.session_state["cockpit_active_view"] = "gold"
+                st.session_state["cockpit_active_view"] = "silver"
+                st.session_state["main_cockpit_view_selector"] = "silver"
                 st.rerun()
 
     # Load Domain Data strictly filtered by active Date Range
@@ -141,7 +142,8 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer + Data Center Option
         st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
-        nav_options = ["gold", "silver", "bronze"]
+        # Gold Marts removed: Conforms strictly to Kimball where Silver is the atomic truth
+        nav_options = ["silver", "bronze"]
         if getattr(adapter, "supports_looker", False):
             nav_options.append("looker")
         if getattr(adapter, "supports_schema_designer", False):
@@ -149,9 +151,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         if getattr(adapter, "supports_data_center", True):
             nav_options.append("data_center")
 
-        current_view = st.session_state.get("cockpit_active_view", "gold")
+        current_view = st.session_state.get("cockpit_active_view", "silver")
         if current_view not in nav_options:
-            current_view = "gold"
+            current_view = "silver"
         default_idx = nav_options.index(current_view)
 
         def _on_view_change():
@@ -162,7 +164,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             options=nav_options,
             index=default_idx,
             format_func=lambda x: {
-                "gold": "🥇 Gold Marts (Business Aggregations & KPIs)",
                 "silver": "🥈 Silver Layer (Kimball Conformed Facts & Dims)",
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
                 "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",

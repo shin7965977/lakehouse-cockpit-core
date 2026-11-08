@@ -27,7 +27,8 @@ def render_data_center_view() -> None:
         )
     with view_col2:
         if st.button("⬅️ Back to BI Dashboard", use_container_width=True):
-            st.session_state["cockpit_active_view"] = "gold"
+            st.session_state["cockpit_active_view"] = "silver"
+            st.session_state["main_cockpit_view_selector"] = "silver"
             st.rerun()
 
     # Direct Fullscreen Embed (No useless metric cards or redundant boxes)
