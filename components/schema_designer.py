@@ -222,6 +222,17 @@ def render_schema_designer_view(
                 """
                 <div style="background-color: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 16px; margin: 16px 0;">
                     <div style="font-weight: 700; color: #166534; font-size: 1.05rem; margin-bottom: 4px;">
+                        💬 Gemini Socratic Intent Clarification
+                    </div>
+                    <div style="color: #15803D; font-size: 0.88rem;">
+                        Gemini has inspected lakehouse metadata and physical watermarks. Please confirm key decisions to dynamically synthesize production-ready dbt models:
+                    </div>
+                </div>
+                """
+                if is_en
+                else """
+                <div style="background-color: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                    <div style="font-weight: 700; color: #166534; font-size: 1.05rem; margin-bottom: 4px;">
                         💬 Gemini 蘇格拉底式意圖澄清 (Socratic Intent Clarification)
                     </div>
                     <div style="color: #15803D; font-size: 0.88rem;">
