@@ -11,7 +11,12 @@ import streamlit as st
 import pandas as pd
 from typing import Any
 
-from ai.schema_engine import DatabaseReflectionService, compile_dbt_and_schema_contract
+from ai.schema_engine import DatabaseReflectionService
+from ai.socratic_copilot import (
+    analyze_socratic_inquiry,
+    synthesize_dynamic_dbt_model,
+    SocraticSessionState,
+)
 
 
 def render_schema_designer_view(
@@ -40,7 +45,7 @@ def render_schema_designer_view(
     c1.metric("Reflected Dimensions", f"{len(models_meta['dimensions'])} Models", delta="dim_products/cat/cust")
     c2.metric("Reflected Facts", f"{len(models_meta['facts'])} Models", delta="fct_items/orders/returns")
     c3.metric("GDPR Boundary", "Enforced", delta="100% No PII")
-    c4.metric("Engine Runtime", "DuckDB In-Memory", delta="Sub-second Dry-run")
+    c4.metric("Engine Runtime", "Physical DuckDB", delta="Real Lakehouse Dry-run")
 
     st.markdown("---")
 
@@ -51,43 +56,157 @@ def render_schema_designer_view(
         else "#### 💬 1. 利害關係人商業目標與蘇格拉底式定錨"
     )
 
-    preset_options = {
-        "bulk_returns": (
-            "🌰 1kg Bulk Packaging Return Diagnosis (Operations Lead: Return Rate by Packaging Size)",
-            "🌰 1kg 堅果大包裝退貨率異常歸因（營運主管：依包裝規格拆解退貨率與破損）",
-        ),
-        "category_margin": (
-            "💰 Category Margin Dilution (Finance Lead: Net Contribution Margin after Vouchers)",
-            "💰 品類毛利稀釋排行（財務主管：扣除促銷折價券後之淨貢獻毛利率）",
-        ),
-    }
-
-    selected_preset = st.selectbox(
-        "Select Business Scenario or Input Custom Goal:" if is_en else "選擇預設商業場景或自由輸入目標：",
-        options=list(preset_options.keys()),
-        format_func=lambda x: preset_options[x][0] if is_en else preset_options[x][1],
+    prompt_return = (
+        "🌰 1kg 堅果大包裝退貨率異常歸因（營運主管：依包裝規格拆解退貨率與破損）"
+        if not is_en
+        else "🌰 1kg Bulk Packaging Return Diagnosis (Operations Lead: Return Rate by Packaging Size)"
+    )
+    prompt_margin = (
+        "💰 品類毛利稀釋排行（財務主管：扣除促銷折價券後之淨貢獻毛利率）"
+        if not is_en
+        else "💰 Category Margin Dilution (Finance Lead: Net Contribution Margin after Vouchers)"
     )
 
-    custom_input = st.text_input(
-        "Custom Analytical Goal & Criteria:" if is_en else "自訂分析目標與細節條件：",
-        value=st.session_state.get("schema_designer_goal", preset_options[selected_preset][0]),
-        placeholder="e.g., I want to analyze return rates across packaging sizes and isolate defects...",
+    # State initialization
+    if "schema_designer_goal" not in st.session_state:
+        st.session_state["schema_designer_goal"] = prompt_return
+
+    st.caption(
+        "點擊下方預設場景快速填入，或直接在下方輸入框自由輸入自訂目標："
+        if not is_en
+        else "Click a preset scenario button to populate, or type your custom analytical goal below:"
+    )
+
+    # 2 Quick-Preset Buttons
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button(
+            "🌰 問題 1：堅果包裝退貨診斷" if not is_en else "🌰 Problem 1: Bulk Packaging Return Diagnosis",
+            use_container_width=True,
+            help="點擊快速帶入堅果大包裝退貨歸因分析 Prompt" if not is_en else "Click to populate return diagnosis prompt",
+        ):
+            st.session_state["schema_designer_goal"] = prompt_return
+            st.session_state["active_socratic_session"] = None
+            st.session_state["schema_design_result"] = None
+            st.rerun()
+
+    with btn_col2:
+        if st.button(
+            "💰 問題 2：品類促銷毛利排行" if not is_en else "💰 Problem 2: Category Margin Dilution",
+            use_container_width=True,
+            help="點擊快速帶入品類淨利率與折價券稀釋分析 Prompt" if not is_en else "Click to populate margin dilution prompt",
+        ):
+            st.session_state["schema_designer_goal"] = prompt_margin
+            st.session_state["active_socratic_session"] = None
+            st.session_state["schema_design_result"] = None
+            st.rerun()
+
+    # Unified Single Input Box
+    user_goal_input = st.text_input(
+        "Custom Analytical Goal & Criteria (自訂分析目標與細節條件)：" if not is_en else "Custom Analytical Goal & Criteria:",
+        value=st.session_state["schema_designer_goal"],
+        placeholder="例如：我想知道這個月的產品退款紀錄、或計算各品類淨毛利率..." if not is_en else "e.g., I want to know this month's product refund records...",
         key="schema_designer_custom_goal",
     )
+    if user_goal_input != st.session_state["schema_designer_goal"]:
+        st.session_state["schema_designer_goal"] = user_goal_input
+        st.session_state["active_socratic_session"] = None
+        st.session_state["schema_design_result"] = None
 
     # Action Trigger
     btn_label = "🚀 Synthesize & Validate dbt Pipeline" if is_en else "🚀 合成並驗證 dbt 數據管線"
     if st.button(btn_label, type="primary", use_container_width=True):
-        st.session_state["active_schema_design_trigger"] = True
+        current_query = st.session_state.get("schema_designer_goal", "").strip()
+        with st.spinner("AI Socratic Agent 正在解析商業目標與湖倉數據邊界..."):
+            session = analyze_socratic_inquiry(current_query, reflection=reflection)
+            st.session_state["active_socratic_session"] = session
 
-    if st.session_state.get("active_schema_design_trigger", False):
-        with st.spinner("Reflecting on Silver schema, compiling dbt model, and executing DuckDB dry-run..."):
-            result = compile_dbt_and_schema_contract(
-                scenario_key=selected_preset,
-                user_goal=custom_input,
-                reflection=reflection,
+            if not session.needs_clarification and not session.is_out_of_domain:
+                # Direct synthesis if unambiguous
+                res = synthesize_dynamic_dbt_model(current_query, session.locked_decisions, reflection)
+                st.session_state["schema_design_result"] = res
+
+    # 1. Handle Socratic Clarification Dialogue State
+    active_session: SocraticSessionState | None = st.session_state.get("active_socratic_session")
+    if active_session:
+        if active_session.is_out_of_domain:
+            st.markdown(
+                f"""
+                <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                    <div style="font-weight: 700; color: #991B1B; font-size: 1rem; margin-bottom: 6px;">
+                        ⛔ 無法處理該請求：輸入超出湖倉分析範疇 (Out of Analytical Domain)
+                    </div>
+                    <div style="color: #7F1D1D; font-size: 0.9rem; line-height: 1.5;">
+                        系統檢測到您的輸入：「<strong>{active_session.user_goal}</strong>」與當前湖倉數據主題（訂單銷售、商品退貨、品類毛利、包裝破損規格）無關。<br>
+                        為了落實 <strong>Zero-Facade 架構治理</strong>，系統拒絕模擬偽造不存在的數據血緣與 SQL 運算。
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.85rem; color: #B91C1C;">
+                        💡 <strong>建議做法</strong>：請點擊上方預設場景按鈕，或輸入與 <code>fct_order_items</code>、<code>fct_returns</code>、<code>dim_products</code> 相關的商業分析指標。
+                    </div>
+                </div>
+                """
+                if not is_en
+                else f"""
+                <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                    <div style="font-weight: 700; color: #991B1B; font-size: 1rem; margin-bottom: 6px;">
+                        ⛔ Request Rejected: Out of Analytical Domain
+                    </div>
+                    <div style="color: #7F1D1D; font-size: 0.9rem; line-height: 1.5;">
+                        The input inquiry '<strong>{active_session.user_goal}</strong>' is not related to any conformed lakehouse entities (orders, returns, margins, or packaging).<br>
+                        In adherence to the <strong>Zero-Facade Governance Standard</strong>, the copilot will not fabricate fake models or dry-run simulations.
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.85rem; color: #B91C1C;">
+                        💡 <strong>Suggestion</strong>: Please click one of the preset buttons above or provide analytical criteria for orders, returns, or margins.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
+        elif active_session.needs_clarification and not st.session_state.get("schema_design_result"):
+            st.markdown(
+                """
+                <div style="background-color: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                    <div style="font-weight: 700; color: #166534; font-size: 1.05rem; margin-bottom: 4px;">
+                        💬 Gemini 蘇格拉底式意圖澄清 (Socratic Intent Clarification)
+                    </div>
+                    <div style="color: #15803D; font-size: 0.88rem;">
+                        Gemini 已檢測實體湖倉元數據與時間水位，請確認以下關鍵決策，以動態合成高保真生產級 dbt 模型：
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            user_choices = dict(active_session.locked_decisions)
+            for q in active_session.questions:
+                st.markdown(f"**{q.title}**")
+                st.caption(q.explanation)
+                opt_labels = [opt["label"] for opt in q.options]
+                opt_map = {opt["label"]: opt["value"] for opt in q.options}
+                chosen_label = st.radio(
+                    f"選擇 {q.dimension_type} 方案：",
+                    options=opt_labels,
+                    index=0,
+                    key=f"socratic_q_{q.question_id}",
+                    label_visibility="collapsed",
+                )
+                user_choices[q.dimension_type] = opt_map[chosen_label]
+                st.markdown("")
+
+            if st.button("⚡ 確認定錨並動態編譯管線 (Confirm & Compile dbt Pipeline)", type="primary", use_container_width=True):
+                with st.spinner("Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."):
+                    res = synthesize_dynamic_dbt_model(
+                        user_goal=active_session.user_goal,
+                        decisions=user_choices,
+                        reflection=reflection,
+                    )
+                    st.session_state["schema_design_result"] = res
+                    st.rerun()
+
+    # 2. Render Successful Compilation Output
+    result = st.session_state.get("schema_design_result")
+    if result and not result.is_rejected:
         st.success(f"✅ Pipeline Compiled & Governed: `{result.spec_id}`")
 
         # Observability Audit Trace
