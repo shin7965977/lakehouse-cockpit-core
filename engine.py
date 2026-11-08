@@ -92,11 +92,13 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         dc_btn_type = "primary" if is_data_center_active else "secondary"
         if st.button("🏛️ Open Data Center (dbt & Elementary)", use_container_width=True, type=dc_btn_type):
             st.session_state["cockpit_active_view"] = "data_center"
+            st.session_state["main_cockpit_view_selector"] = "data_center"
             st.rerun()
 
         if is_data_center_active:
             if st.button("⬅️ Return to Medallion BI", use_container_width=True):
                 st.session_state["cockpit_active_view"] = "gold"
+                st.session_state["main_cockpit_view_selector"] = "gold"
                 st.rerun()
 
     # Load Domain Data strictly filtered by active Date Range
@@ -111,7 +113,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
     # Main BI Dashboard
     with main_col:
-        header_col, toggle_col = st.columns([7.5, 2.5])
+        header_col, toggle_col = st.columns([9.2, 0.8])
         with header_col:
             st.title(adapter.brand_title)
             st.caption(
@@ -119,9 +121,10 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             )
         with toggle_col:
             drawer_open = st.session_state["advisor_drawer_open"]
-            toggle_label = "✖️ Close Copilot" if drawer_open else "🤖 Open Copilot"
-            toggle_btn_type = "secondary" if drawer_open else "primary"
-            if st.button(toggle_label, use_container_width=True, type=toggle_btn_type):
+            # Icon-only collapse button matching Streamlit chevron style (<< / >>)
+            toggle_label = "»" if drawer_open else "«"
+            toggle_help = "Collapse Copilot Drawer" if drawer_open else "Expand Copilot Drawer"
+            if st.button(toggle_label, help=toggle_help, key="copilot_chevron_toggle_btn", use_container_width=True):
                 st.session_state["advisor_drawer_open"] = not drawer_open
                 st.rerun()
 
@@ -146,7 +149,12 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
         if getattr(adapter, "supports_data_center", True):
             nav_options.append("data_center")
 
-        active_view_saved = st.session_state.get("cockpit_active_view", "gold")
+        if "main_cockpit_view_selector" not in st.session_state:
+            st.session_state["main_cockpit_view_selector"] = st.session_state.get("cockpit_active_view", "gold")
+        elif st.session_state.get("cockpit_active_view") and st.session_state["cockpit_active_view"] != st.session_state["main_cockpit_view_selector"]:
+            st.session_state["main_cockpit_view_selector"] = st.session_state["cockpit_active_view"]
+
+        active_view_saved = st.session_state.get("main_cockpit_view_selector", "gold")
         default_idx = nav_options.index(active_view_saved) if active_view_saved in nav_options else 0
 
         selected_layer = st.radio(
