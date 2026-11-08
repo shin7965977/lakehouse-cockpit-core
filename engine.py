@@ -84,21 +84,22 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             else None
         )
 
-        # Sidebar Navigation: Direct Data Center Shortcut
+        # Sidebar Navigation: Direct Data Center Link (Opens in New Tab like a real Portal)
         st.markdown("---")
         st.subheader("🏛️ Data Governance")
-        st.caption("Centralized Catalog & Telemetry")
-        is_data_center_active = st.session_state.get("cockpit_active_view") == "data_center"
-        dc_btn_type = "primary" if is_data_center_active else "secondary"
-        if st.button("🏛️ Open Data Center (dbt & Elementary)", use_container_width=True, type=dc_btn_type):
-            st.session_state["cockpit_active_view"] = "data_center"
-            st.rerun()
-
-        if is_data_center_active:
-            if st.button("⬅️ Return to Medallion BI", use_container_width=True):
-                st.session_state["cockpit_active_view"] = "silver"
-                st.session_state["main_cockpit_view_selector"] = "silver"
-                st.rerun()
+        st.caption("Centralized Catalog & Observability")
+        portal_url = getattr(
+            adapter,
+            "data_center_portal_url",
+            "https://storage.googleapis.com/de-consulting-508822_cloudbuild/technical/en/portal.html",
+        )
+        st.link_button(
+            "🏛️ Open Data Center (dbt & Elementary) ↗",
+            url=portal_url,
+            use_container_width=True,
+            type="primary",
+            help="Opens the official independent DataOps Unified Portal in a new browser tab.",
+        )
 
     # Load Domain Data strictly filtered by active Date Range
     data_dict = adapter.load_domain_data(start_date=start_date, end_date=end_date)
@@ -140,7 +141,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer + Data Center Option
+        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer
         st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
         # Gold Marts removed: Conforms strictly to Kimball where Silver is the atomic truth
         nav_options = ["silver", "bronze"]
@@ -148,8 +149,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             nav_options.append("looker")
         if getattr(adapter, "supports_schema_designer", False):
             nav_options.append("schema_designer")
-        if getattr(adapter, "supports_data_center", True):
-            nav_options.append("data_center")
 
         current_view = st.session_state.get("cockpit_active_view", "silver")
         if current_view not in nav_options:
@@ -168,7 +167,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
                 "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
                 "schema_designer": "🏗️ Autonomous Schema Designer & dbt Engine",
-                "data_center": "🏛️ Data Center (dbt Docs & Elementary)",
             }[x],
             horizontal=True,
             key="main_cockpit_view_selector",
@@ -178,17 +176,8 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # Render Autonomous Schema Designer, Looker Native View, or Data Center
-        if selected_layer == "data_center":
-            try:
-                from .components.data_center import render_data_center_view
-            except (ImportError, ValueError):
-                try:
-                    from components.data_center import render_data_center_view
-                except (ImportError, ValueError):
-                    from cockpit_core.components.data_center import render_data_center_view
-            render_data_center_view()
-        elif selected_layer == "schema_designer":
+        # Render Autonomous Schema Designer or Looker Native View
+        if selected_layer == "schema_designer":
             try:
                 from .components.schema_designer import render_schema_designer_view
             except (ImportError, ValueError):
