@@ -193,19 +193,29 @@ class BaseCockpitAdapter(ABC):
         if forbidden:
             raise ValueError(f"Security Alert: Destructive command '{forbidden.group(0)}' is prohibited in Read-Only Sandbox.")
 
-        # Remove backticks and normalize schema qualifications for in-memory execution
-        cleaned_sql = re.sub(r"`[^`]*\b([a-zA-Z0-9_]+)`", r"\1", sql_query)
+        # 1. Normalize dbt Jinja macros: strip {{ config(...) }} and resolve {{ ref('table') }} -> table
+        cleaned_sql = re.sub(r"\{\{\s*config\([^)]*?\)\s*\}\}", "", sql_query, flags=re.DOTALL)
+        cleaned_sql = re.sub(r"\{\{\s*ref\(\s*['\"]([^'\"]+)['\"]\s*\)\s*\}\}", r"\1", cleaned_sql)
+        cleaned_sql = re.sub(r"\{%.*?%\}", "", cleaned_sql, flags=re.DOTALL)
+
+        # 2. Remove backticks and normalize schema qualifications for in-memory execution
+        cleaned_sql = re.sub(r"`[^`]*\b([a-zA-Z0-9_]+)`", r"\1", cleaned_sql)
         cleaned_sql = re.sub(r"\b[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
-        cleaned_sql = re.sub(r"\b[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql)
+        cleaned_sql = re.sub(r"\b(?:main_silver|main_bronze|main_gold)\.([a-zA-Z0-9_]+)\b", r"\1", cleaned_sql, flags=re.IGNORECASE)
 
         try:
             import duckdb
             con = duckdb.connect(database=":memory:")
+            con.execute("CREATE SCHEMA IF NOT EXISTS main_silver;")
+            con.execute("CREATE SCHEMA IF NOT EXISTS main_bronze;")
+            con.execute("CREATE SCHEMA IF NOT EXISTS main_gold;")
             for tbl_name, df_val in data_dict.items():
                 if isinstance(df_val, pd.DataFrame):
-                    con.register(tbl_name, df_val)
                     clean_name = tbl_name.split(".")[-1]
                     con.register(clean_name, df_val)
+                    con.register(f"main_silver.{clean_name}", df_val)
+                    con.register(f"main_bronze.{clean_name}", df_val)
+                    con.register(f"main_gold.{clean_name}", df_val)
             return con.execute(cleaned_sql).df()
         except ImportError:
             import sqlite3

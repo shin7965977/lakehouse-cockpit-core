@@ -86,6 +86,18 @@ def test_sql_sandbox_executes_safe_queries_and_blocks_destructive_ddl() -> None:
     assert len(df) == 2
     assert list(df["id"]) == [2, 3]
 
+    # Valid dbt Jinja template query with ref() and table alias
+    jinja_sql = """
+    {{ config(materialized='table') }}
+    SELECT t.id, t.val
+    FROM {{ ref('test_table') }} t
+    WHERE t.val >= 20
+    ORDER BY t.val DESC;
+    """
+    df_jinja = adapter.execute_custom_sql(jinja_sql, data)
+    assert len(df_jinja) == 2
+    assert list(df_jinja["id"]) == [3, 2]
+
     # Destructive DROP should be blocked
     with pytest.raises(ValueError, match="Security Alert"):
         adapter.execute_custom_sql("DROP TABLE test_table", data)
