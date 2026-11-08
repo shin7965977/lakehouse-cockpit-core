@@ -104,7 +104,7 @@ def test_gemini_key_validation_and_ae_workflow_flag() -> None:
     assert _validate_gemini_key("AIzaSyD-1234567890abcdefghijklmnop") is True
 
     adapter = DummyAdapter()
-    assert adapter.supports_ae_workflow is True
+    assert adapter.supports_ae_workflow is False
 
 
 def test_ae_workflow_synthesizes_dynamic_context_for_sales() -> None:

@@ -251,7 +251,7 @@ class BaseCockpitAdapter(ABC):
     @property
     def supports_ae_workflow(self) -> bool:
         """Whether this adapter supports the 6-step End-to-End Analytics Engineering Workflow."""
-        return True
+        return False
 
     def handle_spec_inquiry_turn(
         self,
