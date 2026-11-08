@@ -56,7 +56,11 @@ def render_ai_drawer(
     """Render the right-side AI Copilot drawer with mandatory BYOK security wall and AE workflow trigger."""
     # 1. Resolve Active Gemini API Key (Session State or Environment)
     api_key_env = os.getenv("GEMINI_API_KEY", "").strip()
-    session_key = st.session_state.get("user_gemini_key", "").strip()
+    session_key = (
+        st.session_state.get("user_gemini_key")
+        or st.session_state.get("gemini_api_key")
+        or ""
+    ).strip()
     active_key = session_key or api_key_env
     has_valid_key = _validate_gemini_key(active_key)
 
@@ -77,11 +81,18 @@ def render_ai_drawer(
             label_visibility="collapsed",
             key=f"gemini_key_input_{active_scope_id}",
         )
+        if new_key_input and new_key_input.strip() != active_key:
+            active_key = new_key_input.strip()
+            st.session_state["user_gemini_key"] = active_key
+            st.session_state["gemini_api_key"] = active_key
+            has_valid_key = _validate_gemini_key(active_key)
     with k_col2:
         save_label = "💾 Save" if is_en else "💾 儲存"
         if st.button(save_label, key=f"btn_save_key_{active_scope_id}", use_container_width=True, type="primary"):
             if new_key_input:
-                st.session_state["user_gemini_key"] = new_key_input.strip()
+                clean_k = new_key_input.strip()
+                st.session_state["user_gemini_key"] = clean_k
+                st.session_state["gemini_api_key"] = clean_k
                 st.rerun()
 
     # 3. Copilot Subheading with Badge
