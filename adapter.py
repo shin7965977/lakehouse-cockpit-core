@@ -132,7 +132,7 @@ class BaseCockpitAdapter(ABC):
     @property
     def default_language(self) -> str:
         """Default language: 'en' or 'zh'."""
-        return "en"
+        return "zh"
 
     @property
     @abstractmethod

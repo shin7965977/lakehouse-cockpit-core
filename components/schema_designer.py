@@ -43,10 +43,16 @@ def render_schema_designer_view(
 
     # Top Metric Banner (Reflected Metadata)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Reflected Dimensions", f"{len(models_meta['dimensions'])} Models", delta="dim_products/cat/cust")
-    c2.metric("Reflected Facts", f"{len(models_meta['facts'])} Models", delta="fct_items/orders/returns")
-    c3.metric("GDPR Boundary", "Enforced", delta="100% No PII")
-    c4.metric("Engine Runtime", "Physical DuckDB", delta="Real Lakehouse Dry-run")
+    if is_en:
+        c1.metric("Reflected Dimensions", f"{len(models_meta['dimensions'])} Models", delta="dim_products/cat/cust")
+        c2.metric("Reflected Facts", f"{len(models_meta['facts'])} Models", delta="fct_items/orders/returns")
+        c3.metric("GDPR Boundary", "Enforced", delta="100% No PII")
+        c4.metric("Engine Runtime", "Physical DuckDB", delta="Real Lakehouse Dry-run")
+    else:
+        c1.metric("已探查維度模型", f"{len(models_meta['dimensions'])} 個", delta="dim_products/cat/cust")
+        c2.metric("已探查事實模型", f"{len(models_meta['facts'])} 個", delta="fct_items/orders/returns")
+        c3.metric("GDPR 數據隱私邊界", "已強制執行", delta="100% 無 PII 洩露")
+        c4.metric("引擎執行環境", "物理 DuckDB", delta="真實湖倉 Dry-run 驗證")
 
     st.markdown("---")
 
@@ -104,7 +110,7 @@ def render_schema_designer_view(
 
     # Unified Single Input Box
     user_goal_input = st.text_input(
-        "Custom Analytical Goal & Criteria (自訂分析目標與細節條件)：" if not is_en else "Custom Analytical Goal & Criteria:",
+        "自訂商業分析目標與細節條件 (Custom Analytical Goal & Criteria)：" if not is_en else "Custom Analytical Goal & Criteria:",
         value=st.session_state["schema_designer_goal"],
         placeholder="例如：我想知道這個月的產品退款紀錄、或計算各品類淨毛利率..." if not is_en else "e.g., I want to know this month's product refund records...",
         key="schema_designer_custom_goal",
@@ -115,7 +121,7 @@ def render_schema_designer_view(
         st.session_state["schema_design_result"] = None
 
     # Action Trigger
-    btn_label = "🚀 Synthesize & Validate dbt Pipeline" if is_en else "🚀 合成並驗證 dbt 數據管線"
+    btn_label = "🚀 合成並驗證 dbt 數據管線 (Synthesize & Validate dbt Pipeline)" if not is_en else "🚀 Synthesize & Validate dbt Pipeline"
     if st.button(btn_label, type="primary", use_container_width=True):
         current_query = st.session_state.get("schema_designer_goal", "").strip()
         active_api_key = (
@@ -123,7 +129,8 @@ def render_schema_designer_view(
             or st.session_state.get("gemini_api_key")
             or os.getenv("GEMINI_API_KEY", "")
         ).strip()
-        with st.spinner("AI Socratic Agent 正在解析商業目標與湖倉數據邊界..."):
+        spinner_msg = "AI Socratic Agent 正在解析商業目標與湖倉數據邊界..." if not is_en else "AI Socratic Agent inspecting business goals and lakehouse boundaries..."
+        with st.spinner(spinner_msg):
             session = analyze_socratic_inquiry(current_query, reflection=reflection, api_key=active_api_key)
             st.session_state["active_socratic_session"] = session
 
@@ -230,24 +237,40 @@ def render_schema_designer_view(
                 st.markdown(f"**{q.title}**")
                 st.caption(q.explanation)
                 opt_labels = [opt["label"] for opt in q.options]
+                custom_opt_label = "✏️ 自訂補充條件 (手動填寫)" if not is_en else "✏️ Custom Clarification (Fill in details below)"
+                all_opts = opt_labels + [custom_opt_label]
                 opt_map = {opt["label"]: opt["value"] for opt in q.options}
+
                 chosen_label = st.radio(
-                    f"選擇 {q.dimension_type} 方案：",
-                    options=opt_labels,
+                    f"選擇 {q.dimension_type} 方案：" if not is_en else f"Select {q.dimension_type} option:",
+                    options=all_opts,
                     index=0,
                     key=f"socratic_q_{q.question_id}",
                     label_visibility="collapsed",
                 )
-                user_choices[q.dimension_type] = opt_map[chosen_label]
+                if chosen_label == custom_opt_label:
+                    custom_text = st.text_input(
+                        "✏️ 請填入您的自訂條件或補充說明：" if not is_en else "✏️ Enter custom criteria or details:",
+                        placeholder="例如：鎖定 2026 年 9 月促銷、或指定特定產品/市場..." if not is_en else "e.g., Focus on September 2026 or a specific SKU...",
+                        key=f"socratic_custom_input_{q.question_id}",
+                    )
+                    if custom_text.strip():
+                        user_choices[q.dimension_type] = f"custom:{custom_text.strip()}"
+                    else:
+                        user_choices[q.dimension_type] = opt_map.get(q.options[0]["label"], "")
+                else:
+                    user_choices[q.dimension_type] = opt_map[chosen_label]
                 st.markdown("")
 
-            if st.button("⚡ 確認定錨並動態編譯管線 (Confirm & Compile dbt Pipeline)", type="primary", use_container_width=True):
+            confirm_btn_label = "⚡ 確認定錨並動態編譯管線 (Confirm & Compile dbt Pipeline)" if not is_en else "⚡ Confirm & Compile dbt Pipeline"
+            if st.button(confirm_btn_label, type="primary", use_container_width=True):
                 active_api_key = (
                     st.session_state.get("user_gemini_key")
                     or st.session_state.get("gemini_api_key")
                     or os.getenv("GEMINI_API_KEY", "")
                 ).strip()
-                with st.spinner("Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."):
+                spinner_msg = "Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..." if not is_en else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
+                with st.spinner(spinner_msg):
                     res = synthesize_dynamic_dbt_model(
                         user_goal=active_session.user_goal,
                         decisions=user_choices,
@@ -260,10 +283,12 @@ def render_schema_designer_view(
     # 2. Render Successful Compilation Output
     result = st.session_state.get("schema_design_result")
     if result and not result.is_rejected:
-        st.success(f"✅ Pipeline Compiled & Governed: `{result.spec_id}`")
+        success_msg = f"✅ 管線編譯受控通過 (Pipeline Compiled & Governed): `{result.spec_id}`" if not is_en else f"✅ Pipeline Compiled & Governed: `{result.spec_id}`"
+        st.success(success_msg)
 
         # Observability Audit Trace
-        st.markdown("##### 🔍 Observability Audit Trail (實時編譯與執行追蹤)")
+        trace_title = "##### 🔍 Observability Audit Trail (實時編譯與執行追蹤)" if not is_en else "##### 🔍 Observability Audit Trail"
+        st.markdown(trace_title)
         cols = st.columns(len(result.audit_trace))
         for idx, trace in enumerate(result.audit_trace):
             with cols[idx]:
@@ -281,24 +306,33 @@ def render_schema_designer_view(
         st.markdown("---")
 
         # 3-Layer Inspector Tabs
-        tab_biz, tab_contract, tab_sql = st.tabs(
+        tab_titles = (
             [
+                "📊 業務洞察與即時數據預覽 (Live Data Preview)",
+                "📜 數據治理合約 (schema.yml)",
+                "⚙️ 動態合成之 dbt 模型 (.sql)",
+            ]
+            if not is_en
+            else [
                 "📊 Business Takeaway & Live Data Preview",
                 "📜 Governed Data Contract (`schema.yml`)",
                 "⚙️ Synthesized dbt Model (`.sql`)",
             ]
         )
+        tab_biz, tab_contract, tab_sql = st.tabs(tab_titles)
 
         with tab_biz:
-            st.markdown(f"**Target Grain**: `{result.target_grain}` | **Upstream Kimball Dependencies**: `{', '.join(result.upstream_tables)}`")
-            st.markdown("##### 5-Row Verified Data Preview (DuckDB Dry-Run Output):")
+            target_str = f"**分析粒度 (Target Grain)**: `{result.target_grain}` | **依賴之 Kimball 模型**: `{', '.join(result.upstream_tables)}`" if not is_en else f"**Target Grain**: `{result.target_grain}` | **Upstream Kimball Dependencies**: `{', '.join(result.upstream_tables)}`"
+            st.markdown(target_str)
+            preview_title = "##### 實體 DuckDB Dry-Run 物理驗證數據預覽 (前 10 筆)：" if not is_en else "##### 5-Row Verified Data Preview (DuckDB Dry-Run Output):"
+            st.markdown(preview_title)
             st.dataframe(result.data_preview.head(10), use_container_width=True)
 
         with tab_contract:
             st.caption("📄 `models/marts/schema.yml` (Version-controlled Data Dictionary & Contract)")
             st.code(result.schema_yaml, language="yaml")
             st.download_button(
-                "📥 Download schema.yml",
+                "📥 下載 schema.yml 數據合約" if not is_en else "📥 Download schema.yml",
                 data=result.schema_yaml,
                 file_name="schema.yml",
                 mime="text/yaml",
@@ -309,7 +343,7 @@ def render_schema_designer_view(
             st.caption("📄 `models/marts/<model_name>.sql` (Idempotent dbt Transformation Model)")
             st.code(result.dbt_sql, language="sql")
             st.download_button(
-                "📥 Download dbt Model (.sql)",
+                "📥 下載 dbt Model (.sql) 模型檔案" if not is_en else "📥 Download dbt Model (.sql)",
                 data=result.dbt_sql,
                 file_name="mart_model.sql",
                 mime="text/plain",

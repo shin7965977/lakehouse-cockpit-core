@@ -58,9 +58,9 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         # Language Selector
         lang_choice = st.radio(
-            "Language",
-            options=["English", "Traditional Chinese"],
-            index=0 if is_en else 1,
+            "語言 / Language",
+            options=["繁體中文", "English"],
+            index=0 if not is_en else 1,
             horizontal=True,
         )
         st.session_state["cockpit_lang"] = "en" if lang_choice == "English" else "zh"
