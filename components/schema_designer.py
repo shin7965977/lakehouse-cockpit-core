@@ -7,6 +7,7 @@ and trace the end-to-end execution audit log.
 
 from __future__ import annotations
 
+import os
 import streamlit as st
 import pandas as pd
 from typing import Any
@@ -117,13 +118,16 @@ def render_schema_designer_view(
     btn_label = "🚀 Synthesize & Validate dbt Pipeline" if is_en else "🚀 合成並驗證 dbt 數據管線"
     if st.button(btn_label, type="primary", use_container_width=True):
         current_query = st.session_state.get("schema_designer_goal", "").strip()
+        active_api_key = (st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY", "")).strip()
         with st.spinner("AI Socratic Agent 正在解析商業目標與湖倉數據邊界..."):
-            session = analyze_socratic_inquiry(current_query, reflection=reflection)
+            session = analyze_socratic_inquiry(current_query, reflection=reflection, api_key=active_api_key)
             st.session_state["active_socratic_session"] = session
 
             if not session.needs_clarification and not session.is_out_of_domain:
                 # Direct synthesis if unambiguous
-                res = synthesize_dynamic_dbt_model(current_query, session.locked_decisions, reflection)
+                res = synthesize_dynamic_dbt_model(
+                    current_query, session.locked_decisions, reflection, api_key=active_api_key
+                )
                 st.session_state["schema_design_result"] = res
 
     # 1. Handle Socratic Clarification Dialogue State
@@ -195,11 +199,13 @@ def render_schema_designer_view(
                 st.markdown("")
 
             if st.button("⚡ 確認定錨並動態編譯管線 (Confirm & Compile dbt Pipeline)", type="primary", use_container_width=True):
+                active_api_key = (st.session_state.get("gemini_api_key") or os.getenv("GEMINI_API_KEY", "")).strip()
                 with st.spinner("Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."):
                     res = synthesize_dynamic_dbt_model(
                         user_goal=active_session.user_goal,
                         decisions=user_choices,
                         reflection=reflection,
+                        api_key=active_api_key,
                     )
                     st.session_state["schema_design_result"] = res
                     st.rerun()
