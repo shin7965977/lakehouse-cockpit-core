@@ -35,6 +35,9 @@ def _validate_gemini_key(key: str) -> bool:
     k = key.strip()
     if not k or k.startswith("your_") or len(k) < 20:
         return False
+    lower = k.lower()
+    if any(placeholder in lower for placeholder in ["your", "actual", "here", "example", "placeholder"]):
+        return False
     # Standard Google AI Studio keys start with AIzaSy
     if k.startswith("AIzaSy"):
         return True
