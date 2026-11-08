@@ -84,18 +84,20 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             else None
         )
 
-        # Advisor Drawer Toggle Button
+        # Sidebar Navigation: Direct Data Center Shortcut
         st.markdown("---")
-        drawer_btn_label = (
-            "🤖 Close Advisor"
-            if st.session_state["advisor_drawer_open"]
-            else "🤖 Open AI Advisor"
-        )
-        if st.button(drawer_btn_label, use_container_width=True, type="primary"):
-            st.session_state["advisor_drawer_open"] = not st.session_state[
-                "advisor_drawer_open"
-            ]
+        st.subheader("🏛️ Data Governance")
+        st.caption("Centralized Catalog & Telemetry")
+        is_data_center_active = st.session_state.get("cockpit_active_view") == "data_center"
+        dc_btn_type = "primary" if is_data_center_active else "secondary"
+        if st.button("🏛️ Open Data Center (dbt & Elementary)", use_container_width=True, type=dc_btn_type):
+            st.session_state["cockpit_active_view"] = "data_center"
             st.rerun()
+
+        if is_data_center_active:
+            if st.button("⬅️ Return to Medallion BI", use_container_width=True):
+                st.session_state["cockpit_active_view"] = "gold"
+                st.rerun()
 
     # Load Domain Data strictly filtered by active Date Range
     data_dict = adapter.load_domain_data(start_date=start_date, end_date=end_date)
@@ -109,10 +111,19 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
     # Main BI Dashboard
     with main_col:
-        st.title(adapter.brand_title)
-        st.caption(
-            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Conversational Analytics Copilot"
-        )
+        header_col, toggle_col = st.columns([7.5, 2.5])
+        with header_col:
+            st.title(adapter.brand_title)
+            st.caption(
+                "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Conversational Analytics Copilot"
+            )
+        with toggle_col:
+            drawer_open = st.session_state["advisor_drawer_open"]
+            toggle_label = "✖️ Close Copilot" if drawer_open else "🤖 Open Copilot"
+            toggle_btn_type = "secondary" if drawer_open else "primary"
+            if st.button(toggle_label, use_container_width=True, type=toggle_btn_type):
+                st.session_state["advisor_drawer_open"] = not drawer_open
+                st.rerun()
 
         # 1. Responsive KPI Grid with ReadCall-style Hover Tooltips
         render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)
