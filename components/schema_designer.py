@@ -134,38 +134,77 @@ def render_schema_designer_view(
     active_session: SocraticSessionState | None = st.session_state.get("active_socratic_session")
     if active_session:
         if active_session.is_out_of_domain:
-            st.markdown(
-                f"""
-                <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 16px; margin: 16px 0;">
-                    <div style="font-weight: 700; color: #991B1B; font-size: 1rem; margin-bottom: 6px;">
-                        ⛔ 無法處理該請求：輸入超出湖倉分析範疇 (Out of Analytical Domain)
+            if active_session.is_api_key_missing:
+                st.markdown(
+                    f"""
+                    <div style="background-color: #FFFBEB; border: 1.5px solid #F59E0B; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                        <div style="font-weight: 700; color: #B45309; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                            🔒 需要 Gemini API Key (API Key Required)
+                        </div>
+                        <div style="color: #92400E; font-size: 0.92rem; line-height: 1.6;">
+                            系統檢測到您的分析目標：「<strong>{active_session.user_goal}</strong>」。<br>
+                            為了落實 <strong>Zero-Facade 架構治理標準</strong>，本平台嚴格禁止以本機關鍵字或影子模擬腳本假裝回答。<br>
+                            任何商業分析意圖均須經由 Google Gemini GenAI 進行實體型錄邊界檢驗與意圖錨定。
+                        </div>
+                        <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEF3C7; border-radius: 6px; font-size: 0.88rem; color: #78350F;">
+                            👉 <strong>如何啟用</strong>：請在左側側邊欄 <em>Gemini API Configuration</em> 輸入您的 API Key。輸入後系統將即時調用 Gemini 模型進行真實的意圖驗證與 dbt 模型合成。
+                        </div>
                     </div>
-                    <div style="color: #7F1D1D; font-size: 0.9rem; line-height: 1.5;">
-                        系統檢測到您的輸入：「<strong>{active_session.user_goal}</strong>」與當前湖倉數據主題（訂單銷售、商品退貨、品類毛利、包裝破損規格）無關。<br>
-                        為了落實 <strong>Zero-Facade 架構治理</strong>，系統拒絕模擬偽造不存在的數據血緣與 SQL 運算。
+                    """
+                    if not is_en
+                    else f"""
+                    <div style="background-color: #FFFBEB; border: 1.5px solid #F59E0B; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                        <div style="font-weight: 700; color: #B45309; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                            🔒 Gemini API Key Required
+                        </div>
+                        <div style="color: #92400E; font-size: 0.92rem; line-height: 1.6;">
+                            Inquiry received: '<strong>{active_session.user_goal}</strong>'.<br>
+                            To uphold the <strong>Zero-Facade Governance Standard</strong>, simulated responses and local keyword bypasses are disabled.<br>
+                            All analytical goals must be grounded against conformed lakehouse entities via Google Gemini GenAI.
+                        </div>
+                        <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEF3C7; border-radius: 6px; font-size: 0.88rem; color: #78350F;">
+                            👉 <strong>Action Required</strong>: Please provide your Gemini API Key in the left sidebar under <em>Gemini API Configuration</em>.
+                        </div>
                     </div>
-                    <div style="margin-top: 10px; font-size: 0.85rem; color: #B91C1C;">
-                        💡 <strong>建議做法</strong>：請點擊上方預設場景按鈕，或輸入與 <code>fct_order_items</code>、<code>fct_returns</code>、<code>dim_products</code> 相關的商業分析指標。
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                reason_text = active_session.rejection_reason or "輸入超出湖倉分析範疇。"
+                st.markdown(
+                    f"""
+                    <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                        <div style="font-weight: 700; color: #991B1B; font-size: 1.05rem; margin-bottom: 8px;">
+                            ⛔ 無法處理該請求：輸入超出湖倉分析範疇 (Out of Analytical Domain)
+                        </div>
+                        <div style="color: #7F1D1D; font-size: 0.92rem; line-height: 1.6;">
+                            輸入目標：「<strong>{active_session.user_goal}</strong>」<br>
+                            <strong>評估結果</strong>：{reason_text}<br>
+                            為了落實 <strong>Zero-Facade 架構治理</strong>，系統拒絕模擬偽造不存在的數據血緣與 SQL 運算。
+                        </div>
+                        <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEE2E2; border-radius: 6px; font-size: 0.88rem; color: #991B1B;">
+                            💡 <strong>建議做法</strong>：請點擊上方預設場景按鈕，或輸入與 <code>fct_order_items</code>、<code>fct_returns</code>、<code>dim_products</code> (12 款歐洲堅果/果乾 SKU) 相關的真實商業分析指標。
+                        </div>
                     </div>
-                </div>
-                """
-                if not is_en
-                else f"""
-                <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 16px; margin: 16px 0;">
-                    <div style="font-weight: 700; color: #991B1B; font-size: 1rem; margin-bottom: 6px;">
-                        ⛔ Request Rejected: Out of Analytical Domain
+                    """
+                    if not is_en
+                    else f"""
+                    <div style="background-color: #FEF2F2; border: 1.5px solid #F87171; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                        <div style="font-weight: 700; color: #991B1B; font-size: 1.05rem; margin-bottom: 8px;">
+                            ⛔ Request Rejected: Out of Analytical Domain
+                        </div>
+                        <div style="color: #7F1D1D; font-size: 0.92rem; line-height: 1.6;">
+                            Inquiry: '<strong>{active_session.user_goal}</strong>'<br>
+                            <strong>Evaluation</strong>: {reason_text}<br>
+                            In adherence to the <strong>Zero-Facade Governance Standard</strong>, the copilot will not fabricate fake models or dry-run simulations.
+                        </div>
+                        <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEE2E2; border-radius: 6px; font-size: 0.88rem; color: #991B1B;">
+                            💡 <strong>Suggestion</strong>: Please click one of the preset buttons above or provide analytical criteria for conformed orders, returns, or margins (12 core European SKUs).
+                        </div>
                     </div>
-                    <div style="color: #7F1D1D; font-size: 0.9rem; line-height: 1.5;">
-                        The input inquiry '<strong>{active_session.user_goal}</strong>' is not related to any conformed lakehouse entities (orders, returns, margins, or packaging).<br>
-                        In adherence to the <strong>Zero-Facade Governance Standard</strong>, the copilot will not fabricate fake models or dry-run simulations.
-                    </div>
-                    <div style="margin-top: 10px; font-size: 0.85rem; color: #B91C1C;">
-                        💡 <strong>Suggestion</strong>: Please click one of the preset buttons above or provide analytical criteria for orders, returns, or margins.
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+                    """,
+                    unsafe_allow_html=True,
+                )
 
         elif active_session.needs_clarification and not st.session_state.get("schema_design_result"):
             st.markdown(
