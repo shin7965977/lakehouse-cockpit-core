@@ -464,15 +464,26 @@ def render_schema_designer_view(
                     save_col, cancel_col = st.columns([1, 1])
                     with save_col:
                         if st.button("💾 保存修改 (Save Edits)", type="primary", use_container_width=True):
-                            memo["analytical_objective"] = edit_obj.strip()
-                            memo["target_grain"] = edit_grain.strip()
-                            memo["market_country"] = edit_market.strip().upper()
-                            memo["focus_entity"] = edit_focus.strip()
-                            memo["category_filter"] = edit_cat.strip() if edit_cat.strip() else None
-                            memo["target_metrics"] = [m.strip() for m in edit_metrics_str.split(",") if m.strip()]
-                            st.session_state["socratic_summary_memo"] = memo
-                            st.session_state["socratic_memo_edit_mode"] = False
-                            st.rerun()
+                            clean_market = edit_market.strip().upper()
+                            # Physical Catalog Dynamic Grounding Check
+                            valid_physical_markets = reflection.get_distinct_column_values("fct_orders", "market_country")
+                            if clean_market and clean_market != "ALL_EU" and valid_physical_markets and clean_market not in valid_physical_markets:
+                                st.error(
+                                    f"❌ 實體資料庫校驗未通過 (Physical Catalog Mismatch)：\n\n"
+                                    f"市場 '{clean_market}' 不存在於湖倉實體資料庫 `fct_orders.market_country`！\n\n"
+                                    f"實體庫中實際存在之活躍市場僅有：{', '.join(sorted(valid_physical_markets))}。\n\n"
+                                    f"禁止設定不存在的幽靈市場實體，請修正後再保存！"
+                                )
+                            else:
+                                memo["analytical_objective"] = edit_obj.strip()
+                                memo["target_grain"] = edit_grain.strip()
+                                memo["market_country"] = clean_market
+                                memo["focus_entity"] = edit_focus.strip()
+                                memo["category_filter"] = edit_cat.strip() if edit_cat.strip() else None
+                                memo["target_metrics"] = [m.strip() for m in edit_metrics_str.split(",") if m.strip()]
+                                st.session_state["socratic_summary_memo"] = memo
+                                st.session_state["socratic_memo_edit_mode"] = False
+                                st.rerun()
                     with cancel_col:
                         if st.button("❌ 取消微調 (Cancel)", use_container_width=True):
                             st.session_state["socratic_memo_edit_mode"] = False
@@ -627,3 +638,26 @@ def render_schema_designer_view(
                 mime="text/plain",
                 use_container_width=True,
             )
+
+    elif result and result.is_rejected:
+        rej_title = "🛑 實體型錄邊界檢驗中斷拒絕 (Compilation Halted & Rejected)" if not is_en else "🛑 Pipeline Compilation Halted & Rejected"
+        st.error(f"{rej_title}: `{result.spec_id}`")
+        st.warning(result.rejection_reason)
+
+        if result.audit_trace:
+            trace_title = "##### 🔍 Observability Audit Trail (拒絕與中斷追蹤)" if not is_en else "##### 🔍 Observability Audit Trail"
+            st.markdown(trace_title)
+            cols = st.columns(len(result.audit_trace))
+            for idx, trace in enumerate(result.audit_trace):
+                with cols[idx]:
+                    status_color = "#DC2626" if trace["status"] in ["REJECTED", "BLOCKED"] else "#059669"
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #FEF2F2; border: 1px solid #FCA5A5; border-radius: 6px; padding: 10px; font-size: 0.85rem;">
+                            <div style="font-weight: 600; color: #991B1B;">{trace['step']}</div>
+                            <div style="color: {status_color}; font-weight: 500; margin: 2px 0;">● {trace['status']}</div>
+                            <div style="color: #7F1D1D; font-size: 0.78rem;">{trace['detail']}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
