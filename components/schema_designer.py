@@ -66,59 +66,80 @@ def render_schema_designer_view(
         else "#### 💬 1. 利害關係人商業目標與蘇格拉底式定錨"
     )
 
-    prompt_return = (
-        "🌰 1kg 堅果大包裝退貨率異常歸因（營運主管：依包裝規格拆解退貨率與破損）"
+    prompt_p1 = (
+        "計算 2026 年 10 月各商品的單月銷售量與總營業額"
         if not is_en
-        else "🌰 1kg Bulk Packaging Return Diagnosis (Operations Lead: Return Rate by Packaging Size)"
+        else "Calculate monthly sales volume and gross revenue by product SKU for October 2026"
     )
-    prompt_margin = (
-        "💰 品類毛利稀釋排行（財務主管：扣除促銷折價券後之淨貢獻毛利率）"
+    prompt_p2 = (
+        "分析 2026 年 10 月 1kg 大包裝產品的退貨率與主要退貨原因"
         if not is_en
-        else "💰 Category Margin Dilution (Finance Lead: Net Contribution Margin after Vouchers)"
+        else "Analyze return rates and return reasons for 1kg bulk items in October 2026"
     )
 
-    # State initialization
-    if "schema_designer_goal" not in st.session_state:
-        st.session_state["schema_designer_goal"] = prompt_return
+    legacy_prompts = [
+        "🌰 1kg 堅果大包裝退貨率異常歸因（營運主管：依包裝規格拆解退貨率與破損）",
+        "🌰 1kg Bulk Packaging Return Diagnosis (Operations Lead: Return Rate by Packaging Size)",
+        "💰 品類毛利稀釋排行（財務主管：扣除促銷折價券後之淨貢獻毛利率）",
+        "💰 Category Margin Dilution (Finance Lead: Net Contribution Margin after Vouchers)",
+    ]
+
+    # State initialization & migration
+    if "schema_designer_goal" not in st.session_state or st.session_state["schema_designer_goal"] in legacy_prompts:
+        st.session_state["schema_designer_goal"] = prompt_p1
+    if "schema_designer_custom_goal" not in st.session_state or st.session_state.get("schema_designer_custom_goal") in legacy_prompts:
+        st.session_state["schema_designer_custom_goal"] = prompt_p1
 
     st.caption(
-        "點擊下方預設場景快速填入，或直接在下方輸入框自由輸入自訂目標："
+        "點擊下方預設場景快速填入並執行，或在輸入框自由輸入自訂目標："
         if not is_en
-        else "Click a preset scenario button to populate, or type your custom analytical goal below:"
+        else "Click a preset scenario button to populate and analyze, or type your custom analytical goal below:"
     )
 
     # 2 Quick-Preset Buttons
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
         if st.button(
-            "🌰 問題 1：堅果包裝退貨診斷" if not is_en else "🌰 Problem 1: Bulk Packaging Return Diagnosis",
+            "📦 問題 1：商品單月銷售額 (Monthly Revenue)" if not is_en else "📦 Problem 1: Monthly Product Revenue",
             use_container_width=True,
-            help="點擊快速帶入堅果大包裝退貨歸因分析 Prompt" if not is_en else "Click to populate return diagnosis prompt",
+            help="點擊快速帶入商品單月銷量與營收分析 Prompt" if not is_en else "Click to analyze monthly product sales volume and gross revenue",
         ):
-            st.session_state["schema_designer_goal"] = prompt_return
+            st.session_state["schema_designer_goal"] = prompt_p1
+            st.session_state["schema_designer_custom_goal"] = prompt_p1
+            st.session_state["schema_designer_auto_run"] = True
             st.session_state["active_socratic_session"] = None
             st.session_state["schema_design_result"] = None
+            st.session_state["socratic_chat_history"] = []
+            st.session_state["socratic_summary_memo"] = None
+            st.session_state["socratic_signed_off"] = False
+            st.session_state["socratic_memo_edit_mode"] = False
             st.rerun()
 
     with btn_col2:
         if st.button(
-            "💰 問題 2：品類促銷毛利排行" if not is_en else "💰 Problem 2: Category Margin Dilution",
+            "🔄 問題 2：大包裝退貨率診斷 (Bulk Packaging Returns)" if not is_en else "🔄 Problem 2: Bulk Packaging Return Rate",
             use_container_width=True,
-            help="點擊快速帶入品類淨利率與折價券稀釋分析 Prompt" if not is_en else "Click to populate margin dilution prompt",
+            help="點擊快速帶入 1kg 大包裝退貨率與原因分析 Prompt" if not is_en else "Click to analyze 1kg bulk packaging return rates and reasons",
         ):
-            st.session_state["schema_designer_goal"] = prompt_margin
+            st.session_state["schema_designer_goal"] = prompt_p2
+            st.session_state["schema_designer_custom_goal"] = prompt_p2
+            st.session_state["schema_designer_auto_run"] = True
             st.session_state["active_socratic_session"] = None
             st.session_state["schema_design_result"] = None
+            st.session_state["socratic_chat_history"] = []
+            st.session_state["socratic_summary_memo"] = None
+            st.session_state["socratic_signed_off"] = False
+            st.session_state["socratic_memo_edit_mode"] = False
             st.rerun()
 
     # Unified Single Input Box
     user_goal_input = st.text_input(
         "自訂商業分析目標與細節條件 (Custom Analytical Goal & Criteria)：" if not is_en else "Custom Analytical Goal & Criteria:",
-        value=st.session_state["schema_designer_goal"],
-        placeholder="例如：我想知道這個月的產品退款紀錄、或計算各品類淨毛利率..." if not is_en else "e.g., I want to know this month's product refund records...",
+        value=st.session_state.get("schema_designer_custom_goal", st.session_state["schema_designer_goal"]),
+        placeholder="例如：計算 2026 年 10 月各商品的單月銷售量與總營業額..." if not is_en else "e.g., Calculate monthly sales volume and gross revenue by product SKU...",
         key="schema_designer_custom_goal",
     )
-    if user_goal_input != st.session_state["schema_designer_goal"]:
+    if user_goal_input != st.session_state.get("schema_designer_goal"):
         st.session_state["schema_designer_goal"] = user_goal_input
         st.session_state["active_socratic_session"] = None
         st.session_state["schema_design_result"] = None
@@ -128,7 +149,10 @@ def render_schema_designer_view(
 
     # Action Trigger
     btn_label = "🚀 合成並驗證 dbt 數據管線 (Synthesize & Validate dbt Pipeline)" if not is_en else "🚀 Synthesize & Validate dbt Pipeline"
-    if st.button(btn_label, type="primary", use_container_width=True):
+    manual_run = st.button(btn_label, type="primary", use_container_width=True)
+    auto_run = st.session_state.pop("schema_designer_auto_run", False)
+
+    if manual_run or auto_run:
         current_query = (user_goal_input or st.session_state.get("schema_designer_goal", "")).strip()
         st.session_state["schema_designer_goal"] = current_query
         st.session_state["active_socratic_session"] = None
