@@ -16,6 +16,8 @@ from ai.schema_engine import DatabaseReflectionService
 from ai.socratic_copilot import (
     analyze_socratic_inquiry,
     synthesize_dynamic_dbt_model,
+    chat_socratic_turn,
+    summarize_socratic_requirements,
     SocraticSessionState,
 )
 
@@ -119,6 +121,9 @@ def render_schema_designer_view(
         st.session_state["schema_designer_goal"] = user_goal_input
         st.session_state["active_socratic_session"] = None
         st.session_state["schema_design_result"] = None
+        st.session_state["socratic_chat_history"] = []
+        st.session_state["socratic_summary_memo"] = None
+        st.session_state["socratic_signed_off"] = False
 
     # Action Trigger
     btn_label = "🚀 合成並驗證 dbt 數據管線 (Synthesize & Validate dbt Pipeline)" if not is_en else "🚀 Synthesize & Validate dbt Pipeline"
@@ -127,6 +132,9 @@ def render_schema_designer_view(
         st.session_state["schema_designer_goal"] = current_query
         st.session_state["active_socratic_session"] = None
         st.session_state["schema_design_result"] = None
+        st.session_state["socratic_chat_history"] = []
+        st.session_state["socratic_summary_memo"] = None
+        st.session_state["socratic_signed_off"] = False
 
         active_api_key = (
             st.session_state.get("user_gemini_key")
@@ -253,48 +261,205 @@ def render_schema_designer_view(
                 st.markdown(f"**{q.title}**")
                 st.caption(q.explanation)
                 opt_labels = [opt["label"] for opt in q.options]
-                custom_opt_label = "✏️ 自訂補充條件 (手動填寫)" if not is_en else "✏️ Custom Clarification (Fill in details below)"
-                all_opts = opt_labels + [custom_opt_label]
                 opt_map = {opt["label"]: opt["value"] for opt in q.options}
 
                 chosen_label = st.radio(
                     f"選擇 {q.dimension_type} 方案：" if not is_en else f"Select {q.dimension_type} option:",
-                    options=all_opts,
+                    options=opt_labels,
                     index=0,
                     key=f"socratic_q_{q.question_id}",
                     label_visibility="collapsed",
                 )
-                if chosen_label == custom_opt_label:
-                    custom_text = st.text_input(
-                        "✏️ 請填入您的自訂條件或補充說明：" if not is_en else "✏️ Enter custom criteria or details:",
-                        placeholder="例如：鎖定 2026 年 9 月促銷、或指定特定產品/市場..." if not is_en else "e.g., Focus on September 2026 or a specific SKU...",
-                        key=f"socratic_custom_input_{q.question_id}",
-                    )
-                    if custom_text.strip():
-                        user_choices[q.dimension_type] = f"custom:{custom_text.strip()}"
-                    else:
-                        user_choices[q.dimension_type] = opt_map.get(q.options[0]["label"], "")
-                else:
-                    user_choices[q.dimension_type] = opt_map[chosen_label]
+                user_choices[q.dimension_type] = opt_map.get(chosen_label, q.options[0]["value"])
                 st.markdown("")
 
-            confirm_btn_label = "⚡ 確認定錨並動態編譯管線 (Confirm & Compile dbt Pipeline)" if not is_en else "⚡ Confirm & Compile dbt Pipeline"
-            if st.button(confirm_btn_label, type="primary", use_container_width=True):
-                active_api_key = (
-                    st.session_state.get("user_gemini_key")
-                    or st.session_state.get("gemini_api_key")
-                    or os.getenv("GEMINI_API_KEY", "")
-                ).strip()
-                spinner_msg = "Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..." if not is_en else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
-                with st.spinner(spinner_msg):
-                    res = synthesize_dynamic_dbt_model(
-                        user_goal=active_session.user_goal,
-                        decisions=user_choices,
-                        reflection=reflection,
-                        api_key=active_api_key,
+            st.markdown("---")
+
+            # -------------------------------------------------------------
+            # Persistent Multi-turn Conversational Chat Window
+            # -------------------------------------------------------------
+            if "socratic_chat_history" not in st.session_state:
+                st.session_state["socratic_chat_history"] = []
+
+            chat_history: list[dict[str, str]] = st.session_state["socratic_chat_history"]
+
+            # Render dialogue history if non-empty
+            if chat_history:
+                st.markdown(
+                    "##### 💬 分析顧問對話歷程 (Socratic Advisory History)"
+                    if not is_en
+                    else "##### 💬 Socratic Advisory History"
+                )
+                for item in chat_history:
+                    role_icon = "👤" if item.get("role") == "user" else "🤖"
+                    role_title = "利害關係人 (Stakeholder)" if item.get("role") == "user" else "AI 湖倉顧問 (Analytics Copilot)"
+                    bg_color = "#F8FAFC" if item.get("role") == "user" else "#F0FDF4"
+                    border_color = "#E2E8F0" if item.get("role") == "user" else "#BBF7D0"
+                    st.markdown(
+                        f"""
+                        <div style="background-color: {bg_color}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; font-size: 0.90rem;">
+                            <div style="font-weight: 600; color: #1E293B; margin-bottom: 4px;">{role_icon} {role_title}</div>
+                            <div style="color: #334155; line-height: 1.5;">{item.get('content', '')}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
                     )
-                    st.session_state["schema_design_result"] = res
-                    st.rerun()
+
+            # Conversational Input & Dual Action Row
+            st.markdown(
+                "###### 深入需求探討或補充條件 (Deeper Analytical Inquiry & Clarification)"
+                if not is_en
+                else "###### Deeper Analytical Inquiry & Clarification"
+            )
+
+            # Custom CSS for Red (Send) and Dark Slate / Black (Summarize) buttons
+            st.markdown(
+                """
+                <style>
+                div[data-testid="stButton"] button[kind="primary"] {
+                    background-color: #EF4444 !important;
+                    border-color: #DC2626 !important;
+                    color: white !important;
+                    font-weight: 600 !important;
+                }
+                div[data-testid="stButton"] button[kind="primary"]:hover {
+                    background-color: #DC2626 !important;
+                    border-color: #B91C1C !important;
+                }
+                div[data-testid="stButton"] button[kind="secondary"] {
+                    background-color: #1E293B !important;
+                    border-color: #0F172A !important;
+                    color: white !important;
+                    font-weight: 600 !important;
+                }
+                div[data-testid="stButton"] button[kind="secondary"]:hover {
+                    background-color: #0F172A !important;
+                    border-color: #020617 !important;
+                    color: #F8FAFC !important;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            chat_in_col, send_btn_col, sum_btn_col = st.columns([6, 1.5, 1.8])
+            with chat_in_col:
+                chat_user_msg = st.text_input(
+                    "其他對話細節內容：" if not is_en else "Additional context & inquiry:",
+                    placeholder="例如：我想要細看各產品包裝規格（packaging_size）或折扣對銷售的影響..."
+                    if not is_en
+                    else "e.g., I want to drill down into packaging_size or discount impact on revenue...",
+                    key="socratic_persistent_chat_input",
+                    label_visibility="collapsed",
+                )
+
+            with send_btn_col:
+                send_label = "💬 輸入" if not is_en else "💬 Send"
+                if st.button(send_label, type="primary", use_container_width=True, help="送出對話，向 AI 顧問提問或補充細節（不立即生成 SQL）"):
+                    if chat_user_msg.strip():
+                        active_api_key = (
+                            st.session_state.get("user_gemini_key")
+                            or st.session_state.get("gemini_api_key")
+                            or os.getenv("GEMINI_API_KEY", "")
+                        ).strip()
+                        chat_history.append({"role": "user", "content": chat_user_msg.strip()})
+                        with st.spinner("AI 顧問正在分析湖倉實體維度並給予建議..." if not is_en else "AI Copilot is inspecting lakehouse dimensions..."):
+                            advice = chat_socratic_turn(
+                                user_message=chat_user_msg.strip(),
+                                chat_history=chat_history,
+                                user_goal=active_session.user_goal,
+                                reflection=reflection,
+                                api_key=active_api_key,
+                            )
+                            chat_history.append({"role": "assistant", "content": advice})
+                            st.session_state["socratic_chat_history"] = chat_history
+                            # Reset memo since user added new requirements
+                            st.session_state["socratic_summary_memo"] = None
+                            st.rerun()
+
+            with sum_btn_col:
+                sum_label = "📋 總結需求" if not is_en else "📋 Summarize"
+                if st.button(sum_label, type="secondary", use_container_width=True, help="根據當前勾選項與所有對話，生成結構化需求總結備忘錄"):
+                    active_api_key = (
+                        st.session_state.get("user_gemini_key")
+                        or st.session_state.get("gemini_api_key")
+                        or os.getenv("GEMINI_API_KEY", "")
+                    ).strip()
+                    with st.spinner("正在總結對話細節與湖倉建模規格..." if not is_en else "Summarizing requirement memo..."):
+                        memo = summarize_socratic_requirements(
+                            user_goal=active_session.user_goal,
+                            decisions=user_choices,
+                            chat_history=chat_history,
+                            api_key=active_api_key,
+                        )
+                        st.session_state["socratic_summary_memo"] = memo
+                        st.rerun()
+
+            # -------------------------------------------------------------
+            # Requirement Summary Card & Mandatory Sign-off Gatekeeper
+            # -------------------------------------------------------------
+            memo = st.session_state.get("socratic_summary_memo")
+            if memo:
+                st.markdown(
+                    f"""
+                    <div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                        <div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                            📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)
+                        </div>
+                        <div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">
+                            • <strong>商業分析目標</strong>：{memo.get('analytical_objective')}<br>
+                            • <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get('target_grain')}</code><br>
+                            • <strong>時間分析區間</strong>：<code>{memo.get('date_range')}</code><br>
+                            • <strong>目標地理市場</strong>：<code>{memo.get('market_country')}</code><br>
+                            • <strong>核心計算指標</strong>：<code>{', '.join(memo.get('target_metrics', []))}</code><br>
+                            • <strong>上游依賴實體</strong>：<code>{', '.join(memo.get('upstream_tables', []))}</code>
+                            {f"<br>• <strong>對話補充要點</strong>：<em>{memo.get('chat_context_notes')}</em>" if memo.get('chat_context_notes') else ""}
+                        </div>
+                        <div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">
+                            👉 請確認以上需求總結是否符合預期。若需調整請於上方繼續提問；確認無誤後點擊下方按鈕啟動管線編譯。
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                gate_c1, gate_c2 = st.columns([1, 2])
+                with gate_c1:
+                    if st.button("✏️ 還需微調細節" if not is_en else "✏️ Fine-tune Details", use_container_width=True):
+                        st.session_state["socratic_summary_memo"] = None
+                        st.rerun()
+
+                with gate_c2:
+                    compile_signoff_label = (
+                        "⚡ 確認無誤，動態編譯數據管線 (Sign-off & Compile)"
+                        if not is_en
+                        else "⚡ Sign-off & Compile dbt Pipeline"
+                    )
+                    if st.button(compile_signoff_label, type="primary", use_container_width=True):
+                        active_api_key = (
+                            st.session_state.get("user_gemini_key")
+                            or st.session_state.get("gemini_api_key")
+                            or os.getenv("GEMINI_API_KEY", "")
+                        ).strip()
+                        spinner_msg = (
+                            "Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."
+                            if not is_en
+                            else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
+                        )
+                        with st.spinner(spinner_msg):
+                            # Append user chat notes into decisions so synthesizer honors the depth
+                            signed_decisions = dict(user_choices)
+                            if memo.get("chat_context_notes"):
+                                signed_decisions["custom_chat_notes"] = f"custom:{memo.get('chat_context_notes')}"
+                            res = synthesize_dynamic_dbt_model(
+                                user_goal=active_session.user_goal,
+                                decisions=signed_decisions,
+                                reflection=reflection,
+                                api_key=active_api_key,
+                            )
+                            st.session_state["schema_design_result"] = res
+                            st.session_state["socratic_signed_off"] = True
+                            st.rerun()
 
     # 2. Render Successful Compilation Output
     result = st.session_state.get("schema_design_result")
