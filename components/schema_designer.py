@@ -447,10 +447,19 @@ def render_schema_designer_view(
                             else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
                         )
                         with st.spinner(spinner_msg):
-                            # Append user chat notes into decisions so synthesizer honors the depth
+                            # Append user chat notes and extracted memo predicates into decisions so synthesizer honors the depth
                             signed_decisions = dict(user_choices)
                             if memo.get("chat_context_notes"):
                                 signed_decisions["custom_chat_notes"] = f"custom:{memo.get('chat_context_notes')}"
+                            if memo.get("market_country"):
+                                signed_decisions["geographic"] = memo.get("market_country")
+                            if memo.get("category_filter"):
+                                signed_decisions["category_filter"] = memo.get("category_filter")
+                            if memo.get("focus_entity"):
+                                signed_decisions["focus_entity"] = memo.get("focus_entity")
+                            if memo.get("target_grain"):
+                                signed_decisions["grain"] = memo.get("target_grain")
+
                             res = synthesize_dynamic_dbt_model(
                                 user_goal=active_session.user_goal,
                                 decisions=signed_decisions,
