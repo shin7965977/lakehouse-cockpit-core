@@ -123,7 +123,11 @@ def render_schema_designer_view(
     # Action Trigger
     btn_label = "🚀 合成並驗證 dbt 數據管線 (Synthesize & Validate dbt Pipeline)" if not is_en else "🚀 Synthesize & Validate dbt Pipeline"
     if st.button(btn_label, type="primary", use_container_width=True):
-        current_query = st.session_state.get("schema_designer_goal", "").strip()
+        current_query = (user_goal_input or st.session_state.get("schema_designer_goal", "")).strip()
+        st.session_state["schema_designer_goal"] = current_query
+        st.session_state["active_socratic_session"] = None
+        st.session_state["schema_design_result"] = None
+
         active_api_key = (
             st.session_state.get("user_gemini_key")
             or st.session_state.get("gemini_api_key")
@@ -140,6 +144,7 @@ def render_schema_designer_view(
                     current_query, session.locked_decisions, reflection, api_key=active_api_key
                 )
                 st.session_state["schema_design_result"] = res
+                st.rerun()
 
     # 1. Handle Socratic Clarification Dialogue State
     active_session: SocraticSessionState | None = st.session_state.get("active_socratic_session")
