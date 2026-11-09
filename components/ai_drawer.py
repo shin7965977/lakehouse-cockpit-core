@@ -44,6 +44,45 @@ def _validate_gemini_key(key: str) -> bool:
     return len(k) >= 30
 
 
+def _get_local_cache_path() -> str:
+    """Return local persistent key cache file path."""
+    return os.path.expanduser("~/.koro_gemini_key")
+
+
+def _load_persisted_key() -> str:
+    """Load persisted Gemini key from local safe cache if present and valid."""
+    path = _get_local_cache_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                k = f.read().strip()
+                if _validate_gemini_key(k):
+                    return k
+        except Exception:
+            pass
+    return ""
+
+
+def _save_persisted_key(key: str) -> None:
+    """Save valid Gemini key to local safe cache file."""
+    path = _get_local_cache_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(key.strip())
+    except Exception:
+        pass
+
+
+def _delete_persisted_key() -> None:
+    """Remove persisted Gemini key from local safe cache."""
+    path = _get_local_cache_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
 def render_ai_drawer(
     active_scope_id: str,
     active_scope_title: str,
@@ -57,15 +96,24 @@ def render_ai_drawer(
     end_date: Any = None,
 ) -> None:
     """Render the right-side AI Copilot drawer with mandatory BYOK security wall and AE workflow trigger."""
-    # 1. Resolve Active Gemini API Key (Session State or Environment)
+    # 1. Resolve Active Gemini API Key (Session State, Local File Cache, or Environment)
     api_key_env = os.getenv("GEMINI_API_KEY", "").strip()
     session_key = (
         st.session_state.get("user_gemini_key")
         or st.session_state.get("gemini_api_key")
         or ""
     ).strip()
-    active_key = session_key or api_key_env
-    has_valid_key = _validate_gemini_key(active_key)
+    
+    # Auto-load cached key if session is empty
+    cached_key = _load_persisted_key() if not session_key else ""
+    raw_active_key = session_key or cached_key or api_key_env
+    has_valid_key = _validate_gemini_key(raw_active_key)
+    
+    # Clean Initial State: If invalid or placeholder, force empty string (never show masked dots)
+    display_key = raw_active_key if has_valid_key else ""
+    if has_valid_key and not session_key:
+        st.session_state["user_gemini_key"] = raw_active_key
+        st.session_state["gemini_api_key"] = raw_active_key
 
     # 2. Mandatory BYOK Key Input Bar (1:1 with ReadCall UI)
     st.markdown(
@@ -78,25 +126,40 @@ def render_ai_drawer(
     with k_col1:
         new_key_input = st.text_input(
             label="Gemini Key Input",
-            value=active_key,
+            value=display_key,
             type="password",
             placeholder="AIzaSy...",
             label_visibility="collapsed",
             key=f"gemini_key_input_{active_scope_id}",
         )
-        if new_key_input and new_key_input.strip() != active_key:
-            active_key = new_key_input.strip()
-            st.session_state["user_gemini_key"] = active_key
-            st.session_state["gemini_api_key"] = active_key
-            has_valid_key = _validate_gemini_key(active_key)
-    with k_col2:
-        save_label = "💾 Save" if is_en else "💾 儲存"
-        if st.button(save_label, key=f"btn_save_key_{active_scope_id}", use_container_width=True, type="primary"):
-            if new_key_input:
-                clean_k = new_key_input.strip()
+        if new_key_input and new_key_input.strip() != display_key:
+            clean_k = new_key_input.strip()
+            if _validate_gemini_key(clean_k):
                 st.session_state["user_gemini_key"] = clean_k
                 st.session_state["gemini_api_key"] = clean_k
+                _save_persisted_key(clean_k)
+                has_valid_key = True
+            else:
+                has_valid_key = False
+
+    with k_col2:
+        if has_valid_key:
+            clear_label = "🗑️ Clear" if is_en else "🗑️ 清除"
+            if st.button(clear_label, key=f"btn_clear_key_{active_scope_id}", use_container_width=True, help="清除並忘記儲存的金鑰"):
+                st.session_state["user_gemini_key"] = ""
+                st.session_state["gemini_api_key"] = ""
+                _delete_persisted_key()
                 st.rerun()
+        else:
+            save_label = "💾 Save" if is_en else "💾 儲存"
+            if st.button(save_label, key=f"btn_save_key_{active_scope_id}", use_container_width=True, type="primary"):
+                if new_key_input:
+                    clean_k = new_key_input.strip()
+                    if _validate_gemini_key(clean_k):
+                        st.session_state["user_gemini_key"] = clean_k
+                        st.session_state["gemini_api_key"] = clean_k
+                        _save_persisted_key(clean_k)
+                    st.rerun()
 
     # 3. Copilot Subheading with Badge
     hdr_col1, hdr_col2 = st.columns([7, 3])

@@ -344,15 +344,19 @@ def render_schema_designer_view(
                 unsafe_allow_html=True,
             )
 
+            # Dynamic safe key pattern to reset input without StreamlitWidgetAlreadyInstantiatedError
+            if "socratic_chat_counter" not in st.session_state:
+                st.session_state["socratic_chat_counter"] = 0
+
             chat_in_col, send_btn_col, sum_btn_col = st.columns([6, 1.5, 1.8])
             with chat_in_col:
                 chat_user_msg = st.text_input(
                     "其他對話細節內容：" if not is_en else "Additional context & inquiry:",
-                    value=st.session_state.get("socratic_chat_draft", ""),
+                    value="",
                     placeholder="例如：我想要細看各產品包裝規格（packaging_size）或折扣對銷售的影響..."
                     if not is_en
                     else "e.g., I want to drill down into packaging_size or discount impact on revenue...",
-                    key="socratic_persistent_chat_input",
+                    key=f"socratic_chat_input_w_{st.session_state['socratic_chat_counter']}",
                     label_visibility="collapsed",
                 )
 
@@ -378,9 +382,8 @@ def render_schema_designer_view(
                             st.session_state["socratic_chat_history"] = chat_history
                             # Reset memo since user added new requirements
                             st.session_state["socratic_summary_memo"] = None
-                            # Auto-clear input draft
-                            st.session_state["socratic_chat_draft"] = ""
-                            st.session_state["socratic_persistent_chat_input"] = ""
+                            # Safely reset next input by incrementing counter
+                            st.session_state["socratic_chat_counter"] += 1
                             st.rerun()
 
             with sum_btn_col:
