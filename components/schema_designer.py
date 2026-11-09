@@ -335,7 +335,8 @@ def render_schema_designer_view(
         with tab_biz:
             target_str = f"**分析粒度 (Target Grain)**: `{result.target_grain}` | **依賴之 Kimball 模型**: `{', '.join(result.upstream_tables)}`" if not is_en else f"**Target Grain**: `{result.target_grain}` | **Upstream Kimball Dependencies**: `{', '.join(result.upstream_tables)}`"
             st.markdown(target_str)
-            preview_title = "##### 實體 DuckDB Dry-Run 物理驗證數據預覽 (前 10 筆)：" if not is_en else "##### 5-Row Verified Data Preview (DuckDB Dry-Run Output):"
+            preview_rows = min(len(result.data_preview), 10)
+            preview_title = f"##### 實體 DuckDB Dry-Run 物理驗證數據預覽 (前 {preview_rows} 筆)：" if not is_en else f"##### {preview_rows}-Row Verified Data Preview (DuckDB Dry-Run Output):"
             st.markdown(preview_title)
             st.dataframe(result.data_preview.head(10), use_container_width=True)
 
