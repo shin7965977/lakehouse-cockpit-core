@@ -280,6 +280,8 @@ def render_schema_designer_view(
             # -------------------------------------------------------------
             if "socratic_chat_history" not in st.session_state:
                 st.session_state["socratic_chat_history"] = []
+            if "socratic_chat_draft" not in st.session_state:
+                st.session_state["socratic_chat_draft"] = ""
 
             chat_history: list[dict[str, str]] = st.session_state["socratic_chat_history"]
 
@@ -346,6 +348,7 @@ def render_schema_designer_view(
             with chat_in_col:
                 chat_user_msg = st.text_input(
                     "其他對話細節內容：" if not is_en else "Additional context & inquiry:",
+                    value=st.session_state.get("socratic_chat_draft", ""),
                     placeholder="例如：我想要細看各產品包裝規格（packaging_size）或折扣對銷售的影響..."
                     if not is_en
                     else "e.g., I want to drill down into packaging_size or discount impact on revenue...",
@@ -375,6 +378,9 @@ def render_schema_designer_view(
                             st.session_state["socratic_chat_history"] = chat_history
                             # Reset memo since user added new requirements
                             st.session_state["socratic_summary_memo"] = None
+                            # Auto-clear input draft
+                            st.session_state["socratic_chat_draft"] = ""
+                            st.session_state["socratic_persistent_chat_input"] = ""
                             st.rerun()
 
             with sum_btn_col:
@@ -393,82 +399,157 @@ def render_schema_designer_view(
                             api_key=active_api_key,
                         )
                         st.session_state["socratic_summary_memo"] = memo
+                        st.session_state["socratic_memo_edit_mode"] = False
                         st.rerun()
 
             # -------------------------------------------------------------
-            # Requirement Summary Card & Mandatory Sign-off Gatekeeper
+            # Requirement Summary Card & In-Place Textual Fine-Tuning Gate
             # -------------------------------------------------------------
             memo = st.session_state.get("socratic_summary_memo")
+            is_edit_mode = st.session_state.get("socratic_memo_edit_mode", False)
             if memo:
-                st.markdown(
-                    f"""
-                    <div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">
-                        <div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
-                            📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)
+                if is_edit_mode:
+                    # In-place Textual Edit Mode
+                    st.markdown(
+                        """
+                        <div style="background-color: #EFF6FF; border: 2px dashed #2563EB; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                            <div style="font-weight: 700; color: #1D4ED8; font-size: 1.05rem; margin-bottom: 8px;">
+                                ✏️ 就地微調需求備忘錄 (In-Place Textual Specification Fine-Tuning)
+                            </div>
+                            <div style="color: #1E40AF; font-size: 0.85rem; margin-bottom: 12px;">
+                                您可以直接在下方文字框中微調各項分析維度與目標，修改完成後點擊「💾 保存修改」即可即時更新規格：
+                            </div>
                         </div>
-                        <div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">
-                            • <strong>商業分析目標</strong>：{memo.get('analytical_objective')}<br>
-                            • <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get('target_grain')}</code><br>
-                            • <strong>時間分析區間</strong>：<code>{memo.get('date_range')}</code><br>
-                            • <strong>目標地理市場</strong>：<code>{memo.get('market_country')}</code><br>
-                            • <strong>核心計算指標</strong>：<code>{', '.join(memo.get('target_metrics', []))}</code><br>
-                            • <strong>上游依賴實體</strong>：<code>{', '.join(memo.get('upstream_tables', []))}</code>
-                            {f"<br>• <strong>對話補充要點</strong>：<em>{memo.get('chat_context_notes')}</em>" if memo.get('chat_context_notes') else ""}
-                        </div>
-                        <div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">
-                            👉 請確認以上需求總結是否符合預期。若需調整請於上方繼續提問；確認無誤後點擊下方按鈕啟動管線編譯。
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                gate_c1, gate_c2 = st.columns([1, 2])
-                with gate_c1:
-                    if st.button("✏️ 還需微調細節" if not is_en else "✏️ Fine-tune Details", use_container_width=True):
-                        st.session_state["socratic_summary_memo"] = None
-                        st.rerun()
-
-                with gate_c2:
-                    compile_signoff_label = (
-                        "⚡ 確認無誤，動態編譯數據管線 (Sign-off & Compile)"
-                        if not is_en
-                        else "⚡ Sign-off & Compile dbt Pipeline"
+                        """,
+                        unsafe_allow_html=True,
                     )
-                    if st.button(compile_signoff_label, type="primary", use_container_width=True):
-                        active_api_key = (
-                            st.session_state.get("user_gemini_key")
-                            or st.session_state.get("gemini_api_key")
-                            or os.getenv("GEMINI_API_KEY", "")
-                        ).strip()
-                        spinner_msg = (
-                            "Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."
-                            if not is_en
-                            else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
+                    edit_obj = st.text_area(
+                        "商業分析目標 (Analytical Objective):",
+                        value=memo.get("analytical_objective", ""),
+                        key="edit_memo_obj_field",
+                    )
+                    e_col1, e_col2 = st.columns(2)
+                    with e_col1:
+                        edit_grain = st.text_input(
+                            "分析資料粒度 (Target Grain):",
+                            value=memo.get("target_grain", ""),
+                            key="edit_memo_grain_field",
                         )
-                        with st.spinner(spinner_msg):
-                            # Append user chat notes and extracted memo predicates into decisions so synthesizer honors the depth
-                            signed_decisions = dict(user_choices)
-                            if memo.get("chat_context_notes"):
-                                signed_decisions["custom_chat_notes"] = f"custom:{memo.get('chat_context_notes')}"
-                            if memo.get("market_country"):
-                                signed_decisions["geographic"] = memo.get("market_country")
-                            if memo.get("category_filter"):
-                                signed_decisions["category_filter"] = memo.get("category_filter")
-                            if memo.get("focus_entity"):
-                                signed_decisions["focus_entity"] = memo.get("focus_entity")
-                            if memo.get("target_grain"):
-                                signed_decisions["grain"] = memo.get("target_grain")
+                        edit_market = st.text_input(
+                            "目標地理市場 (Market Country e.g. DE / AT / FR / ALL_EU):",
+                            value=memo.get("market_country", "ALL_EU"),
+                            key="edit_memo_market_field",
+                        )
+                    with e_col2:
+                        edit_focus = st.text_input(
+                            "核心分析焦點 (Focus Entity e.g. return_reason / pricing_revenue):",
+                            value=memo.get("focus_entity", "revenue"),
+                            key="edit_memo_focus_field",
+                        )
+                        edit_cat = st.text_input(
+                            "產品品類過濾 (Category Filter e.g. Nuts & Butters / null):",
+                            value=memo.get("category_filter") or "",
+                            key="edit_memo_cat_field",
+                        )
+                    edit_metrics_str = st.text_input(
+                        "核心計算指標 (Target Metrics, 逗號分隔):",
+                        value=", ".join(memo.get("target_metrics", [])),
+                        key="edit_memo_metrics_field",
+                    )
 
-                            res = synthesize_dynamic_dbt_model(
-                                user_goal=active_session.user_goal,
-                                decisions=signed_decisions,
-                                reflection=reflection,
-                                api_key=active_api_key,
-                            )
-                            st.session_state["schema_design_result"] = res
-                            st.session_state["socratic_signed_off"] = True
+                    save_col, cancel_col = st.columns([1, 1])
+                    with save_col:
+                        if st.button("💾 保存修改 (Save Edits)", type="primary", use_container_width=True):
+                            memo["analytical_objective"] = edit_obj.strip()
+                            memo["target_grain"] = edit_grain.strip()
+                            memo["market_country"] = edit_market.strip().upper()
+                            memo["focus_entity"] = edit_focus.strip()
+                            memo["category_filter"] = edit_cat.strip() if edit_cat.strip() else None
+                            memo["target_metrics"] = [m.strip() for m in edit_metrics_str.split(",") if m.strip()]
+                            st.session_state["socratic_summary_memo"] = memo
+                            st.session_state["socratic_memo_edit_mode"] = False
                             st.rerun()
+                    with cancel_col:
+                        if st.button("❌ 取消微調 (Cancel)", use_container_width=True):
+                            st.session_state["socratic_memo_edit_mode"] = False
+                            st.rerun()
+
+                else:
+                    # View Mode: High-contrast Memo Presentation
+                    cat_display = f"<br>• <strong>產品品類篩選</strong>：<code>{memo.get('category_filter')}</code>" if memo.get('category_filter') else ""
+                    focus_display = f"<br>• <strong>分析焦點實體</strong>：<code>{memo.get('focus_entity')}</code>" if memo.get('focus_entity') else ""
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                            <div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                                📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)
+                            </div>
+                            <div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">
+                                • <strong>商業分析目標</strong>：{memo.get('analytical_objective')}<br>
+                                • <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get('target_grain')}</code><br>
+                                • <strong>時間分析區間</strong>：<code>{memo.get('date_range')}</code><br>
+                                • <strong>目標地理市場</strong>：<code>{memo.get('market_country')}</code>
+                                {cat_display}
+                                {focus_display}<br>
+                                • <strong>核心計算指標</strong>：<code>{', '.join(memo.get('target_metrics', []))}</code><br>
+                                • <strong>上游依賴實體</strong>：<code>{', '.join(memo.get('upstream_tables', []))}</code>
+                                {f"<br>• <strong>對話補充要點</strong>：<em>{memo.get('chat_context_notes')}</em>" if memo.get('chat_context_notes') else ""}
+                            </div>
+                            <div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">
+                                👉 請確認以上需求總結是否符合預期。若需就地修改文字請點擊「✏️ 還需微調細節」；確認無誤後點擊右方按鈕啟動管線編譯。
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    gate_c1, gate_c2 = st.columns([1, 2])
+                    with gate_c1:
+                        if st.button("✏️ 還需微調細節" if not is_en else "✏️ Fine-tune Details", use_container_width=True):
+                            st.session_state["socratic_memo_edit_mode"] = True
+                            st.rerun()
+
+                    with gate_c2:
+                        compile_signoff_label = (
+                            "⚡ 確認無誤，動態編譯數據管線 (Sign-off & Compile)"
+                            if not is_en
+                            else "⚡ Sign-off & Compile dbt Pipeline"
+                        )
+                        if st.button(compile_signoff_label, type="primary", use_container_width=True):
+                            active_api_key = (
+                                st.session_state.get("user_gemini_key")
+                                or st.session_state.get("gemini_api_key")
+                                or os.getenv("GEMINI_API_KEY", "")
+                            ).strip()
+                            spinner_msg = (
+                                "Gemini 正在動態生成 dbt SQL 與 Data Contract，並於 DuckDB 物理庫執行 Dry-Run..."
+                                if not is_en
+                                else "Gemini is dynamically synthesizing dbt SQL & contract and executing physical DuckDB dry-run..."
+                            )
+                            with st.spinner(spinner_msg):
+                                # Append user chat notes and extracted memo predicates into decisions so synthesizer honors the depth
+                                signed_decisions = dict(user_choices)
+                                if memo.get("chat_context_notes"):
+                                    signed_decisions["custom_chat_notes"] = f"custom:{memo.get('chat_context_notes')}"
+                                if memo.get("market_country"):
+                                    signed_decisions["geographic"] = memo.get("market_country")
+                                if memo.get("category_filter"):
+                                    signed_decisions["category_filter"] = memo.get("category_filter")
+                                if memo.get("focus_entity"):
+                                    signed_decisions["focus_entity"] = memo.get("focus_entity")
+                                if memo.get("target_grain"):
+                                    signed_decisions["grain"] = memo.get("target_grain")
+
+                                res = synthesize_dynamic_dbt_model(
+                                    user_goal=active_session.user_goal,
+                                    decisions=signed_decisions,
+                                    reflection=reflection,
+                                    api_key=active_api_key,
+                                )
+                                st.session_state["schema_design_result"] = res
+                                st.session_state["socratic_signed_off"] = True
+                                st.session_state["socratic_memo_edit_mode"] = False
+                                st.rerun()
 
     # 2. Render Successful Compilation Output
     result = st.session_state.get("schema_design_result")
