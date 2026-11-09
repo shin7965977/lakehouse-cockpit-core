@@ -534,6 +534,10 @@ def render_schema_designer_view(
                                 signed_decisions = dict(user_choices)
                                 if memo.get("chat_context_notes"):
                                     signed_decisions["custom_chat_notes"] = f"custom:{memo.get('chat_context_notes')}"
+                                if memo.get("start_date") and memo.get("end_date"):
+                                    signed_decisions["start_date"] = memo.get("start_date")
+                                    signed_decisions["end_date"] = memo.get("end_date")
+                                    signed_decisions["temporal"] = f"{memo.get('start_date')}:{memo.get('end_date')}"
                                 if memo.get("market_country"):
                                     signed_decisions["geographic"] = memo.get("market_country")
                                 if memo.get("category_filter"):
