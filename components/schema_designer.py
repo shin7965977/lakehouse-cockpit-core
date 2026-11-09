@@ -230,7 +230,7 @@ def render_schema_designer_view(
                     unsafe_allow_html=True,
                 )
 
-        elif active_session.needs_clarification and not st.session_state.get("schema_design_result"):
+        elif active_session.needs_clarification:
             st.markdown(
                 """
                 <div style="background-color: #F0FDF4; border: 1.5px solid #86EFAC; border-radius: 8px; padding: 16px; margin: 16px 0;">
