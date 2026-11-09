@@ -8,6 +8,7 @@ and trace the end-to-end execution audit log.
 from __future__ import annotations
 
 import os
+import textwrap
 import streamlit as st
 import pandas as pd
 from typing import Any
@@ -482,27 +483,29 @@ def render_schema_designer_view(
                     cat_display = f"<br>• <strong>產品品類篩選</strong>：<code>{memo.get('category_filter')}</code>" if memo.get('category_filter') else ""
                     focus_display = f"<br>• <strong>分析焦點實體</strong>：<code>{memo.get('focus_entity')}</code>" if memo.get('focus_entity') else ""
                     st.markdown(
-                        f"""
-                        <div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">
-                            <div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
-                                📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)
+                        textwrap.dedent(
+                            f"""
+                            <div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">
+                                <div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                                    📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)
+                                </div>
+                                <div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">
+                                    • <strong>商業分析目標</strong>：{memo.get('analytical_objective')}<br>
+                                    • <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get('target_grain')}</code><br>
+                                    • <strong>時間分析區間</strong>：<code>{memo.get('date_range')}</code><br>
+                                    • <strong>目標地理市場</strong>：<code>{memo.get('market_country')}</code>
+                                    {cat_display}
+                                    {focus_display}<br>
+                                    • <strong>核心計算指標</strong>：<code>{', '.join(memo.get('target_metrics', []))}</code><br>
+                                    • <strong>上游依賴實體</strong>：<code>{', '.join(memo.get('upstream_tables', []))}</code>
+                                    {f"<br>• <strong>對話補充要點</strong>：<em>{memo.get('chat_context_notes')}</em>" if memo.get('chat_context_notes') else ""}
+                                </div>
+                                <div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">
+                                    👉 請確認以上需求總結是否符合預期。若需就地修改文字請點擊「✏️ 還需微調細節」；確認無誤後點擊右方按鈕啟動管線編譯。
+                                </div>
                             </div>
-                            <div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">
-                                • <strong>商業分析目標</strong>：{memo.get('analytical_objective')}<br>
-                                • <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get('target_grain')}</code><br>
-                                • <strong>時間分析區間</strong>：<code>{memo.get('date_range')}</code><br>
-                                • <strong>目標地理市場</strong>：<code>{memo.get('market_country')}</code>
-                                {cat_display}
-                                {focus_display}<br>
-                                • <strong>核心計算指標</strong>：<code>{', '.join(memo.get('target_metrics', []))}</code><br>
-                                • <strong>上游依賴實體</strong>：<code>{', '.join(memo.get('upstream_tables', []))}</code>
-                                {f"<br>• <strong>對話補充要點</strong>：<em>{memo.get('chat_context_notes')}</em>" if memo.get('chat_context_notes') else ""}
-                            </div>
-                            <div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">
-                                👉 請確認以上需求總結是否符合預期。若需就地修改文字請點擊「✏️ 還需微調細節」；確認無誤後點擊右方按鈕啟動管線編譯。
-                            </div>
-                        </div>
-                        """,
+                            """
+                        ),
                         unsafe_allow_html=True,
                     )
 
