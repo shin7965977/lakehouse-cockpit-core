@@ -44,33 +44,46 @@ def _validate_gemini_key(key: str) -> bool:
     return len(k) >= 30
 
 
-def _get_local_cache_path() -> str:
-    """Return local persistent key cache file path."""
-    return os.path.expanduser("~/.koro_gemini_key")
+def _get_local_cache_paths() -> list[str]:
+    """Return local persistent key cache file paths."""
+    return [
+        os.path.expanduser("~/.koro_gemini_key"),
+        os.path.abspath(os.path.join(os.getcwd(), ".koro_gemini_key")),
+    ]
 
 
 def _load_persisted_key() -> str:
     """Load persisted Gemini key from local safe cache if present and valid."""
-    path = _get_local_cache_path()
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                k = f.read().strip()
-                if _validate_gemini_key(k):
-                    return k
-        except Exception:
-            pass
+    for path in _get_local_cache_paths():
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    k = f.read().strip()
+                    if _validate_gemini_key(k):
+                        return k
+            except Exception:
+                pass
     return ""
 
 
 def _save_persisted_key(key: str) -> None:
     """Save valid Gemini key to local safe cache file."""
-    path = _get_local_cache_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(key.strip())
-    except Exception:
-        pass
+    for path in _get_local_cache_paths():
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(key.strip())
+        except Exception:
+            pass
+
+
+def _delete_persisted_key() -> None:
+    """Delete persisted Gemini key from local safe cache."""
+    for path in _get_local_cache_paths():
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
 
 
 def _delete_persisted_key() -> None:
@@ -116,6 +129,11 @@ def render_ai_drawer(
         st.session_state["gemini_api_key"] = raw_active_key
 
     # 2. Mandatory BYOK Key Input Bar (1:1 with ReadCall UI)
+    input_widget_key = f"gemini_key_input_{active_scope_id}"
+    if has_valid_key and display_key:
+        if input_widget_key not in st.session_state or not st.session_state[input_widget_key]:
+            st.session_state[input_widget_key] = display_key
+
     st.markdown(
         "**🔑 Gemini API Key (Mandatory)** *(Instant Preflight)*"
         if is_en
@@ -130,7 +148,7 @@ def render_ai_drawer(
             type="password",
             placeholder="AIzaSy...",
             label_visibility="collapsed",
-            key=f"gemini_key_input_{active_scope_id}",
+            key=input_widget_key,
         )
         if new_key_input and new_key_input.strip() != display_key:
             clean_k = new_key_input.strip()
