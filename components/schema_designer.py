@@ -144,7 +144,7 @@ def render_schema_designer_view(
         ).strip()
         spinner_msg = "AI Socratic Agent 正在解析商業目標與湖倉數據邊界..." if not is_en else "AI Socratic Agent inspecting business goals and lakehouse boundaries..."
         with st.spinner(spinner_msg):
-            session = analyze_socratic_inquiry(current_query, reflection=reflection, api_key=active_api_key)
+            session = analyze_socratic_inquiry(current_query, reflection=reflection, api_key=active_api_key, is_en=is_en)
             st.session_state["active_socratic_session"] = session
 
             if not session.needs_clarification and not session.is_out_of_domain:
@@ -295,7 +295,11 @@ def render_schema_designer_view(
                 )
                 for item in chat_history:
                     role_icon = "👤" if item.get("role") == "user" else "🤖"
-                    role_title = "利害關係人 (Stakeholder)" if item.get("role") == "user" else "AI 湖倉顧問 (Analytics Copilot)"
+                    role_title = (
+                        ("利害關係人 (Stakeholder)" if item.get("role") == "user" else "AI 湖倉顧問 (Analytics Copilot)")
+                        if not is_en
+                        else ("Stakeholder" if item.get("role") == "user" else "AI Lakehouse Copilot")
+                    )
                     bg_color = "#F8FAFC" if item.get("role") == "user" else "#F0FDF4"
                     border_color = "#E2E8F0" if item.get("role") == "user" else "#BBF7D0"
                     st.markdown(
@@ -363,7 +367,8 @@ def render_schema_designer_view(
 
             with send_btn_col:
                 send_label = "💬 輸入" if not is_en else "💬 Send"
-                if st.button(send_label, type="primary", use_container_width=True, help="送出對話，向 AI 顧問提問或補充細節（不立即生成 SQL）"):
+                send_help = "送出對話，向 AI 顧問提問或補充細節（不立即生成 SQL）" if not is_en else "Send message to clarify requirements with AI Copilot"
+                if st.button(send_label, type="primary", use_container_width=True, help=send_help):
                     if chat_user_msg.strip():
                         active_api_key = (
                             st.session_state.get("user_gemini_key")
@@ -378,6 +383,7 @@ def render_schema_designer_view(
                                 user_goal=active_session.user_goal,
                                 reflection=reflection,
                                 api_key=active_api_key,
+                                is_en=is_en,
                             )
                             chat_history.append({"role": "assistant", "content": advice})
                             st.session_state["socratic_chat_history"] = chat_history
@@ -389,7 +395,8 @@ def render_schema_designer_view(
 
             with sum_btn_col:
                 sum_label = "📋 總結需求" if not is_en else "📋 Summarize"
-                if st.button(sum_label, type="secondary", use_container_width=True, help="根據當前勾選項與所有對話，生成結構化需求總結備忘錄"):
+                sum_help = "根據當前勾選項與所有對話，生成結構化需求總結備忘錄" if not is_en else "Consolidate selected options and dialogue into a structured memo"
+                if st.button(sum_label, type="secondary", use_container_width=True, help=sum_help):
                     active_api_key = (
                         st.session_state.get("user_gemini_key")
                         or st.session_state.get("gemini_api_key")
@@ -401,6 +408,7 @@ def render_schema_designer_view(
                             decisions=user_choices,
                             chat_history=chat_history,
                             api_key=active_api_key,
+                            is_en=is_en,
                         )
                         st.session_state["socratic_summary_memo"] = memo
                         st.session_state["socratic_memo_edit_mode"] = False
@@ -414,66 +422,76 @@ def render_schema_designer_view(
             if memo:
                 if is_edit_mode:
                     # In-place Textual Edit Mode
+                    edit_banner_title = "✏️ In-Place Textual Specification Fine-Tuning" if is_en else "✏️ 就地微調需求備忘錄 (In-Place Textual Specification Fine-Tuning)"
+                    edit_banner_sub = "Directly adjust analysis dimensions below, then click 'Save Changes' to update:" if is_en else "您可以直接在下方文字框中微調各項分析維度與目標，修改完成後點擊「💾 保存修改」即可即時更新規格："
                     st.markdown(
-                        """
+                        f"""
                         <div style="background-color: #EFF6FF; border: 2px dashed #2563EB; border-radius: 8px; padding: 16px; margin: 16px 0;">
                             <div style="font-weight: 700; color: #1D4ED8; font-size: 1.05rem; margin-bottom: 8px;">
-                                ✏️ 就地微調需求備忘錄 (In-Place Textual Specification Fine-Tuning)
+                                {edit_banner_title}
                             </div>
                             <div style="color: #1E40AF; font-size: 0.85rem; margin-bottom: 12px;">
-                                您可以直接在下方文字框中微調各項分析維度與目標，修改完成後點擊「💾 保存修改」即可即時更新規格：
+                                {edit_banner_sub}
                             </div>
                         </div>
                         """,
                         unsafe_allow_html=True,
                     )
                     edit_obj = st.text_area(
-                        "商業分析目標 (Analytical Objective):",
+                        "Analytical Objective:" if is_en else "商業分析目標 (Analytical Objective):",
                         value=memo.get("analytical_objective", ""),
                         key="edit_memo_obj_field",
                     )
                     e_col1, e_col2 = st.columns(2)
                     with e_col1:
                         edit_grain = st.text_input(
-                            "分析資料粒度 (Target Grain):",
+                            "Target Data Grain:" if is_en else "分析資料粒度 (Target Grain):",
                             value=memo.get("target_grain", ""),
                             key="edit_memo_grain_field",
                         )
                         edit_market = st.text_input(
-                            "目標地理市場 (Market Country e.g. DE / AT / FR / ALL_EU):",
+                            "Target Market Country (e.g. DE / AT / FR / ALL_EU):" if is_en else "目標地理市場 (Market Country e.g. DE / AT / FR / ALL_EU):",
                             value=memo.get("market_country", "ALL_EU"),
                             key="edit_memo_market_field",
                         )
                     with e_col2:
                         edit_focus = st.text_input(
-                            "核心分析焦點 (Focus Entity e.g. return_reason / pricing_revenue):",
+                            "Focus Entity (e.g. return_reason / pricing_revenue):" if is_en else "核心分析焦點 (Focus Entity e.g. return_reason / pricing_revenue):",
                             value=memo.get("focus_entity", "revenue"),
                             key="edit_memo_focus_field",
                         )
                         edit_cat = st.text_input(
-                            "產品品類過濾 (Category Filter e.g. Nuts & Butters / null):",
+                            "Category Filter (e.g. Nuts & Butters / null):" if is_en else "產品品類過濾 (Category Filter e.g. Nuts & Butters / null):",
                             value=memo.get("category_filter") or "",
                             key="edit_memo_cat_field",
                         )
                     edit_metrics_str = st.text_input(
-                        "核心計算指標 (Target Metrics, 逗號分隔):",
+                        "Target Metrics (comma-separated):" if is_en else "核心計算指標 (Target Metrics, 逗號分隔):",
                         value=", ".join(memo.get("target_metrics", [])),
                         key="edit_memo_metrics_field",
                     )
 
                     save_col, cancel_col = st.columns([1, 1])
                     with save_col:
-                        if st.button("💾 保存修改 (Save Edits)", type="primary", use_container_width=True):
+                        if st.button("💾 Save Changes" if is_en else "💾 保存修改 (Save Edits)", type="primary", use_container_width=True):
                             clean_market = edit_market.strip().upper()
                             # Physical Catalog Dynamic Grounding Check
                             valid_physical_markets = reflection.get_distinct_column_values("fct_orders", "market_country")
                             if clean_market and clean_market != "ALL_EU" and valid_physical_markets and clean_market not in valid_physical_markets:
-                                st.error(
-                                    f"❌ 實體資料庫校驗未通過 (Physical Catalog Mismatch)：\n\n"
-                                    f"市場 '{clean_market}' 不存在於湖倉實體資料庫 `fct_orders.market_country`！\n\n"
-                                    f"實體庫中實際存在之活躍市場僅有：{', '.join(sorted(valid_physical_markets))}。\n\n"
-                                    f"禁止設定不存在的幽靈市場實體，請修正後再保存！"
-                                )
+                                if is_en:
+                                    st.error(
+                                        f"❌ Physical Catalog Grounding Mismatch:\n\n"
+                                        f"Market '{clean_market}' does not exist in lakehouse `fct_orders.market_country`!\n\n"
+                                        f"Valid physical markets: {', '.join(sorted(valid_physical_markets))}.\n\n"
+                                        f"Phantom market entities are prohibited under Zero-Facade governance."
+                                    )
+                                else:
+                                    st.error(
+                                        f"❌ 實體資料庫校驗未通過 (Physical Catalog Mismatch)：\n\n"
+                                        f"市場 '{clean_market}' 不存在於湖倉實體資料庫 `fct_orders.market_country`！\n\n"
+                                        f"實體庫中實際存在之活躍市場僅有：{', '.join(sorted(valid_physical_markets))}。\n\n"
+                                        f"禁止設定不存在的幽靈市場實體，請修正後再保存！"
+                                    )
                             else:
                                 memo["analytical_objective"] = edit_obj.strip()
                                 memo["target_grain"] = edit_grain.strip()
@@ -485,35 +503,60 @@ def render_schema_designer_view(
                                 st.session_state["socratic_memo_edit_mode"] = False
                                 st.rerun()
                     with cancel_col:
-                        if st.button("❌ 取消微調 (Cancel)", use_container_width=True):
+                        if st.button("❌ Cancel" if is_en else "❌ 取消微調 (Cancel)", use_container_width=True):
                             st.session_state["socratic_memo_edit_mode"] = False
                             st.rerun()
 
                 else:
                     # View Mode: High-contrast Memo Presentation
-                    cat_display = f"<br>• <strong>產品品類篩選</strong>：<code>{memo.get('category_filter')}</code>" if memo.get('category_filter') else ""
-                    focus_display = f"<br>• <strong>分析焦點實體</strong>：<code>{memo.get('focus_entity')}</code>" if memo.get('focus_entity') else ""
-                    memo_html = (
-                        f'<div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">'
-                        f'<div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">'
-                        f'📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)'
-                        f'</div>'
-                        f'<div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">'
-                        f'• <strong>商業分析目標</strong>：{memo.get("analytical_objective")}<br>'
-                        f'• <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get("target_grain")}</code><br>'
-                        f'• <strong>時間分析區間</strong>：<code>{memo.get("date_range")}</code><br>'
-                        f'• <strong>目標地理市場</strong>：<code>{memo.get("market_country")}</code>'
-                        f'{cat_display}'
-                        f'{focus_display}<br>'
-                        f'• <strong>核心計算指標</strong>：<code>{", ".join(memo.get("target_metrics", []))}</code><br>'
-                        f'• <strong>上游依賴實體</strong>：<code>{", ".join(memo.get("upstream_tables", []))}</code>'
-                        f'{"<br>• <strong>對話補充要點</strong>：<em>" + str(memo.get("chat_context_notes")) + "</em>" if memo.get("chat_context_notes") else ""}'
-                        f'</div>'
-                        f'<div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">'
-                        f'👉 請確認以上需求總結是否符合預期。若需就地修改文字請點擊「✏️ 還需微調細節」；確認無誤後點擊右方按鈕啟動管線編譯。'
-                        f'</div>'
-                        f'</div>'
-                    )
+                    if is_en:
+                        cat_display = f"<br>• <strong>Category Filter</strong>: <code>{memo.get('category_filter')}</code>" if memo.get('category_filter') else ""
+                        focus_display = f"<br>• <strong>Focus Entity</strong>: <code>{memo.get('focus_entity')}</code>" if memo.get('focus_entity') else ""
+                        memo_html = (
+                            f'<div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">'
+                            f'<div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">'
+                            f'📋 Analytical Requirement Specification Memo'
+                            f'</div>'
+                            f'<div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">'
+                            f'• <strong>Analytical Objective</strong>: {memo.get("analytical_objective")}<br>'
+                            f'• <strong>Target Data Grain</strong>: <code>{memo.get("target_grain")}</code><br>'
+                            f'• <strong>Temporal Analysis Window</strong>: <code>{memo.get("date_range")}</code><br>'
+                            f'• <strong>Target Geographic Market</strong>: <code>{memo.get("market_country")}</code>'
+                            f'{cat_display}'
+                            f'{focus_display}<br>'
+                            f'• <strong>Target Metrics</strong>: <code>{", ".join(memo.get("target_metrics", []))}</code><br>'
+                            f'• <strong>Upstream Dependencies</strong>: <code>{", ".join(memo.get("upstream_tables", []))}</code>'
+                            f'{"<br>• <strong>Advisory Consensus Notes</strong>: <em>" + str(memo.get("chat_context_notes")) + "</em>" if memo.get("chat_context_notes") else ""}'
+                            f'</div>'
+                            f'<div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">'
+                            f'👉 Please review the requirement specification above. Click \'Fine-tune Details\' to modify, or click \'Sign-off & Compile\' to launch pipeline compilation.'
+                            f'</div>'
+                            f'</div>'
+                        )
+                    else:
+                        cat_display = f"<br>• <strong>產品品類篩選</strong>：<code>{memo.get('category_filter')}</code>" if memo.get('category_filter') else ""
+                        focus_display = f"<br>• <strong>分析焦點實體</strong>：<code>{memo.get('focus_entity')}</code>" if memo.get('focus_entity') else ""
+                        memo_html = (
+                            f'<div style="background-color: #F8FAFC; border: 2px solid #3B82F6; border-radius: 8px; padding: 18px; margin: 16px 0;">'
+                            f'<div style="font-weight: 700; color: #1E40AF; font-size: 1.05rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">'
+                            f'📋 分析需求總結備忘錄 (Analytical Requirement Specification Memo)'
+                            f'</div>'
+                            f'<div style="color: #1E293B; font-size: 0.92rem; line-height: 1.6;">'
+                            f'• <strong>商業分析目標</strong>：{memo.get("analytical_objective")}<br>'
+                            f'• <strong>目標資料粒度 (Grain)</strong>：<code>{memo.get("target_grain")}</code><br>'
+                            f'• <strong>時間分析區間</strong>：<code>{memo.get("date_range")}</code><br>'
+                            f'• <strong>目標地理市場</strong>：<code>{memo.get("market_country")}</code>'
+                            f'{cat_display}'
+                            f'{focus_display}<br>'
+                            f'• <strong>核心計算指標</strong>：<code>{", ".join(memo.get("target_metrics", []))}</code><br>'
+                            f'• <strong>上游依賴實體</strong>：<code>{", ".join(memo.get("upstream_tables", []))}</code>'
+                            f'{"<br>• <strong>對話補充要點</strong>：<em>" + str(memo.get("chat_context_notes")) + "</em>" if memo.get("chat_context_notes") else ""}'
+                            f'</div>'
+                            f'<div style="margin-top: 10px; font-size: 0.84rem; color: #64748B;">'
+                            f'👉 請確認以上需求總結是否符合預期。若需就地修改文字請點擊「✏️ 還需微調細節」；確認無誤後點擊右方按鈕啟動管線編譯。'
+                            f'</div>'
+                            f'</div>'
+                        )
                     st.markdown(memo_html, unsafe_allow_html=True)
 
                     gate_c1, gate_c2 = st.columns([1, 2])
