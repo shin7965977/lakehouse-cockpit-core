@@ -232,7 +232,20 @@ In GitHub Actions workflows, ensure `submodules: recursive` is declared so runne
 
 ---
 
-## 7. Contributing & Development
+## 7. Quick Demo: Interactive Component Showcase
+
+You can preview all UI widgets locally with deterministic E-Commerce mock data (no BigQuery or Gemini API key required):
+
+```bash
+streamlit run examples/showcase_app.py
+```
+
+- **Mode A (Default)**: 7:3 Integrated Cockpit with KPI Grid, Tabbed Feature Workspace (`On-Demand Insight`, `Silver`, `Bronze`, `SQL Sandbox`, `Looker`, `Data Center & AE Workflow`), and offline-capable AI Copilot Drawer.
+- **Mode B (Sidebar Toggle)**: Component Storybook with a left catalog list and right live preview + usage snippet for each widget in `components/`.
+
+---
+
+## 8. Contributing & Development
 
 ```bash
 # Clone the repository

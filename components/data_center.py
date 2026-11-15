@@ -9,8 +9,16 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
-from cockpit_core.reports.elementary_generator import get_elementary_report_html
-from cockpit_core.reports.dbt_docs_generator import get_dbt_docs_html
+try:
+    from ..reports.dbt_docs_generator import get_dbt_docs_html
+    from ..reports.elementary_generator import get_elementary_report_html
+except (ImportError, ValueError):
+    try:
+        from reports.dbt_docs_generator import get_dbt_docs_html
+        from reports.elementary_generator import get_elementary_report_html
+    except ImportError:
+        from cockpit_core.reports.dbt_docs_generator import get_dbt_docs_html
+        from cockpit_core.reports.elementary_generator import get_elementary_report_html
 
 
 def render_data_center_view() -> None:

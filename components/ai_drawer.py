@@ -107,6 +107,7 @@ def render_ai_drawer(
     data_dict: dict[str, pd.DataFrame] | None = None,
     start_date: Any = None,
     end_date: Any = None,
+    allow_mock_offline: bool = False,
 ) -> None:
     """Render the right-side AI Copilot drawer with mandatory BYOK security wall and AE workflow trigger."""
     # 1. Resolve Active Gemini API Key (Session State, Local File Cache, or Environment)
@@ -191,11 +192,13 @@ def render_ai_drawer(
     with hdr_col2:
         if has_valid_key:
             st.markdown('<span class="key-badge-active">✅ KEY ACTIVE</span>', unsafe_allow_html=True)
+        elif allow_mock_offline:
+            st.markdown('<span class="key-badge-active">🧪 MOCK OFFLINE</span>', unsafe_allow_html=True)
         else:
             st.markdown('<span class="key-badge-required">🔒 KEY REQUIRED</span>', unsafe_allow_html=True)
 
-    # 4. Check BYOK Wall: If No Valid Key, Display Strict Warning Card & Disable Chat
-    if not has_valid_key:
+    # 4. Check BYOK Wall: If No Valid Key, Display Strict Warning Card & Disable Chat (unless mock offline)
+    if not has_valid_key and not allow_mock_offline:
         st.markdown(
             """
             <div class="byok-callout-warning">
