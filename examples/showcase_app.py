@@ -36,8 +36,10 @@ from components.kpi_grid import render_kpi_grid  # noqa: E402
 from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
 from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
-from components.sql_expander import render_sql_snippet_module  # noqa: E402
-from components.sql_sandbox import render_sql_sandbox  # noqa: E402
+from components.sql_expander import (  # noqa: E402
+    render_dynamic_dbt_explorer_with_sandbox,
+    render_sql_snippet_module,
+)
 from components.text_to_chart import render_text_to_chart_module  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
@@ -178,6 +180,10 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
     @property
     def supports_spec_guidance(self) -> bool:
         return True
+
+    @property
+    def dbt_manifest_path(self) -> Path:
+        return Path(__file__).resolve().parent / "sample_manifest.json"
 
     @property
     def lookml_view_definition(self) -> str:
@@ -457,17 +463,6 @@ def build_component_registry(
     """Single source of truth registry powering both Mode A and Mode B."""
     sample_insight = _build_mock_insight(data_dict)
 
-    def _render_silver_and_sql_expander() -> None:
-        for tab_spec in adapter.medallion_layers["silver"]["tabs"]:
-            title = tab_spec.title_en if is_en else tab_spec.title_zh
-            st.markdown(f"#### {title}")
-            tab_spec.render_content(data_dict, is_en, adapter, start_date, end_date)
-        st.markdown("---")
-        for tab_spec in adapter.medallion_layers["bronze"]["tabs"]:
-            title = tab_spec.title_en if is_en else tab_spec.title_zh
-            st.markdown(f"#### {title}")
-            tab_spec.render_content(data_dict, is_en, adapter, start_date, end_date)
-
     def _render_schema() -> None:
         if render_schema_designer_view is not None:
             render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
@@ -518,36 +513,26 @@ def build_component_registry(
         ),
         ShowcaseComponentSpec(
             id="sql_expander",
-            tab_title="🥈 Silver / Bronze & SQL 展開器",
-            storybook_label="4. sql_expander.py",
-            fn_signature="render_sql_snippet_module()",
-            source_files=("components/sql_expander.py",),
-            snippet="render_sql_snippet_module(module_id='...', title_zh='...', source_table_label='...', sql_template='...', df_preview=df)",
-            description="Medallion 分層視圖與動態日期注入 SQL / 1:1 資料片段預覽展開器。",
+            tab_title="🥈 Silver / Bronze 動態模型 & SQL 沙盒",
+            storybook_label="4. sql_expander.py & sql_sandbox.py",
+            fn_signature="render_dynamic_dbt_explorer_with_sandbox()",
+            source_files=("components/sql_expander.py", "components/sql_sandbox.py"),
+            snippet="render_dynamic_dbt_explorer_with_sandbox(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
+            description="從 dbt manifest.json 動態解析 Silver / Bronze 模型、上游血緣、左右並排預覽與編譯後 SQL，並整合互動式 SQL 沙盒。",
             placement_in_mode_a="workspace_tab",
-            render=_render_silver_and_sql_expander,
-        ),
-        ShowcaseComponentSpec(
-            id="sql_sandbox",
-            tab_title="🧪 SQL 沙盒",
-            storybook_label="5. sql_sandbox.py",
-            fn_signature="render_sql_sandbox()",
-            source_files=("components/sql_sandbox.py",),
-            snippet="render_sql_sandbox(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
-            description="唯讀 DuckDB / SQLite 互動式 SQL 驗證沙盒。",
-            placement_in_mode_a="workspace_tab",
-            render=lambda: render_sql_sandbox(
+            render=lambda: render_dynamic_dbt_explorer_with_sandbox(
                 adapter=adapter,
                 data_dict=data_dict,
                 start_date=start_date,
                 end_date=end_date,
                 is_en=is_en,
+                scope_key="unified",
             ),
         ),
         ShowcaseComponentSpec(
             id="looker_view",
             tab_title="📈 Looker 視圖",
-            storybook_label="6. looker_view.py",
+            storybook_label="5. looker_view.py",
             fn_signature="render_looker_enterprise_view()",
             source_files=("components/looker_view.py",),
             snippet="render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -560,7 +545,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="schema_designer",
             tab_title="🏗️ Schema 設計器",
-            storybook_label="7. schema_designer.py",
+            storybook_label="6. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -571,7 +556,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="data_center_ae",
             tab_title="🏛️ 資料中心 & AE 流程",
-            storybook_label="8. data_center.py / ae_workflow.py",
+            storybook_label="7. data_center.py / ae_workflow.py",
             fn_signature="render_data_center_view() & render_ae_workflow_stepper()",
             source_files=("components/data_center.py", "components/ae_workflow.py"),
             snippet="render_data_center_view()\nrender_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -582,7 +567,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="ai_drawer",
             tab_title="🤖 AI 抽屜",
-            storybook_label="9. ai_drawer.py",
+            storybook_label="8. ai_drawer.py",
             fn_signature="render_ai_drawer()",
             source_files=("components/ai_drawer.py",),
             snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
@@ -609,7 +594,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="sidebar_ops",
             tab_title="⚡ 管線控制 & CSV 下載",
-            storybook_label="10. sidebar_ops.py",
+            storybook_label="9. sidebar_ops.py",
             fn_signature="render_sidebar_pipeline_ops()",
             source_files=("components/sidebar_ops.py",),
             snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",

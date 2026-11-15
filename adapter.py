@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -230,6 +231,11 @@ class BaseCockpitAdapter(ABC):
     def default_sandbox_sql(self) -> str:
         """Default query prefilled in the SQL Verification Sandbox."""
         return "SELECT * FROM mart_product_performance LIMIT 10;"
+
+    @property
+    def dbt_manifest_path(self) -> str | Path | None:
+        """Optional path to dbt target/manifest.json for dynamic Silver/Bronze SQL & lineage discovery."""
+        return None
 
     # =========================================================================
     # Looker Enterprise BI Hooks (Optional / Native)
