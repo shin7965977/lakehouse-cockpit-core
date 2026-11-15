@@ -123,11 +123,29 @@ except ImportError:
             models:
               - name: mart_product_performance
                 description: "Governed category performance mart synthesized from Socratic alignment."
+                config:
+                  contract:
+                    enforced: true
+                meta:
+                  owner: analytics-engineering@company.com
+                  sla_freshness: "24h"
+                  gdpr_pii: false
                 columns:
                   - name: category
+                    data_type: string
+                    constraints:
+                      - type: not_null
                     tests: [not_null, unique]
                   - name: total_gmv
+                    data_type: numeric
+                    constraints:
+                      - type: not_null
                     tests: [not_null]
+                  - name: order_count
+                    data_type: int64
+                    tests: [not_null]
+                  - name: return_rate_pct
+                    data_type: float64
             """
         )
         return _StandaloneSchemaResult(
@@ -783,21 +801,23 @@ def render_schema_designer_view(
 
         st.markdown("---")
 
-        # 3-Layer Inspector Tabs
+        # 4-Layer Inspector Tabs (Preview + Data Contract + dbt SQL + Semantic Layer)
         tab_titles = (
             [
                 "📊 業務洞察與即時數據預覽 (Live Data Preview)",
-                "📜 數據治理合約 (schema.yml)",
+                "📜 數據治理合約 (Data Contract · schema.yml)",
                 "⚙️ 動態合成之 dbt 模型 (.sql)",
+                "🧭 語意層定義 (Semantic Layer · MetricFlow & LookML)",
             ]
             if not is_en
             else [
                 "📊 Business Takeaway & Live Data Preview",
                 "📜 Governed Data Contract (`schema.yml`)",
                 "⚙️ Synthesized dbt Model (`.sql`)",
+                "🧭 Semantic Layer (`MetricFlow` & `LookML`)",
             ]
         )
-        tab_biz, tab_contract, tab_sql = st.tabs(tab_titles)
+        tab_biz, tab_contract, tab_sql, tab_semantic = st.tabs(tab_titles)
 
         with tab_biz:
             target_str = f"**分析粒度 (Target Grain)**: `{result.target_grain}` | **依賴之 Kimball 模型**: `{', '.join(result.upstream_tables)}`" if not is_en else f"**Target Grain**: `{result.target_grain}` | **Upstream Kimball Dependencies**: `{', '.join(result.upstream_tables)}`"
@@ -828,6 +848,98 @@ def render_schema_designer_view(
                 mime="text/plain",
                 use_container_width=True,
             )
+
+        with tab_semantic:
+            st.caption(
+                "🧭 自動由模型粒度與欄位推導之企業語意層（同時產出 dbt MetricFlow YAML 與 Looker LookML）"
+                if not is_en
+                else "🧭 Auto-synthesized Enterprise Semantic Layer (dbt MetricFlow YAML & Looker LookML)"
+            )
+            preview_cols = (
+                list(result.data_preview.columns)
+                if isinstance(result.data_preview, pd.DataFrame) and not result.data_preview.empty
+                else ["category", "total_gmv", "order_count", "return_rate_pct"]
+            )
+            num_cols = (
+                [
+                    c
+                    for c in preview_cols
+                    if pd.api.types.is_numeric_dtype(result.data_preview[c])
+                ]
+                if isinstance(result.data_preview, pd.DataFrame) and not result.data_preview.empty
+                else ["total_gmv", "order_count"]
+            )
+            dim_cols = [c for c in preview_cols if c not in num_cols] or ["category"]
+            primary_dim = dim_cols[0]
+            primary_measure = num_cols[0] if num_cols else "total_gmv"
+
+            metricflow_yaml = getattr(result, "semantic_yaml", "") or textwrap.dedent(
+                f"""\
+                semantic_models:
+                  - name: sem_{result.spec_id.lower().replace('-', '_')}
+                    description: "Semantic model for grain: {result.target_grain}"
+                    model: ref('{result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'}')
+                    entities:
+                      - name: {primary_dim}
+                        type: primary
+                    dimensions:
+                """
+                + "".join(
+                    f"      - name: {d}\n        type: categorical\n" for d in dim_cols[:4]
+                )
+                + "    measures:\n"
+                + "".join(
+                    f"      - name: {m}\n        agg: sum\n        expr: {m}\n" for m in num_cols[:4]
+                )
+                + textwrap.dedent(
+                    f"""\
+                    metrics:
+                      - name: {primary_measure}_kpi
+                        description: "Governed business metric for {primary_measure}"
+                        type: simple
+                        type_params:
+                          measure: {primary_measure}
+                    """
+                )
+            )
+
+            lookml_code = getattr(result, "lookml_code", "") or (
+                f"view: {result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'} {{\n"
+                f"  sql_table_name: `main_silver.{result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'}` ;;\n\n"
+                + "".join(
+                    f"  dimension: {d} {{\n    type: string\n    sql: ${{TABLE}}.{d} ;;\n  }}\n\n"
+                    for d in dim_cols[:3]
+                )
+                + "".join(
+                    f"  measure: sum_{m} {{\n    type: sum\n    sql: ${{TABLE}}.{m} ;;\n  }}\n\n"
+                    for m in num_cols[:3]
+                )
+                + "}"
+            )
+
+            sem_col1, sem_col2 = st.columns(2)
+            with sem_col1:
+                st.markdown("##### 📐 dbt MetricFlow (`semantic_models.yml`)")
+                st.code(metricflow_yaml, language="yaml")
+                st.download_button(
+                    "📥 下載 semantic_models.yml" if not is_en else "📥 Download semantic_models.yml",
+                    data=metricflow_yaml,
+                    file_name="semantic_models.yml",
+                    mime="text/yaml",
+                    use_container_width=True,
+                    key="btn_dl_metricflow_yaml",
+                )
+            with sem_col2:
+                st.markdown("##### 📊 Looker LookML (`model.view.lkml`)")
+                st.code(lookml_code, language="lkml")
+                st.download_button(
+                    "📥 下載 LookML (.view.lkml)" if not is_en else "📥 Download LookML (.view.lkml)",
+                    data=lookml_code,
+                    file_name="mart_model.view.lkml",
+                    mime="text/plain",
+                    use_container_width=True,
+                    key="btn_dl_lookml_view",
+                )
 
     elif result and result.is_rejected:
         rej_title = "🛑 實體型錄邊界檢驗中斷拒絕 (Compilation Halted & Rejected)" if not is_en else "🛑 Pipeline Compilation Halted & Rejected"
