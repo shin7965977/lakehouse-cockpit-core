@@ -13,3 +13,10 @@ dependencies = [
     "pandas>=2.0.0",
     "plotly>=5.18.0",
 ]
+
+[tool.setuptools]
+py-modules = ["adapter", "engine", "styles"]
+
+[tool.setuptools.packages.find]
+include = ["components*", "reports*"]
+exclude = ["tests*", "examples*"]
