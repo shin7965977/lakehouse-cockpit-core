@@ -299,7 +299,7 @@ def render_ai_drawer(
                 chat_history=st.session_state[hist_key],
                 data_dict=data_dict or {},
                 is_en=is_en,
-                api_key=active_key,
+                api_key=display_key,
             )
             if turn_result.get("spec_contract") is not None:
                 st.session_state["locked_spec_contract"] = turn_result["spec_contract"]
