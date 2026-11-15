@@ -48,7 +48,7 @@ def test_component_registry_covers_all_files_in_components_dir() -> None:
     )
 
     # Every registered item must have a valid Mode A placement and a callable render function
-    valid_placements = {"top_kpi", "workspace_tab", "right_drawer"}
+    valid_placements = {"top_kpi", "workspace_tab", "right_drawer", "left_sidebar"}
     for spec in registry:
         assert spec.placement_in_mode_a in valid_placements
         assert callable(spec.render)
@@ -81,6 +81,7 @@ def test_showcase_mode_b_storybook_catalog() -> None:
         "on_demand_panel",
         "looker_view",
         "schema_designer",
+        "sidebar_ops",
     ]:
         catalog_radio.set_value(cid).run(timeout=15)
         assert not at.exception, f"Mode B component '{cid}' raised an exception: {at.exception}"

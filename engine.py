@@ -16,6 +16,7 @@ try:
     from .components.kpi_grid import render_kpi_grid
     from .components.looker_view import render_looker_enterprise_view
     from .components.on_demand_panel import render_on_demand_insight_panel
+    from .components.sidebar_ops import render_sidebar_pipeline_ops
     from .components.sql_sandbox import render_sql_sandbox
     from .styles import MODERN_COCKPIT_CSS
 except ImportError:
@@ -24,6 +25,7 @@ except ImportError:
     from components.kpi_grid import render_kpi_grid
     from components.looker_view import render_looker_enterprise_view
     from components.on_demand_panel import render_on_demand_insight_panel
+    from components.sidebar_ops import render_sidebar_pipeline_ops
     from components.sql_sandbox import render_sql_sandbox
     from styles import MODERN_COCKPIT_CSS
 
@@ -103,6 +105,17 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
     # Load Domain Data strictly filtered by active Date Range
     data_dict = adapter.load_domain_data(start_date=start_date, end_date=end_date)
+
+    with st.sidebar:
+        st.markdown("---")
+        render_sidebar_pipeline_ops(
+            adapter=adapter,
+            data_dict=data_dict,
+            start_date=start_date,
+            end_date=end_date,
+            is_en=is_en,
+            scope_key="engine_sidebar",
+        )
 
     # Top-Level Layout: Adaptive Columns depending on Advisor Drawer state
     if st.session_state["advisor_drawer_open"]:

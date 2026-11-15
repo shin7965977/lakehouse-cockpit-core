@@ -35,6 +35,7 @@ from components.data_center import render_data_center_view  # noqa: E402
 from components.kpi_grid import render_kpi_grid  # noqa: E402
 from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
+from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
 from components.sql_expander import render_sql_snippet_module  # noqa: E402
 from components.sql_sandbox import render_sql_sandbox  # noqa: E402
 from components.text_to_chart import render_text_to_chart_module  # noqa: E402
@@ -411,7 +412,13 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
 
     @property
     def default_system_prompt_zh(self) -> str:
-        return "你是資深 MBB 零售電商分析顧問，請使用金字塔原理與 MECE 架構回覆。"
+        return (
+            "你是擁有麥肯錫 (McKinsey) / 貝恩 (Bain) / BCG 資深合夥人 (Senior Partner) 水準的頂級管理顧問，"
+            "專精於現代零售電商與現代數據架構 (Lakehouse) 全盤商業診斷與營運獲利優化。\n\n"
+            "【分析架構規範：全盤視野 + 當前焦點加權】：\n"
+            "1. 全盤視野 (Global Lakehouse Visibility)：結合 GMV、AOV、退貨率與品類結構進行交叉診斷。\n"
+            "2. 金字塔原理 (Pyramid Principle)：先給結論型標題 (Action Title)，再展開 MECE 分析與 30-60-90 天行動方案。"
+        )
 
     @property
     def quick_diagnosis_questions_zh(self) -> list[str]:
@@ -579,7 +586,7 @@ def build_component_registry(
             fn_signature="render_ai_drawer()",
             source_files=("components/ai_drawer.py",),
             snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
-            description="7:3 雙欄對話式 AI Copilot 抽屜，內建離線 Mock 診斷與快速問題。",
+            description="7:3 雙欄對話式 AI Copilot 抽屜，內建 System Prompt Playground、離線 Mock 診斷與快速問題。",
             placement_in_mode_a="right_drawer",
             render=lambda: render_ai_drawer(
                 active_scope_id="showcase",
@@ -599,6 +606,24 @@ def build_component_registry(
                 allow_mock_offline=True,
             ),
         ),
+        ShowcaseComponentSpec(
+            id="sidebar_ops",
+            tab_title="⚡ 管線控制 & CSV 下載",
+            storybook_label="10. sidebar_ops.py",
+            fn_signature="render_sidebar_pipeline_ops()",
+            source_files=("components/sidebar_ops.py",),
+            snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
+            description="側邊欄雲端資料管線控制 (Trigger Workflow) 與 BigQuery 金牌完整數據 CSV 下載器。",
+            placement_in_mode_a="left_sidebar",
+            render=lambda: render_sidebar_pipeline_ops(
+                adapter=adapter,
+                data_dict=data_dict,
+                start_date=start_date,
+                end_date=end_date,
+                is_en=is_en,
+                scope_key="showcase",
+            ),
+        ),
     ]
 
 
@@ -606,10 +631,16 @@ def _render_integrated_cockpit_mode_a(
     adapter: ShowcaseRetailAdapter,
     registry: list[ShowcaseComponentSpec],
 ) -> None:
-    """Mode A: Consumes the unified `registry` to render top KPI, workspace tabs, and right AI drawer."""
+    """Mode A: Consumes the unified `registry` to render left sidebar ops, top KPI, workspace tabs, and right AI drawer."""
+    sidebar_specs = [c for c in registry if c.placement_in_mode_a == "left_sidebar"]
     top_kpi = next(c for c in registry if c.placement_in_mode_a == "top_kpi")
     workspace_specs = [c for c in registry if c.placement_in_mode_a == "workspace_tab"]
     right_drawer = next(c for c in registry if c.placement_in_mode_a == "right_drawer")
+
+    with st.sidebar:
+        for sb_spec in sidebar_specs:
+            st.markdown("---")
+            sb_spec.render()
 
     main_col, ai_col = st.columns([7, 3])
 

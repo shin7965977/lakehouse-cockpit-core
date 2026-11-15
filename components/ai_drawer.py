@@ -229,6 +229,55 @@ def render_ai_drawer(
             reset_inquiry_state(active_scope_id)
             st.rerun()
 
+    # 5.1 System Prompt Playground Expander (Inspect / Live-Edit System Prompt)
+    base_default_prompt = default_prompt_en if is_en else (default_prompt_zh or default_prompt_en)
+    custom_prompt_state_key = f"custom_sys_prompt_{active_scope_id}"
+    prompt_textarea_key = f"sys_prompt_textarea_{active_scope_id}"
+    if custom_prompt_state_key not in st.session_state:
+        st.session_state[custom_prompt_state_key] = base_default_prompt
+
+    expander_label = (
+        "🛠️ Inspect / Edit System Prompt"
+        if is_en
+        else "🛠️ 檢視 / 修改系統 Prompt"
+    )
+    with st.expander(expander_label, expanded=False):
+        st.caption(
+            "Inspect or live-edit the underlying Gemini Advisor System Prompt (100MB FinOps Guard built-in):"
+            if is_en
+            else "檢視或即時手動修改底層 Gemini 顧問 System Prompt（內建 100MB FinOps 防護）："
+        )
+        edited_prompt = st.text_area(
+            "Prompt Editor:" if is_en else "Prompt 編輯區:",
+            value=st.session_state[custom_prompt_state_key],
+            height=180,
+            key=prompt_textarea_key,
+        )
+        p_col1, p_col2 = st.columns(2)
+        with p_col1:
+            apply_lbl = "💾 Apply Custom Prompt" if is_en else "💾 套用自訂 Prompt"
+            if st.button(
+                apply_lbl,
+                key=f"btn_apply_prompt_{active_scope_id}",
+                use_container_width=True,
+            ):
+                st.session_state[custom_prompt_state_key] = edited_prompt
+                st.toast(
+                    "✅ Custom System Prompt applied!"
+                    if is_en
+                    else "✅ 已套用自訂 System Prompt！"
+                )
+        with p_col2:
+            reset_p_lbl = "🔄 Reset to Default" if is_en else "🔄 還原預設值"
+            if st.button(
+                reset_p_lbl,
+                key=f"btn_reset_prompt_{active_scope_id}",
+                use_container_width=True,
+            ):
+                st.session_state[custom_prompt_state_key] = base_default_prompt
+                st.session_state[prompt_textarea_key] = base_default_prompt
+                st.rerun()
+
     # Quick Diagnosis / Suggested Questions (Strictly 2 Primary Options)
     if quick_questions:
         st.markdown(
