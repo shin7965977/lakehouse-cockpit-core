@@ -37,6 +37,7 @@ from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
 from components.sql_expander import render_sql_snippet_module  # noqa: E402
 from components.sql_sandbox import render_sql_sandbox  # noqa: E402
+from components.text_to_chart import render_text_to_chart_module  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 try:
@@ -496,9 +497,22 @@ def build_component_registry(
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
         ),
         ShowcaseComponentSpec(
+            id="text_to_chart",
+            tab_title="✨ AI 生圖 (Text-to-Chart)",
+            storybook_label="3. text_to_chart.py",
+            fn_signature="render_text_to_chart_module()",
+            source_files=("components/text_to_chart.py",),
+            snippet="render_text_to_chart_module(adapter=adapter, data_dict=data_dict, is_en=is_en)",
+            description="自然語言 AI 智能圖表生成器，支援範例指令一鍵生圖、業務範疇防呆與底層數據預覽。",
+            placement_in_mode_a="workspace_tab",
+            render=lambda: render_text_to_chart_module(
+                adapter=adapter, data_dict=data_dict, is_en=is_en
+            ),
+        ),
+        ShowcaseComponentSpec(
             id="sql_expander",
             tab_title="🥈 Silver / Bronze & SQL 展開器",
-            storybook_label="3. sql_expander.py",
+            storybook_label="4. sql_expander.py",
             fn_signature="render_sql_snippet_module()",
             source_files=("components/sql_expander.py",),
             snippet="render_sql_snippet_module(module_id='...', title_zh='...', source_table_label='...', sql_template='...', df_preview=df)",
@@ -509,7 +523,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="sql_sandbox",
             tab_title="🧪 SQL 沙盒",
-            storybook_label="4. sql_sandbox.py",
+            storybook_label="5. sql_sandbox.py",
             fn_signature="render_sql_sandbox()",
             source_files=("components/sql_sandbox.py",),
             snippet="render_sql_sandbox(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
@@ -526,7 +540,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="looker_view",
             tab_title="📈 Looker 視圖",
-            storybook_label="5. looker_view.py",
+            storybook_label="6. looker_view.py",
             fn_signature="render_looker_enterprise_view()",
             source_files=("components/looker_view.py",),
             snippet="render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -539,7 +553,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="schema_designer",
             tab_title="🏗️ Schema 設計器",
-            storybook_label="6. schema_designer.py",
+            storybook_label="7. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -550,7 +564,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="data_center_ae",
             tab_title="🏛️ 資料中心 & AE 流程",
-            storybook_label="7. data_center.py / ae_workflow.py",
+            storybook_label="8. data_center.py / ae_workflow.py",
             fn_signature="render_data_center_view() & render_ae_workflow_stepper()",
             source_files=("components/data_center.py", "components/ae_workflow.py"),
             snippet="render_data_center_view()\nrender_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -561,7 +575,7 @@ def build_component_registry(
         ShowcaseComponentSpec(
             id="ai_drawer",
             tab_title="🤖 AI 抽屜",
-            storybook_label="8. ai_drawer.py",
+            storybook_label="9. ai_drawer.py",
             fn_signature="render_ai_drawer()",
             source_files=("components/ai_drawer.py",),
             snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",

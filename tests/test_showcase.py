@@ -74,6 +74,13 @@ def test_showcase_mode_b_storybook_catalog() -> None:
 
     # Verify switching across representative Storybook catalog items
     catalog_radio = next(r for r in at.radio if r.key == "storybook_selected_component")
-    for cid in ["kpi_grid", "sql_expander", "on_demand_panel", "looker_view", "schema_designer"]:
+    for cid in [
+        "kpi_grid",
+        "text_to_chart",
+        "sql_expander",
+        "on_demand_panel",
+        "looker_view",
+        "schema_designer",
+    ]:
         catalog_radio.set_value(cid).run(timeout=15)
         assert not at.exception, f"Mode B component '{cid}' raised an exception: {at.exception}"
