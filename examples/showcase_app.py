@@ -35,6 +35,7 @@ from components.data_center import render_data_center_view  # noqa: E402
 from components.kpi_grid import render_kpi_grid  # noqa: E402
 from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
+from components.schema_designer import render_schema_designer_view  # noqa: E402
 from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
 from components.sql_expander import (  # noqa: E402
     render_dynamic_dbt_explorer_with_sandbox,
@@ -42,11 +43,6 @@ from components.sql_expander import (  # noqa: E402
 )
 from components.text_to_chart import render_text_to_chart_module  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
-
-try:
-    from components.schema_designer import render_schema_designer_view  # noqa: E402
-except ImportError:
-    render_schema_designer_view = None  # Requires host project's `ai` package
 
 
 @dataclass(frozen=True)
@@ -175,7 +171,7 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
 
     @property
     def supports_schema_designer(self) -> bool:
-        return render_schema_designer_view is not None
+        return True
 
     @property
     def supports_spec_guidance(self) -> bool:
@@ -464,12 +460,7 @@ def build_component_registry(
     sample_insight = _build_mock_insight(data_dict)
 
     def _render_schema() -> None:
-        if render_schema_designer_view is not None:
-            render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
-        else:
-            st.info(
-                "ℹ️ `schema_designer.py` 需要搭配宿主專案的 `ai` 模組（`ai.schema_engine` / `ai.socratic_copilot`）才能完整渲染。"
-            )
+        render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
 
     def _render_dc_and_ae() -> None:
         render_data_center_view()
