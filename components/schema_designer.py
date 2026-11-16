@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import re
-import textwrap
 import streamlit as st
 import pandas as pd
 from typing import Any
@@ -76,6 +75,7 @@ except ImportError:
         data_preview: pd.DataFrame
         schema_yaml: str
         dbt_sql: str
+        model_name: str = ""
         rejection_reason: str = ""
 
     def _infer_goal_intent(user_goal: str, data_dict: dict[str, pd.DataFrame]) -> dict[str, Any]:
@@ -118,16 +118,26 @@ except ImportError:
             if "mart_product_performance" in data_dict:
                 df = data_dict["mart_product_performance"]
                 cols = list(df.columns)
-                cat_col = next((c for c in cols if any(x in c.lower() for x in ["category", "title", "product", "name"])), cols[0])
-                rev_col = next((c for c in cols if any(x in c.lower() for x in ["revenue", "gmv", "sales", "amount", "price"])), None)
+                cat_col = (
+                    next((c for c in cols if any(x in c.lower() for x in ["category", "title", "name"]) and "id" not in c.lower()), None)
+                    or next((c for c in cols if any(x in c.lower() for x in ["category", "title", "product", "name"])), cols[0])
+                )
+                rev_col = (
+                    next((c for c in cols if any(x in c.lower() for x in ["revenue", "gmv", "sales", "amount"])), None)
+                    or next((c for c in cols if "price" in c.lower()), None)
+                )
                 qty_col = next((c for c in cols if any(x in c.lower() for x in ["qty", "quantity", "units", "orders", "count"])), None)
                 select_parts = [cat_col]
                 if qty_col:
-                    select_parts.append(f"SUM(CAST({qty_col} AS DOUBLE)) AS total_units_or_orders")
+                    select_parts.append(f"SUM(CAST({qty_col} AS DOUBLE)) AS total_units_sold")
                 if rev_col:
-                    select_parts.append(f"ROUND(SUM(CAST({rev_col} AS DOUBLE)), 2) AS gross_revenue")
+                    if "price" in rev_col.lower() and qty_col:
+                        rev_expr = f"SUM(CAST({qty_col} AS DOUBLE) * CAST({rev_col} AS DOUBLE))"
+                    else:
+                        rev_expr = f"SUM(CAST({rev_col} AS DOUBLE))"
+                    select_parts.append(f"ROUND({rev_expr}, 2) AS gross_revenue")
                     if "profit" in model_name:
-                        select_parts.append(f"ROUND(SUM(CAST({rev_col} AS DOUBLE)) * 0.35, 2) AS est_gross_profit_35pct")
+                        select_parts.append(f"ROUND({rev_expr} * 0.35, 2) AS est_gross_profit_35pct")
                 if len(select_parts) == 1:
                     select_parts.append("COUNT(*) AS record_count")
                 sql = (
@@ -375,6 +385,7 @@ except ImportError:
             data_preview=preview_df,
             schema_yaml=schema_yaml,
             dbt_sql=dbt_sql,
+            model_name=model_name,
         )
 
 
@@ -1080,6 +1091,8 @@ def render_schema_designer_view(
                     c
                     for c in preview_cols
                     if pd.api.types.is_numeric_dtype(result.data_preview[c])
+                    and c.lower() != "id"
+                    and not c.lower().endswith("_id")
                 ]
                 if isinstance(result.data_preview, pd.DataFrame) and not result.data_preview.empty
                 else ["total_gmv", "order_count"]
@@ -1087,40 +1100,39 @@ def render_schema_designer_view(
             dim_cols = [c for c in preview_cols if c not in num_cols] or ["category"]
             primary_dim = dim_cols[0]
             primary_measure = num_cols[0] if num_cols else "total_gmv"
+            semantic_model_ref = getattr(result, "model_name", "") or (
+                result.upstream_tables[0] if result.upstream_tables else "mart_product_performance"
+            )
 
-            metricflow_yaml = getattr(result, "semantic_yaml", "") or textwrap.dedent(
-                f"""\
-                semantic_models:
-                  - name: sem_{result.spec_id.lower().replace('-', '_')}
-                    description: "Semantic model for grain: {result.target_grain}"
-                    model: ref('{result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'}')
-                    entities:
-                      - name: {primary_dim}
-                        type: primary
-                    dimensions:
-                """
-                + "".join(
-                    f"      - name: {d}\n        type: categorical\n" for d in dim_cols[:4]
-                )
-                + "    measures:\n"
-                + "".join(
-                    f"      - name: {m}\n        agg: sum\n        expr: {m}\n" for m in num_cols[:4]
-                )
-                + textwrap.dedent(
-                    f"""\
-                    metrics:
-                      - name: {primary_measure}_kpi
-                        description: "Governed business metric for {primary_measure}"
-                        type: simple
-                        type_params:
-                          measure: {primary_measure}
-                    """
-                )
+            dim_yaml_lines = "".join(
+                f"      - name: {d}\n        type: categorical\n" for d in dim_cols[:4]
+            )
+            measure_yaml_lines = "".join(
+                f"      - name: {m}\n        agg: sum\n        expr: {m}\n" for m in num_cols[:4]
+            )
+            metricflow_yaml = getattr(result, "semantic_yaml", "") or (
+                f"semantic_models:\n"
+                f"  - name: sem_{result.spec_id.lower().replace('-', '_')}\n"
+                f'    description: "Semantic model for grain: {result.target_grain}"\n'
+                f"    model: ref('{semantic_model_ref}')\n"
+                f"    entities:\n"
+                f"      - name: {primary_dim}\n"
+                f"        type: primary\n"
+                f"    dimensions:\n"
+                f"{dim_yaml_lines}"
+                f"    measures:\n"
+                f"{measure_yaml_lines}"
+                f"metrics:\n"
+                f"  - name: {primary_measure}_kpi\n"
+                f'    description: "Governed business metric for {primary_measure}"\n'
+                f"    type: simple\n"
+                f"    type_params:\n"
+                f"      measure: {primary_measure}\n"
             )
 
             lookml_code = getattr(result, "lookml_code", "") or (
-                f"view: {result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'} {{\n"
-                f"  sql_table_name: `main_silver.{result.upstream_tables[0] if result.upstream_tables else 'mart_product_performance'}` ;;\n\n"
+                f"view: {semantic_model_ref} {{\n"
+                f"  sql_table_name: `platzi_gold.{semantic_model_ref}` ;;\n\n"
                 + "".join(
                     f"  dimension: {d} {{\n    type: string\n    sql: ${{TABLE}}.{d} ;;\n  }}\n\n"
                     for d in dim_cols[:3]
