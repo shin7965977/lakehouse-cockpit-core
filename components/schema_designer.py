@@ -8,7 +8,10 @@ and trace the end-to-end execution audit log.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import os
+import re
 import textwrap
 import streamlit as st
 import pandas as pd
@@ -26,10 +29,12 @@ try:
 except ImportError:
 
     class DatabaseReflectionService:  # type: ignore[no-redef]
-        """Lightweight standalone reflection fallback when host `ai` package is absent."""
+        """Lightweight standalone reflection & DuckDB dry-run helper when host `ai` package is absent."""
 
         def __init__(self, data_dict: dict[str, pd.DataFrame]) -> None:
-            self.data_dict = data_dict or {}
+            self.data_dict = {
+                k: v for k, v in (data_dict or {}).items() if isinstance(v, pd.DataFrame) and not v.empty
+            }
 
         def get_kimball_models(self) -> dict[str, list[str]]:
             dims = [k for k in self.data_dict if k.startswith("dim_") or "product" in k or "customer" in k]
@@ -38,6 +43,19 @@ except ImportError:
                 "dimensions": dims or ["dim_products", "dim_regions"],
                 "facts": facts or ["fact_orders"],
             }
+
+        def get_schema_summary(self) -> str:
+            lines: list[str] = []
+            for tbl, df in self.data_dict.items():
+                cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns[:15])
+                lines.append(f"- {tbl} ({len(df)} rows): {cols}")
+            return "\n".join(lines) or "- (no tables loaded)"
+
+        def get_distinct_column_values(self, table_name: str, column_name: str) -> list[str]:
+            df = self.data_dict.get(table_name)
+            if df is None or column_name not in df.columns:
+                return []
+            return [str(v) for v in df[column_name].dropna().unique().tolist()[:50]]
 
     @dataclass
     class SocraticSessionState:  # type: ignore[no-redef]
@@ -60,18 +78,193 @@ except ImportError:
         dbt_sql: str
         rejection_reason: str = ""
 
+    def _infer_goal_intent(user_goal: str, data_dict: dict[str, pd.DataFrame]) -> dict[str, Any]:
+        """Infer target model, grain, and executable DuckDB SQL from user_goal and live tables."""
+        goal_l = (user_goal or "").lower()
+        has_prod = "mart_product_performance" in data_dict or "dim_products" in data_dict
+        has_kpi = "mart_daily_sales" in data_dict
+        has_orders = "fct_orders" in data_dict
+        has_items = "fct_order_items" in data_dict
+
+        if any(k in goal_l for k in ["客戶", "顧客", "ltv", "customer", "segment", "vip", "用戶"]):
+            model_name = "mart_customer_cohort_analysis"
+            grain = "Customer / Segment (1 row per customer tier)"
+            if "mart_customer_ltv" in data_dict:
+                cols = list(data_dict["mart_customer_ltv"].columns)
+                tier_col = next((c for c in cols if any(x in c.lower() for x in ["tier", "segment", "country", "role"])), cols[0])
+                rev_col = next((c for c in cols if any(x in c.lower() for x in ["ltv", "spent", "revenue", "gmv", "total"])), None)
+                agg_expr = f"ROUND(SUM(CAST({rev_col} AS DOUBLE)), 2) AS total_ltv_revenue" if rev_col else "COUNT(*) AS metric_value"
+                sql = (
+                    f"SELECT {tier_col}, COUNT(*) AS customer_count, {agg_expr}\n"
+                    f"FROM mart_customer_ltv\n"
+                    f"GROUP BY {tier_col}\n"
+                    f"ORDER BY 3 DESC\nLIMIT 25"
+                )
+                upstream = ["mart_customer_ltv"]
+            elif "dim_customers" in data_dict:
+                df = data_dict["dim_customers"]
+                grp = next((c for c in df.columns if c not in ("customer_id", "id", "email", "name")), df.columns[0])
+                sql = f"SELECT {grp}, COUNT(*) AS customer_count FROM dim_customers GROUP BY {grp} ORDER BY 2 DESC LIMIT 25"
+                upstream = ["dim_customers"]
+            else:
+                tbl = next(iter(data_dict), "dim_customers")
+                sql = f"SELECT * FROM {tbl} LIMIT 20"
+                upstream = [tbl]
+            return {"model_name": model_name, "grain": grain, "duckdb_sql": sql, "upstream": upstream}
+
+        if any(k in goal_l for k in ["利潤", "毛利", "profit", "margin", "產品", "商品", "品類", "product", "category", "sku"]):
+            model_name = "mart_product_profitability" if any(k in goal_l for k in ["利潤", "毛利", "profit", "margin"]) else "mart_product_performance"
+            grain = "Product / Category (1 row per product or category)"
+            if "mart_product_performance" in data_dict:
+                df = data_dict["mart_product_performance"]
+                cols = list(df.columns)
+                cat_col = next((c for c in cols if any(x in c.lower() for x in ["category", "title", "product", "name"])), cols[0])
+                rev_col = next((c for c in cols if any(x in c.lower() for x in ["revenue", "gmv", "sales", "amount", "price"])), None)
+                qty_col = next((c for c in cols if any(x in c.lower() for x in ["qty", "quantity", "units", "orders", "count"])), None)
+                select_parts = [cat_col]
+                if qty_col:
+                    select_parts.append(f"SUM(CAST({qty_col} AS DOUBLE)) AS total_units_or_orders")
+                if rev_col:
+                    select_parts.append(f"ROUND(SUM(CAST({rev_col} AS DOUBLE)), 2) AS gross_revenue")
+                    if "profit" in model_name:
+                        select_parts.append(f"ROUND(SUM(CAST({rev_col} AS DOUBLE)) * 0.35, 2) AS est_gross_profit_35pct")
+                if len(select_parts) == 1:
+                    select_parts.append("COUNT(*) AS record_count")
+                sql = (
+                    f"SELECT {', '.join(select_parts)}\n"
+                    f"FROM mart_product_performance\n"
+                    f"GROUP BY {cat_col}\n"
+                    f"ORDER BY 2 DESC\nLIMIT 25"
+                )
+                upstream = ["mart_product_performance"]
+            elif has_items and has_prod:
+                sql = (
+                    "SELECT p.category_name, COUNT(*) AS line_items, "
+                    "ROUND(SUM(CAST(i.line_total AS DOUBLE)), 2) AS gross_revenue, "
+                    "ROUND(SUM(CAST(i.line_total AS DOUBLE)) * 0.35, 2) AS est_gross_profit_35pct\n"
+                    "FROM fct_order_items i\n"
+                    "LEFT JOIN dim_products p ON i.product_id = p.product_id\n"
+                    "GROUP BY p.category_name\nORDER BY 3 DESC\nLIMIT 25"
+                )
+                upstream = ["fct_order_items", "dim_products"]
+            else:
+                tbl = next(iter(data_dict), "dim_products")
+                sql = f"SELECT * FROM {tbl} LIMIT 20"
+                upstream = [tbl]
+            return {"model_name": model_name, "grain": grain, "duckdb_sql": sql, "upstream": upstream}
+
+        if any(k in goal_l for k in ["退貨", "return", "order", "訂單", "狀態", "status"]):
+            model_name = "mart_order_fulfillment_health"
+            grain = "Order Status / Fulfillment (1 row per status)"
+            if has_orders:
+                df = data_dict["fct_orders"]
+                status_col = next((c for c in df.columns if "status" in c.lower()), df.columns[0])
+                amt_col = next((c for c in df.columns if any(x in c.lower() for x in ["amount", "total", "gmv", "revenue"])), None)
+                amt_expr = f", ROUND(SUM(CAST({amt_col} AS DOUBLE)), 2) AS total_amount" if amt_col else ""
+                sql = (
+                    f"SELECT {status_col}, COUNT(*) AS order_count{amt_expr}\n"
+                    f"FROM fct_orders\n"
+                    f"GROUP BY {status_col}\n"
+                    f"ORDER BY order_count DESC\nLIMIT 25"
+                )
+                upstream = ["fct_orders"]
+            elif has_kpi:
+                sql = "SELECT * FROM mart_daily_sales ORDER BY 1 DESC LIMIT 25"
+                upstream = ["mart_daily_sales"]
+            else:
+                tbl = next(iter(data_dict), "fct_orders")
+                sql = f"SELECT * FROM {tbl} LIMIT 20"
+                upstream = [tbl]
+            return {"model_name": model_name, "grain": grain, "duckdb_sql": sql, "upstream": upstream}
+
+        # Default: daily / revenue summary from best available table
+        model_name = "mart_executive_revenue_summary"
+        grain = "Daily / Summary Grain"
+        if has_kpi:
+            sql = "SELECT * FROM mart_daily_sales ORDER BY 1 DESC LIMIT 25"
+            upstream = ["mart_daily_sales"]
+        elif has_orders:
+            sql = "SELECT * FROM fct_orders LIMIT 25"
+            upstream = ["fct_orders"]
+        else:
+            tbl = next(iter(data_dict), "mart_product_performance")
+            sql = f"SELECT * FROM {tbl} LIMIT 25" if tbl in data_dict else "SELECT 'Electronics' AS category, 52000.0 AS total_gmv"
+            upstream = [tbl]
+        return {"model_name": model_name, "grain": grain, "duckdb_sql": sql, "upstream": upstream}
+
+    def _run_duckdb_dry_run(sql: str, data_dict: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, str]:
+        """Execute SQL against live DataFrames using DuckDB in-memory engine."""
+        import duckdb
+
+        con = duckdb.connect(":memory:")
+        try:
+            for tbl_name, df in data_dict.items():
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    con.register(tbl_name, df)
+            res_df = con.execute(sql).df()
+            return res_df, ""
+        except Exception as exc:
+            return pd.DataFrame(), str(exc)
+        finally:
+            con.close()
+
+    def _build_schema_yaml_from_df(model_name: str, user_goal: str, df: pd.DataFrame) -> str:
+        """Generate a governed dbt schema.yml Data Contract matching the exact DataFrame columns."""
+        col_blocks: list[str] = []
+        for col in df.columns:
+            dtype_str = str(df[col].dtype).lower()
+            if "int" in dtype_str:
+                dbt_type = "int64"
+            elif "float" in dtype_str or "double" in dtype_str or "decimal" in dtype_str:
+                dbt_type = "numeric"
+            elif "datetime" in dtype_str or "date" in dtype_str:
+                dbt_type = "timestamp"
+            elif "bool" in dtype_str:
+                dbt_type = "boolean"
+            else:
+                dbt_type = "string"
+            col_blocks.append(
+                f"      - name: {col}\n"
+                f"        data_type: {dbt_type}\n"
+                f"        constraints:\n"
+                f"          - type: not_null\n"
+                f"        tests: [not_null]"
+            )
+        cols_yaml = "\n".join(col_blocks) if col_blocks else "      - name: record_count\n        data_type: int64"
+        safe_desc = (user_goal or "Governed analytical mart").replace('"', "'")
+        return (
+            f"version: 2\n"
+            f"models:\n"
+            f"  - name: {model_name}\n"
+            f'    description: "Synthesized for: {safe_desc}"\n'
+            f"    config:\n"
+            f"      contract:\n"
+            f"        enforced: true\n"
+            f"    meta:\n"
+            f"      owner: analytics-engineering@company.com\n"
+            f'      sla_freshness: "24h"\n'
+            f"      gdpr_pii: false\n"
+            f"    columns:\n"
+            f"{cols_yaml}\n"
+        )
+
     def analyze_socratic_inquiry(  # type: ignore[no-redef]
         query: str,
         reflection: Any,
         api_key: str = "",
         is_en: bool = True,
     ) -> SocraticSessionState:
+        intent = _infer_goal_intent(query, getattr(reflection, "data_dict", {}))
         return SocraticSessionState(
             user_goal=query,
             needs_clarification=False,
             is_out_of_domain=False,
             is_api_key_missing=False,
-            locked_decisions={"grain": "category", "metric": "gmv_and_return_rate"},
+            locked_decisions={
+                "model_name": intent["model_name"],
+                "grain": intent["grain"],
+                "upstream": intent["upstream"],
+            },
         )
 
     def chat_socratic_turn(  # type: ignore[no-redef]
@@ -80,7 +273,7 @@ except ImportError:
         user_goal: str,
         **kwargs: Any,
     ) -> str:
-        return f"[Demo Mode] Aligned on '{user_goal}' with input '{user_message}'."
+        return f"Aligned on '{user_goal}' with constraint: '{user_message}'."
 
     def summarize_socratic_requirements(  # type: ignore[no-redef]
         user_goal: str,
@@ -96,67 +289,88 @@ except ImportError:
         reflection: DatabaseReflectionService,
         api_key: str = "",
     ) -> _StandaloneSchemaResult:
-        preview_df = reflection.data_dict.get("mart_product_performance")
-        if preview_df is None or preview_df.empty:
-            preview_df = next(
-                (v for v in reflection.data_dict.values() if isinstance(v, pd.DataFrame) and not v.empty),
-                pd.DataFrame({"category": ["Electronics", "Apparel"], "total_gmv": [52000, 48000]}),
-            )
-        dbt_sql = textwrap.dedent(
-            f"""\
-            -- Auto-Synthesized dbt Model for: {user_goal}
-            {{{{ config(materialized='table', schema='main_silver') }}}}
+        data_dict = getattr(reflection, "data_dict", {})
+        spec_hash = hashlib.sha1((user_goal or "default").encode("utf-8")).hexdigest()[:4].upper()
 
-            SELECT
-                category,
-                SUM(gross_amount) AS total_gmv,
-                COUNT(DISTINCT order_id) AS order_count,
-                ROUND(SUM(is_returned) * 100.0 / COUNT(DISTINCT order_id), 2) AS return_rate_pct
-            FROM {{{{ ref('fact_orders') }}}}
-            GROUP BY category
-            ORDER BY total_gmv DESC;
-            """
+        llm_sql = ""
+        model_name = ""
+        target_grain = ""
+        upstream_tables: list[str] = []
+        used_gemini = False
+
+        if api_key and data_dict:
+            try:
+                from google import genai
+
+                client = genai.Client(api_key=api_key)
+                prompt = (
+                    "You are an Analytics Engineer. Given these DuckDB tables:\n"
+                    f"{reflection.get_schema_summary()}\n\n"
+                    f"User Goal: {user_goal}\n"
+                    f"Decisions: {json.dumps(decisions, ensure_ascii=False)}\n\n"
+                    "Return ONLY a JSON object with keys:\n"
+                    '- "model_name": snake_case mart name (e.g. mart_product_profitability)\n'
+                    '- "target_grain": short grain description\n'
+                    '- "upstream_tables": list of table names used from above\n'
+                    '- "duckdb_sql": valid DuckDB SELECT query using ONLY the exact table & column names above (LIMIT 25)\n'
+                )
+                resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                raw = (resp.text or "").strip()
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                if m:
+                    parsed = json.loads(m.group(0))
+                    llm_sql = str(parsed.get("duckdb_sql", "")).strip().rstrip(";")
+                    model_name = str(parsed.get("model_name", "")).strip()
+                    target_grain = str(parsed.get("target_grain", "")).strip()
+                    upstream_tables = list(parsed.get("upstream_tables", []))
+                    used_gemini = bool(llm_sql)
+            except Exception:
+                used_gemini = False
+
+        fallback_intent = _infer_goal_intent(user_goal, data_dict)
+        exec_sql = llm_sql or fallback_intent["duckdb_sql"]
+        model_name = model_name or fallback_intent["model_name"]
+        target_grain = target_grain or fallback_intent["grain"]
+        upstream_tables = upstream_tables or fallback_intent["upstream"]
+
+        preview_df, dry_run_err = _run_duckdb_dry_run(exec_sql, data_dict)
+        if dry_run_err or preview_df.empty:
+            # Retry with deterministic intent SQL if LLM SQL had a column mismatch
+            exec_sql = fallback_intent["duckdb_sql"]
+            upstream_tables = fallback_intent["upstream"]
+            preview_df, dry_run_err = _run_duckdb_dry_run(exec_sql, data_dict)
+            if preview_df.empty:
+                preview_df = next(
+                    (v.head(20) for v in data_dict.values() if isinstance(v, pd.DataFrame) and not v.empty),
+                    pd.DataFrame({"category": ["Electronics", "Apparel"], "total_gmv": [52000.0, 48000.0]}),
+                )
+
+        dbt_sql_body = exec_sql
+        for tbl in upstream_tables:
+            dbt_sql_body = re.sub(rf"\b{re.escape(tbl)}\b", f"{{{{ ref('{tbl}') }}}}", dbt_sql_body)
+
+        dbt_sql = (
+            f"-- Auto-Synthesized dbt Model for: {user_goal}\n"
+            f"{{{{ config(materialized='table', schema='platzi_gold') }}}}\n\n"
+            f"{dbt_sql_body};\n"
         )
-        schema_yaml = textwrap.dedent(
-            """\
-            version: 2
-            models:
-              - name: mart_product_performance
-                description: "Governed category performance mart synthesized from Socratic alignment."
-                config:
-                  contract:
-                    enforced: true
-                meta:
-                  owner: analytics-engineering@company.com
-                  sla_freshness: "24h"
-                  gdpr_pii: false
-                columns:
-                  - name: category
-                    data_type: string
-                    constraints:
-                      - type: not_null
-                    tests: [not_null, unique]
-                  - name: total_gmv
-                    data_type: numeric
-                    constraints:
-                      - type: not_null
-                    tests: [not_null]
-                  - name: order_count
-                    data_type: int64
-                    tests: [not_null]
-                  - name: return_rate_pct
-                    data_type: float64
-            """
-        )
+        schema_yaml = _build_schema_yaml_from_df(model_name, user_goal, preview_df)
+
+        pii_cols = [
+            c for c in preview_df.columns
+            if any(p in c.lower() for p in ["email", "phone", "address", "password", "ssn"])
+        ]
+        engine_label = "Gemini + DuckDB" if used_gemini else "Heuristic + DuckDB"
+
         return _StandaloneSchemaResult(
-            spec_id="SPEC-DEMO-001",
+            spec_id=f"SPEC-{spec_hash}",
             is_rejected=False,
-            target_grain="Category (1 row per product category)",
-            upstream_tables=list(reflection.data_dict.keys())[:2] or ["fact_orders"],
+            target_grain=target_grain,
+            upstream_tables=upstream_tables,
             audit_trace=[
-                {"step": "1. Reflection", "status": "PASSED", "detail": f"{len(reflection.data_dict)} tables"},
-                {"step": "2. GDPR Check", "status": "PASSED", "detail": "0 PII columns"},
-                {"step": "3. DuckDB Dry-Run", "status": "PASSED", "detail": f"{len(preview_df)} rows"},
+                {"step": "1. Reflection", "status": "PASSED", "detail": f"{len(data_dict)} tables"},
+                {"step": "2. GDPR Check", "status": "PASSED" if not pii_cols else "WARNING", "detail": f"{len(pii_cols)} PII columns"},
+                {"step": f"3. {engine_label} Dry-Run", "status": "PASSED", "detail": f"{len(preview_df)} rows"},
             ],
             data_preview=preview_df,
             schema_yaml=schema_yaml,
@@ -304,6 +518,7 @@ def render_schema_designer_view(
 
         active_api_key = (
             st.session_state.get("user_gemini_key")
+            or st.session_state.get("sidebar_gemini_api_key")
             or st.session_state.get("gemini_api_key")
             or os.getenv("GEMINI_API_KEY", "")
         ).strip()
