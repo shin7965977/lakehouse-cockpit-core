@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -85,3 +86,60 @@ def test_showcase_mode_b_storybook_catalog() -> None:
     ]:
         catalog_radio.set_value(cid).run(timeout=15)
         assert not at.exception, f"Mode B component '{cid}' raised an exception: {at.exception}"
+
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _find_cjk_leaks(at: AppTest) -> list[str]:
+    """Collect any rendered UI strings containing CJK characters."""
+    leaks: list[str] = []
+    for attr in ("title", "header", "subheader", "caption", "markdown", "info", "warning", "error", "success"):
+        for el in getattr(at, attr, []):
+            val = getattr(el, "value", "") or ""
+            if _CJK_RE.search(val):
+                leaks.append(f"{attr}: {val[:80]}")
+    for attr in ("radio", "selectbox"):
+        for el in getattr(at, attr, []):
+            label = getattr(el, "label", "") or ""
+            if _CJK_RE.search(label):
+                leaks.append(f"{attr}.label: {label[:80]}")
+            for opt in getattr(el, "options", []) or []:
+                opt_str = str(opt)
+                if _CJK_RE.search(opt_str):
+                    leaks.append(f"{attr}.option: {opt_str[:80]}")
+    for el in getattr(at, "button", []):
+        label = getattr(el, "label", "") or ""
+        if _CJK_RE.search(label):
+            leaks.append(f"button: {label[:80]}")
+    for el in getattr(at, "tabs", []):
+        label = getattr(el, "label", "") or ""
+        if _CJK_RE.search(label):
+            leaks.append(f"tab: {label[:80]}")
+    return leaks
+
+
+def test_english_mode_has_no_chinese_in_mode_a_and_mode_b() -> None:
+    """Switching to English must eliminate Chinese UI text in both Mode A and Mode B."""
+    at = AppTest.from_file(SHOWCASE_PATH).run(timeout=15)
+    lang_radio = next(r for r in at.sidebar.radio if r.key == "shared_lang_selector")
+    lang_radio.set_value("English").run(timeout=15)
+    assert not at.exception, f"Mode A English render raised an exception: {at.exception}"
+
+    mode_a_leaks = _find_cjk_leaks(at)
+    assert not mode_a_leaks, f"Chinese text leaked in Mode A English UI: {mode_a_leaks}"
+
+    # Switch to Mode B while staying in English
+    at.sidebar.radio[0].set_value("mode_b").run(timeout=15)
+    assert not at.exception, f"Mode B English render raised an exception: {at.exception}"
+
+    catalog_radio = next(r for r in at.radio if r.key == "storybook_selected_component")
+    for cid in list(catalog_radio.options):
+        catalog_radio.set_value(cid).run(timeout=15)
+        assert not at.exception, f"Mode B English '{cid}' raised an exception: {at.exception}"
+        assert any("UX & Business Problem Solved" in (box.value or "") for box in at.info), (
+            f"Mode B '{cid}' missing UX & Business Problem Solved callout"
+        )
+        leaks = _find_cjk_leaks(at)
+        assert not leaks, f"Chinese text leaked in Mode B '{cid}' English UI: {leaks}"
+

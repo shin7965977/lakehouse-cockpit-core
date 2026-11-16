@@ -296,17 +296,19 @@ def render_ai_drawer(
 
     # Conversation History Container (Stretched to 700px with optimized typography)
     hist_key = f"ai_advisor_chat_hist_{active_scope_id}"
+    welcome_intro = (
+        f"Hello! I am your **Analytics Engineering Copilot** (powered by Gemini Live).\n\n"
+        f"🎯 **Active Scope**: **[{active_scope_title}]**.\n\n"
+        f"Feel free to explore our product catalog, ask about available metrics, or inquire about specific performance anomalies in any language!"
+        if is_en
+        else f"您好！我是您的 **分析工程智能協作助理**（由 Gemini 驅動）。\n\n"
+        f"🎯 **當前視角**：**【{active_scope_title}】**\n\n"
+        f"您可以自由詢問目前有哪些資料、探索指標定義，或提出特定的營運問題，我支援全中文與英文流暢對答！"
+    )
     if hist_key not in st.session_state:
-        welcome_intro = (
-            f"Hello! I am your **Analytics Engineering Copilot** (powered by Gemini Live).\n\n"
-            f"🎯 **Active Scope**: **【{active_scope_title}】**.\n\n"
-            f"Feel free to explore our product catalog, ask about available metrics, or inquire about specific performance anomalies in any language!"
-            if is_en
-            else f"您好！我是您的 **分析工程智能協作助理**（由 Gemini 驅動）。\n\n"
-            f"🎯 **當前視角**：**【{active_scope_title}】**\n\n"
-            f"您可以自由詢問目前有哪些資料、探索指標定義，或提出特定的營運問題，我支援全中文與英文流暢對答！"
-        )
-        st.session_state[hist_key] = [{"role": "assistant", "content": welcome_intro}]
+        st.session_state[hist_key] = [{"role": "assistant", "content": welcome_intro, "is_welcome": True}]
+    elif st.session_state[hist_key] and st.session_state[hist_key][0].get("is_welcome"):
+        st.session_state[hist_key][0]["content"] = welcome_intro
 
     st.markdown(
         """

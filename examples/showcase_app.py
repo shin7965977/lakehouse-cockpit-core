@@ -50,13 +50,17 @@ class ShowcaseComponentSpec:
     """Single source of truth for a component rendered in both Mode A and Mode B."""
 
     id: str
-    tab_title: str
+    tab_title_en: str
+    tab_title_zh: str
     storybook_label: str
     fn_signature: str
     source_files: tuple[str, ...]
     snippet: str
-    description: str
-    placement_in_mode_a: str  # "top_kpi" | "workspace_tab" | "right_drawer"
+    description_en: str
+    description_zh: str
+    problem_solved_en: str
+    problem_solved_zh: str
+    placement_in_mode_a: str  # "top_kpi" | "workspace_tab" | "right_drawer" | "left_sidebar"
     render: Callable[[], None]
 
 
@@ -110,7 +114,9 @@ def _build_mock_datasets() -> dict[str, pd.DataFrame]:
     }
 
 
-def _build_mock_insight(data_dict: dict[str, pd.DataFrame]) -> OnDemandInsightResult:
+def _build_mock_insight(
+    data_dict: dict[str, pd.DataFrame], is_en: bool = False
+) -> OnDemandInsightResult:
     """Create a sample On-Demand Insight payload to demonstrate on_demand_panel.py."""
     mart_df = data_dict["mart_product_performance"]
     fig = px.bar(
@@ -124,9 +130,15 @@ def _build_mock_insight(data_dict: dict[str, pd.DataFrame]) -> OnDemandInsightRe
     fig.update_layout(height=320, margin=dict(l=20, r=20, t=45, b=20))
     return OnDemandInsightResult(
         spec_id="SPEC-SHOWCASE-001",
-        title="品類 GMV 與退貨率異常診斷（Mock Insight）",
+        title=(
+            "Category GMV & Return Rate Anomaly Diagnosis (Mock Insight)"
+            if is_en
+            else "品類 GMV 與退貨率異常診斷（Mock Insight）"
+        ),
         executive_takeaway=(
-            "Electronics 貢獻最高 GMV，但退貨率達 6.7%，建議優先檢視高單價 SKU 的商品規格描述與物流包裝。"
+            "Electronics drives the highest GMV but has a 6.7% return rate. Prioritize reviewing high-ticket SKU descriptions and packaging."
+            if is_en
+            else "Electronics 貢獻最高 GMV，但退貨率達 6.7%，建議優先檢視高單價 SKU 的商品規格描述與物流包裝。"
         ),
         figure=fig,
         executed_sql=(
@@ -440,12 +452,20 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Offline Mock AI response when no Gemini API key is provided."""
-        reply = (
-            "### 📌 離線 Mock 顧問診斷（Showcase Mode）\n"
-            f"- **收到問題**：{user_query}\n"
-            "- **核心結論（Action Title）**：Electronics 品類雖然貢獻最高 GMV，但退貨率偏高，建議優先優化商品規格說明與出貨檢核。\n"
-            "- **下一步**：可在真實環境輸入 Gemini API Key 以啟用完整 FastMCP 工具呼叫。"
-        )
+        if is_en:
+            reply = (
+                "### 📌 Offline Mock Advisor Diagnosis (Showcase Mode)\n"
+                f"- **Question Received**: {user_query}\n"
+                "- **Action Title**: Electronics leads GMV but shows elevated return rates; prioritize SKU spec clarity and fulfillment QC.\n"
+                "- **Next Step**: Enter a Gemini API Key above to enable live FastMCP tool execution."
+            )
+        else:
+            reply = (
+                "### 📌 離線 Mock 顧問診斷（Showcase Mode）\n"
+                f"- **收到問題**：{user_query}\n"
+                "- **核心結論（Action Title）**：Electronics 品類雖然貢獻最高 GMV，但退貨率偏高，建議優先優化商品規格說明與出貨檢核。\n"
+                "- **下一步**：可在真實環境輸入 Gemini API Key 以啟用完整 FastMCP 工具呼叫。"
+            )
         return {"reply": reply, "spec_contract": None}
 
 
@@ -457,7 +477,7 @@ def build_component_registry(
     end_date: date | None,
 ) -> list[ShowcaseComponentSpec]:
     """Single source of truth registry powering both Mode A and Mode B."""
-    sample_insight = _build_mock_insight(data_dict)
+    sample_insight = _build_mock_insight(data_dict, is_en=is_en)
 
     def _render_schema() -> None:
         render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
@@ -469,34 +489,61 @@ def build_component_registry(
     return [
         ShowcaseComponentSpec(
             id="kpi_grid",
-            tab_title="📊 KPI 網格",
+            tab_title_en="📊 KPI Grid",
+            tab_title_zh="📊 KPI 網格",
             storybook_label="1. kpi_grid.py",
             fn_signature="render_kpi_grid()",
             source_files=("components/kpi_grid.py",),
             snippet="render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)",
-            description="4 卡片高階 KPI 網格，支援健康度狀態標籤與公式 Hover Tooltip。",
+            description_en="4-card executive KPI grid with health status badges and formula hover tooltips.",
+            description_zh="4 卡片高階 KPI 網格，支援健康度狀態標籤與公式 Hover Tooltip。",
+            problem_solved_en=(
+                "Eliminates executive metric ambiguity ('how is Return Rate calculated?') by displaying "
+                "numerator/denominator definitions on hover alongside automated Normal/Warning threshold badges."
+            ),
+            problem_solved_zh=(
+                "解決高階主管看報表時常見的『指標口徑黑箱』問題——滑鼠懸停即可看到分子/分母定義，並以紅綠燈自動標記異常指標。"
+            ),
             placement_in_mode_a="top_kpi",
             render=lambda: render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en),
         ),
         ShowcaseComponentSpec(
             id="on_demand_panel",
-            tab_title="🔍 洞察面板 (On-Demand)",
+            tab_title_en="🔍 On-Demand Insight",
+            tab_title_zh="🔍 洞察面板 (On-Demand)",
             storybook_label="2. on_demand_panel.py",
             fn_signature="render_on_demand_insight_panel()",
             source_files=("components/on_demand_panel.py",),
             snippet="render_on_demand_insight_panel(insight=OnDemandInsightResult(...), is_en=is_en)",
-            description="Stakeholder 即時動態洞察面板（Action Title + 圖表 + SQL + 血緣）。",
+            description_en="Stakeholder On-Demand Insight Panel with Action Title, chart, SQL, and lineage.",
+            description_zh="Stakeholder 即時動態洞察面板（Action Title + 圖表 + SQL + 血緣）。",
+            problem_solved_en=(
+                "Prevents AI hallucinations in BI by pairing every generated chart with its exact "
+                "executed SQL, upstream lineage, and FinOps verification badges in one auditable card."
+            ),
+            problem_solved_zh=(
+                "解決傳統 AI 報表『只給圖表不給依據』的信任問題，把一句話結論、互動圖表、實際執行 SQL 與資料血緣綁在同一個可稽核面板中。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
         ),
         ShowcaseComponentSpec(
             id="text_to_chart",
-            tab_title="✨ AI 生圖 (Text-to-Chart)",
+            tab_title_en="✨ Text-to-Chart",
+            tab_title_zh="✨ AI 生圖 (Text-to-Chart)",
             storybook_label="3. text_to_chart.py",
             fn_signature="render_text_to_chart_module()",
             source_files=("components/text_to_chart.py",),
             snippet="render_text_to_chart_module(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description="自然語言 AI 智能圖表生成器，支援範例指令一鍵生圖、業務範疇防呆與底層數據預覽。",
+            description_en="Natural language chart generator with preset prompts, domain guardrail, and underlying data preview.",
+            description_zh="自然語言 AI 智能圖表生成器，支援範例指令一鍵生圖、業務範疇防呆與底層數據預覽。",
+            problem_solved_en=(
+                "Removes SQL/BI tool bottlenecks for non-technical PMs and executives by turning "
+                "plain-language questions into interactive charts while blocking out-of-scope prompts."
+            ),
+            problem_solved_zh=(
+                "解決非技術 PM 或營運人員『想看圖卻不會寫 SQL / 不想等排程』的痛點，用自然語言即時生圖並內建業務範疇防呆。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=lambda: render_text_to_chart_module(
                 adapter=adapter, data_dict=data_dict, is_en=is_en
@@ -504,12 +551,21 @@ def build_component_registry(
         ),
         ShowcaseComponentSpec(
             id="sql_expander",
-            tab_title="🥈 Silver / Bronze 動態模型 & SQL 沙盒",
+            tab_title_en="🥈 Silver / Bronze & SQL Sandbox",
+            tab_title_zh="🥈 Silver / Bronze 動態模型 & SQL 沙盒",
             storybook_label="4. sql_expander.py & sql_sandbox.py",
             fn_signature="render_dynamic_dbt_explorer_with_sandbox()",
             source_files=("components/sql_expander.py", "components/sql_sandbox.py"),
             snippet="render_dynamic_dbt_explorer_with_sandbox(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
-            description="從 dbt manifest.json 動態解析 Silver / Bronze 模型、上游血緣、左右並排預覽與編譯後 SQL，並整合互動式 SQL 沙盒。",
+            description_en="Auto-discovers Silver/Bronze models from dbt manifest.json with live preview, compiled SQL, and merged read-only SQL Sandbox.",
+            description_zh="從 dbt manifest.json 動態解析 Silver / Bronze 模型、上游血緣、左右並排預覽與編譯後 SQL，並整合互動式 SQL 沙盒。",
+            problem_solved_en=(
+                "Eliminates code-to-viz desynchronization and manual SQL maintenance by reading dbt "
+                "manifest.json directly and letting analysts verify numbers in a read-only DuckDB sandbox."
+            ),
+            problem_solved_zh=(
+                "解決『前端寫死 SQL 假文件與後端真實管線脫鉤』的痛點，直接讀取 dbt manifest.json 並提供唯讀 DuckDB 沙盒現場驗算。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=lambda: render_dynamic_dbt_explorer_with_sandbox(
                 adapter=adapter,
@@ -522,12 +578,21 @@ def build_component_registry(
         ),
         ShowcaseComponentSpec(
             id="looker_view",
-            tab_title="📈 Looker 視圖",
+            tab_title_en="📈 Looker BI",
+            tab_title_zh="📈 Looker 視圖",
             storybook_label="5. looker_view.py",
             fn_signature="render_looker_enterprise_view()",
             source_files=("components/looker_view.py",),
             snippet="render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description="Looker Enterprise BI 嵌入與 LookML 定義檢視器。",
+            description_en="Looker Enterprise BI embed and LookML semantic model viewer.",
+            description_zh="Looker Enterprise BI 嵌入與 LookML 定義檢視器。",
+            problem_solved_en=(
+                "Bridges governed BI tools and custom data apps by embedding Looker Studio reports "
+                "and exposing the underlying LookML Single Source of Truth side by side."
+            ),
+            problem_solved_zh=(
+                "解決『企業正式 BI 報表與自建分析平台割裂』的問題，在同一個介面嵌入 Looker 報表並對照底層 LookML 單一事實來源。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=lambda: render_looker_enterprise_view(
                 adapter=adapter, data_dict=data_dict, is_en=is_en
@@ -535,34 +600,61 @@ def build_component_registry(
         ),
         ShowcaseComponentSpec(
             id="schema_designer",
-            tab_title="🏗️ Schema 設計器",
+            tab_title_en="🏗️ Schema Designer",
+            tab_title_zh="🏗️ Schema 設計器",
             storybook_label="6. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description="自主 Schema 設計與 dbt 模型產生器（需搭配宿主專案的 ai 套件）。",
+            description_en="Autonomous Schema Designer synthesizing dbt SQL, enforced Data Contracts (schema.yml), and Semantic Layer (MetricFlow + LookML).",
+            description_zh="自主 Schema 設計器，一次產出 dbt SQL、強制數據合約 (schema.yml) 與語意層 (MetricFlow + LookML)。",
+            problem_solved_en=(
+                "Closes the PRD-to-Engineering gap for Data PMs and Analytics Engineers by turning "
+                "business goals into dry-run verified SQL, enforced Data Contracts, and Semantic Layer specs."
+            ),
+            problem_solved_zh=(
+                "解決 PM 寫數據 PRD 時『口徑模糊、與工程實作斷層』的痛點，直接產出經過驗證的數據預覽、Data Contract 與 Semantic Layer 草案。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=_render_schema,
         ),
         ShowcaseComponentSpec(
             id="data_center_ae",
-            tab_title="🏛️ 資料中心 & AE 流程",
+            tab_title_en="🏛️ Data Center & AE Flow",
+            tab_title_zh="🏛️ 資料中心 & AE 流程",
             storybook_label="7. data_center.py / ae_workflow.py",
             fn_signature="render_data_center_view() & render_ae_workflow_stepper()",
             source_files=("components/data_center.py", "components/ae_workflow.py"),
             snippet="render_data_center_view()\nrender_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description="Elementary 觀測 / dbt Docs 入口與 6 步驟 AE 交付生命週期。",
+            description_en="Elementary observability / dbt Docs portal and 6-step Analytics Engineering delivery lifecycle.",
+            description_zh="Elementary 觀測 / dbt Docs 入口與 6 步驟 AE 交付生命週期。",
+            problem_solved_en=(
+                "Gives Data Engineers and stakeholders one unified portal for pipeline health "
+                "(Elementary), full DAG documentation (dbt Docs), and step-by-step AE delivery governance."
+            ),
+            problem_solved_zh=(
+                "解決工程監控與交付流程分散在多處的問題，整合管線健康度（Elementary）、靜態血緣（dbt Docs）與 6 步驟 AE 交付治理。"
+            ),
             placement_in_mode_a="workspace_tab",
             render=_render_dc_and_ae,
         ),
         ShowcaseComponentSpec(
             id="ai_drawer",
-            tab_title="🤖 AI 抽屜",
+            tab_title_en="🤖 AI Drawer",
+            tab_title_zh="🤖 AI 抽屜",
             storybook_label="8. ai_drawer.py",
             fn_signature="render_ai_drawer()",
             source_files=("components/ai_drawer.py",),
             snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
-            description="7:3 雙欄對話式 AI Copilot 抽屜，內建 System Prompt Playground、離線 Mock 診斷與快速問題。",
+            description_en="7:3 split conversational AI Copilot drawer with BYOK guard, System Prompt Playground, and offline mock mode.",
+            description_zh="7:3 雙欄對話式 AI Copilot 抽屜，內建 BYOK 金鑰安全牆、System Prompt Playground 與離線 Mock 診斷。",
+            problem_solved_en=(
+                "Solves enterprise AI trust & cost concerns with strict BYOK key isolation, live-editable "
+                "System Prompts for transparency, and contextual diagnosis without leaving the dashboard."
+            ),
+            problem_solved_zh=(
+                "解決企業導入 AI 助理時的『資安金鑰顧慮與黑箱 Prompt』痛點，提供 BYOK 本地隔離與可即時檢視修改的 System Prompt Playground。"
+            ),
             placement_in_mode_a="right_drawer",
             render=lambda: render_ai_drawer(
                 active_scope_id="showcase",
@@ -584,12 +676,21 @@ def build_component_registry(
         ),
         ShowcaseComponentSpec(
             id="sidebar_ops",
-            tab_title="⚡ 管線控制 & CSV 下載",
+            tab_title_en="⚡ Pipeline Ops & CSV",
+            tab_title_zh="⚡ 管線控制 & CSV 下載",
             storybook_label="9. sidebar_ops.py",
             fn_signature="render_sidebar_pipeline_ops()",
             source_files=("components/sidebar_ops.py",),
             snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
-            description="側邊欄雲端資料管線控制 (Trigger Workflow) 與 BigQuery 金牌完整數據 CSV 下載器。",
+            description_en="Sidebar Cloud Workflows DAG trigger, cache refresh, and UTF-8 CSV dataset exporter.",
+            description_zh="側邊欄雲端資料管線控制 (Trigger Workflow) 與 BigQuery 金牌完整數據 CSV 下載器。",
+            problem_solved_en=(
+                "Empowers business operators to trigger cloud ELT refreshes and export audit-ready CSVs "
+                "directly from the sidebar without asking Data Engineers to run scripts."
+            ),
+            problem_solved_zh=(
+                "解決業務人員『想看最新數據或匯出明細卻得找工程師跑腳本』的痛點，在側邊欄一鍵觸發雲端排程同步並匯出 CSV。"
+            ),
             placement_in_mode_a="left_sidebar",
             render=lambda: render_sidebar_pipeline_ops(
                 adapter=adapter,
@@ -606,6 +707,7 @@ def build_component_registry(
 def _render_integrated_cockpit_mode_a(
     adapter: ShowcaseRetailAdapter,
     registry: list[ShowcaseComponentSpec],
+    is_en: bool,
 ) -> None:
     """Mode A: Consumes the unified `registry` to render left sidebar ops, top KPI, workspace tabs, and right AI drawer."""
     sidebar_specs = [c for c in registry if c.placement_in_mode_a == "left_sidebar"]
@@ -632,7 +734,9 @@ def _render_integrated_cockpit_mode_a(
         st.markdown("---")
 
         # 2. Embedded Tabbed Feature Workspace dynamically built from unified registry
-        feature_tabs = st.tabs([spec.tab_title for spec in workspace_specs])
+        feature_tabs = st.tabs(
+            [spec.tab_title_en if is_en else spec.tab_title_zh for spec in workspace_specs]
+        )
         for tab_ui, spec in zip(feature_tabs, workspace_specs):
             with tab_ui:
                 spec.render()
@@ -642,17 +746,31 @@ def _render_integrated_cockpit_mode_a(
         right_drawer.render()
 
 
-def _render_component_storybook_mode_b(registry: list[ShowcaseComponentSpec]) -> None:
+def _render_component_storybook_mode_b(
+    registry: list[ShowcaseComponentSpec], is_en: bool
+) -> None:
     """Mode B: Consumes the exact same `registry` list to render the Storybook catalog & live preview."""
-    st.title("🧩 Component Storybook — 元件逐一獨立展示")
-    st.caption("與模式 A 共用同一份 `COMPONENT_REGISTRY` 與側邊欄狀態，確保兩邊 100% 同步不脫鉤。")
+    st.title(
+        "🧩 Component Storybook — Individual Widget Explorer"
+        if is_en
+        else "🧩 Component Storybook — 元件逐一獨立展示"
+    )
+    st.caption(
+        "Powered by the same `COMPONENT_REGISTRY` and sidebar state as Mode A, guaranteeing 100% parity."
+        if is_en
+        else "與模式 A 共用同一份 `COMPONENT_REGISTRY` 與側邊欄狀態，確保兩邊 100% 同步不脫鉤。"
+    )
 
     left_col, right_col = st.columns([3, 7])
 
     with left_col:
-        st.markdown("#### 📦 `components/` 目錄清單")
+        st.markdown(
+            "#### 📦 `components/` Catalog"
+            if is_en
+            else "#### 📦 `components/` 目錄清單"
+        )
         selected_id = st.radio(
-            "選擇要預覽的掛件：",
+            "Select widget to preview:" if is_en else "選擇要預覽的掛件：",
             options=[item.id for item in registry],
             format_func=lambda cid: next(i.storybook_label for i in registry if i.id == cid),
             label_visibility="collapsed",
@@ -664,13 +782,30 @@ def _render_component_storybook_mode_b(registry: list[ShowcaseComponentSpec]) ->
     with right_col:
         h_left, h_right = st.columns([8, 2])
         with h_left:
-            st.markdown(f"### 元件預覽：`{active.fn_signature}`")
+            preview_prefix = "Component Preview" if is_en else "元件預覽"
+            file_prefix = "Source" if is_en else "檔案"
+            desc = active.description_en if is_en else active.description_zh
+            st.markdown(f"### {preview_prefix}: `{active.fn_signature}`")
             files_str = " & ".join(active.source_files)
-            st.caption(f"檔案：`{files_str}` · {active.description}")
+            st.caption(f"{file_prefix}: `{files_str}` · {desc}")
         with h_right:
-            st.success("獨立渲染狀態")
+            st.success("Standalone Render" if is_en else "獨立渲染狀態")
 
-        with st.expander("📋 呼叫範例 / Props 說明", expanded=False):
+        # UX & Business Problem Solved Callout
+        problem_title = (
+            "💡 UX & Business Problem Solved"
+            if is_en
+            else "💡 解決的 UX 與商業痛點"
+        )
+        problem_body = active.problem_solved_en if is_en else active.problem_solved_zh
+        st.info(f"**{problem_title}**: {problem_body}")
+
+        expander_label = (
+            "📋 Usage Example / Props"
+            if is_en
+            else "📋 呼叫範例 / Props 說明"
+        )
+        with st.expander(expander_label, expanded=False):
             st.code(active.snippet, language="python")
 
         st.markdown("#### Live Preview (Mock Data)")
@@ -693,13 +828,19 @@ def main() -> None:
     st.markdown(MODERN_COCKPIT_CSS, unsafe_allow_html=True)
     adapter = ShowcaseRetailAdapter()
 
+    # Resolve language first so even the Showcase Mode switcher respects English / Chinese strictly
+    current_lang = st.session_state.get("shared_lang_selector", "Traditional Chinese")
+    is_en = current_lang == "English"
+
     # Shared Sidebar Controls across Mode A and Mode B
     with st.sidebar:
         mode = st.radio(
-            "🎛️ 展示模式 (Showcase Mode)",
+            "🎛️ Showcase Mode" if is_en else "🎛️ 展示模式 (Showcase Mode)",
             options=["mode_a", "mode_b"],
             format_func=lambda m: (
-                "🏛️ 模式 A：完整整合儀表板" if m == "mode_a" else "🧩 模式 B：元件展示館 (Storybook)"
+                ("🏛️ Mode A: Integrated Cockpit" if m == "mode_a" else "🧩 Mode B: Component Storybook")
+                if is_en
+                else ("🏛️ 模式 A：完整整合儀表板" if m == "mode_a" else "🧩 模式 B：元件展示館 (Storybook)")
             ),
             key="showcase_mode_selector",
         )
@@ -708,9 +849,9 @@ def main() -> None:
         st.caption(f"⚡ {adapter.brand_badge_text}")
 
         lang_choice = st.radio(
-            "Language / 語言",
+            "Language" if is_en else "Language / 語言",
             options=["English", "Traditional Chinese"],
-            index=1,
+            index=0 if is_en else 1,
             horizontal=True,
             key="shared_lang_selector",
         )
@@ -740,9 +881,9 @@ def main() -> None:
     )
 
     if mode == "mode_a":
-        _render_integrated_cockpit_mode_a(adapter, registry)
+        _render_integrated_cockpit_mode_a(adapter, registry, is_en=is_en)
     else:
-        _render_component_storybook_mode_b(registry)
+        _render_component_storybook_mode_b(registry, is_en=is_en)
 
 
 if __name__ == "__main__":
