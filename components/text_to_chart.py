@@ -323,3 +323,259 @@ def render_text_to_chart_module(
                 expanded=False,
             ):
                 st.dataframe(raw_df, use_container_width=True)
+
+
+# ==============================================================================
+# Shared Schema-Agnostic Gemini AI NL2Chart Core Engine
+# ==============================================================================
+def _discover_gemini_flash_models(client) -> list[str]:
+    """Return ordered cascade list of available Gemini Flash models."""
+    import re
+
+    discovered: list[str] = []
+    try:
+        for m in client.models.list():
+            m_name = m.name.replace("models/", "")
+            if "flash" in m_name.lower() and not any(
+                bad in m_name.lower()
+                for bad in ("omni", "embed", "imagen", "tts", "stt", "realtime")
+            ):
+                discovered.append(m_name)
+
+        def _score(name: str) -> float:
+            nums = re.findall(r"(\d+(?:\.\d+)?)", name)
+            return float(nums[0]) if nums else 0.0
+
+        discovered.sort(key=_score, reverse=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    fallbacks = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    candidates = discovered if discovered else list(fallbacks)
+    for fb in fallbacks:
+        if fb not in candidates:
+            candidates.append(fb)
+    return candidates
+
+
+def generate_ai_chart_config(
+    query: str,
+    dataset_schemas: dict[str, dict[str, str]],
+    api_key: str | None = None,
+    domain_context: str = "",
+    fallback_fn=None,
+) -> dict:
+    """Schema-agnostic Gemini AI NL2Chart engine with strict column whitelist validation.
+
+    Shared across all Lakehouse Cockpit projects (ReadCall, Consulting Demo, etc.).
+    """
+    import json
+    import os
+
+    clean_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+    if clean_key and dataset_schemas:
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=clean_key)
+            candidates = _discover_gemini_flash_models(client)
+            schema_doc = json.dumps(dataset_schemas, ensure_ascii=False, indent=2)
+            ds_list = " | ".join(f'"{k}"' for k in dataset_schemas)
+
+            system_prompt = (
+                f"You are a Product & Business Analytics NL2Chart engine. {domain_context}\n"
+                "Given a user's chart request in Chinese or English, return ONLY a valid JSON object:\n"
+                "{\n"
+                f'  "dataset": {ds_list},\n'
+                '  "chart_type": "line" | "bar" | "horizontal_bar",\n'
+                '  "x": "<exact column name from chosen dataset>",\n'
+                '  "y": ["<exact column name(s) from chosen dataset>"],\n'
+                '  "title": "<concise chart title matching the user language>",\n'
+                '  "takeaway": "<1-sentence explanation of what this chart measures, matching user language>",\n'
+                '  "limit": 12\n'
+                "}\n\n"
+                "Rules:\n"
+                "1. Use ONLY exact column names from the chosen dataset in DATASET_SCHEMAS. Never invent columns.\n"
+                "2. For time-series datasets containing 'event_date', set x='event_date' and y to 1-3 numeric columns.\n"
+                "3. For ranking/top-N categorical datasets, set chart_type='horizontal_bar' and 'limit' to requested top-N.\n"
+                "4. For sparse daily conversion/failure rates, prefer chart_type='bar' or 'line' depending on user intent.\n\n"
+                f"DATASET_SCHEMAS:\n{schema_doc}"
+            )
+
+            for model_name in candidates:
+                try:
+                    resp = client.models.generate_content(
+                        model=model_name,
+                        contents=f"User chart request: {query}",
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            temperature=0.0,
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    if not resp or not resp.text:
+                        continue
+                    parsed = json.loads(resp.text.strip())
+                    ds = str(parsed.get("dataset", "")).strip().lower()
+                    if ds not in dataset_schemas:
+                        continue
+
+                    valid_cols = set(dataset_schemas[ds].keys())
+                    ctype = str(parsed.get("chart_type", "line")).strip().lower()
+                    if ctype not in ("line", "bar", "horizontal_bar"):
+                        ctype = "line"
+
+                    if ctype == "horizontal_bar" and "event_name" in valid_cols:
+                        limit_val = max(1, min(int(parsed.get("limit", 12)), 32))
+                        return {
+                            "dataset": ds,
+                            "chart_type": "horizontal_bar",
+                            "x": "total_event_count"
+                            if "total_event_count" in valid_cols
+                            else next(iter(valid_cols)),
+                            "y": "event_name",
+                            "color": "module_category"
+                            if "module_category" in valid_cols
+                            else None,
+                            "title": str(parsed.get("title") or query),
+                            "takeaway": str(parsed.get("takeaway") or ""),
+                            "limit": limit_val,
+                            "query": query,
+                            "generated_by": f"gemini:{model_name}",
+                        }
+
+                    x_col = str(parsed.get("x", "event_date")).strip()
+                    if x_col not in valid_cols:
+                        x_col = (
+                            "event_date"
+                            if "event_date" in valid_cols
+                            else next(iter(valid_cols))
+                        )
+
+                    raw_y = parsed.get("y", [])
+                    if isinstance(raw_y, str):
+                        raw_y = [raw_y]
+                    y_cols = [
+                        c
+                        for c in raw_y
+                        if isinstance(c, str) and c in valid_cols and c != x_col
+                    ]
+                    if not y_cols:
+                        continue
+
+                    return {
+                        "dataset": ds,
+                        "chart_type": ctype,
+                        "x": x_col,
+                        "y": y_cols[:3],
+                        "title": str(parsed.get("title") or query),
+                        "takeaway": str(parsed.get("takeaway") or ""),
+                        "query": query,
+                        "generated_by": f"gemini:{model_name}",
+                    }
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+
+    if callable(fallback_fn):
+        return fallback_fn(query)
+    first_ds = next(iter(dataset_schemas)) if dataset_schemas else "kpi"
+    return {
+        "dataset": first_ds,
+        "chart_type": "line",
+        "x": "event_date",
+        "y": [],
+        "title": query,
+        "query": query,
+        "generated_by": "fallback_rules",
+    }
+
+
+def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
+    """Shared Plotly renderer with percentage formatting for rate metrics & semantic failure coloring."""
+    if df is None or df.empty or not config:
+        return None
+
+    ctype = config.get("chart_type", "line")
+    title = config.get("title", "AI Generated Chart")
+
+    if ctype == "horizontal_bar" and "event_name" in df.columns:
+        limit_n = max(1, min(int(config.get("limit", 12)), 32))
+        x_val = config.get("x", "total_event_count")
+        if x_val not in df.columns:
+            return None
+        sub = df.sort_values(x_val, ascending=False).head(limit_n).copy()
+        color_col = config.get("color")
+        fig = px.bar(
+            sub,
+            x=x_val,
+            y="event_name",
+            color=color_col if color_col and color_col in sub.columns else None,
+            orientation="h",
+            title=title,
+            template="plotly_white",
+        )
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            height=420,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    x_col = config.get("x", "event_date")
+    y_cols = config.get("y", [])
+    if isinstance(y_cols, str):
+        y_cols = [y_cols]
+    avail_y = [c for c in y_cols if c in df.columns]
+    if not avail_y or x_col not in df.columns:
+        return None
+
+    is_rate_chart = all(
+        any(tok in c.lower() for tok in ("rate", "ratio", "pct", "share"))
+        for c in avail_y
+    )
+
+    sub = df.sort_values(x_col).copy()
+    fig = go.Figure()
+    palette = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6"]
+    for idx, col in enumerate(avail_y):
+        is_neg = any(
+            neg in col.lower() for neg in ("fail", "error", "return", "churn", "drop")
+        )
+        color = "#ef4444" if is_neg else palette[idx % len(palette)]
+        if ctype == "bar":
+            fig.add_trace(
+                go.Bar(x=sub[x_col], y=sub[col], name=col, marker_color=color)
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=sub[x_col],
+                    y=sub[col],
+                    mode="lines+markers",
+                    name=col,
+                    line={
+                        "color": color,
+                        "width": 2.5,
+                        "shape": "linear" if is_rate_chart else "spline",
+                    },
+                )
+            )
+
+    layout_kwargs = {
+        "barmode": "group",
+        "title": title,
+        "template": "plotly_white",
+        "height": 390,
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "hovermode": "x unified",
+        "legend": {"orientation": "h", "y": 1.1},
+    }
+    if is_rate_chart:
+        layout_kwargs["yaxis"] = {"tickformat": ".0%"}
+    fig.update_layout(**layout_kwargs)
+    return fig
