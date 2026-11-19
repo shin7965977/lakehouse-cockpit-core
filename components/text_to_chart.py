@@ -360,6 +360,111 @@ def _discover_gemini_flash_models(client) -> list[str]:
     return candidates
 
 
+SUPPORTED_CHART_TYPES: tuple[str, ...] = (
+    "line",
+    "area",
+    "bar",
+    "stacked_bar",
+    "horizontal_bar",
+    "donut",
+    "scatter",
+    "dual_axis",
+)
+
+
+def classify_dataframe_columns(
+    df: pd.DataFrame | None, allowed_cols: list[str]
+) -> dict[str, list[str]]:
+    """Classify columns into temporal, numeric, and categorical buckets for axis guardrails."""
+    temporal: list[str] = []
+    numeric: list[str] = []
+    categorical: list[str] = []
+
+    if df is None or df.empty:
+        for c in allowed_cols:
+            cl = c.lower()
+            if "date" in cl or "time" in cl:
+                temporal.append(c)
+            elif any(
+                tok in cl
+                for tok in (
+                    "name",
+                    "category",
+                    "group",
+                    "stage",
+                    "component",
+                    "country",
+                    "region",
+                    "device",
+                    "channel",
+                )
+            ):
+                categorical.append(c)
+            else:
+                numeric.append(c)
+        return {
+            "temporal": temporal,
+            "numeric": numeric,
+            "categorical": categorical,
+        }
+
+    for c in allowed_cols:
+        if c not in df.columns:
+            continue
+        series = df[c]
+        cl = c.lower()
+        if pd.api.types.is_datetime64_any_dtype(series) or "date" in cl:
+            temporal.append(c)
+        elif pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(
+            series
+        ):
+            numeric.append(c)
+        else:
+            categorical.append(c)
+    return {"temporal": temporal, "numeric": numeric, "categorical": categorical}
+
+
+def get_allowed_axis_columns(
+    chart_type: str, col_types: dict[str, list[str]]
+) -> tuple[list[str], list[str], list[str]]:
+    """Return `(allowed_x, allowed_y, allowed_color)` strictly enforcing Tableau/Looker-style data types."""
+    temp = col_types.get("temporal", [])
+    num = col_types.get("numeric", [])
+    cat = col_types.get("categorical", [])
+
+    if chart_type == "horizontal_bar":
+        return num, cat, cat
+    if chart_type == "donut":
+        return cat, num, []
+    if chart_type == "scatter":
+        return num, num, cat
+    if chart_type == "dual_axis":
+        return temp + cat, num, []
+    # line, area, bar, stacked_bar
+    return temp + cat, num, cat
+
+
+def get_supported_chart_types_for_df(col_types: dict[str, list[str]]) -> list[str]:
+    """Filter chart types to only those mathematically valid for this dataset's column types."""
+    valid: list[str] = []
+    for ct in SUPPORTED_CHART_TYPES:
+        ax_x, ax_y, _ = get_allowed_axis_columns(ct, col_types)
+        if ct == "dual_axis":
+            if ax_x and len(ax_y) >= 2:
+                valid.append(ct)
+        elif ax_x and ax_y:
+            valid.append(ct)
+    return valid or ["line", "bar"]
+
+
+def _col_type_icon(col: str, col_types: dict[str, list[str]]) -> str:
+    if col in col_types.get("temporal", []):
+        return "📅"
+    if col in col_types.get("numeric", []):
+        return "🔢"
+    return "🏷️"
+
+
 def generate_ai_chart_config(
     query: str,
     dataset_schemas: dict[str, dict[str, str]],
@@ -390,7 +495,7 @@ def generate_ai_chart_config(
                 "Given a user's chart request in Chinese or English, return ONLY a valid JSON object:\n"
                 "{\n"
                 f'  "dataset": {ds_list},\n'
-                '  "chart_type": "line" | "bar" | "horizontal_bar",\n'
+                '  "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
                 '  "x": "<exact column name from chosen dataset>",\n'
                 '  "y": ["<exact column name(s) from chosen dataset>"],\n'
                 '  "title": "<concise chart title matching the user language>",\n'
@@ -425,7 +530,7 @@ def generate_ai_chart_config(
 
                     valid_cols = set(dataset_schemas[ds].keys())
                     ctype = str(parsed.get("chart_type", "line")).strip().lower()
-                    if ctype not in ("line", "bar", "horizontal_bar"):
+                    if ctype not in SUPPORTED_CHART_TYPES:
                         ctype = "line"
 
                     if ctype == "horizontal_bar" and "event_name" in valid_cols:
@@ -496,25 +601,42 @@ def generate_ai_chart_config(
 
 
 def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
-    """Shared Plotly renderer with percentage formatting for rate metrics & semantic failure coloring."""
+    """Shared Plotly renderer supporting 8 chart types with strict numeric guardrails & % formatting."""
     if df is None or df.empty or not config:
         return None
 
-    ctype = config.get("chart_type", "line")
+    ctype = str(config.get("chart_type", "line")).strip().lower()
     title = config.get("title", "AI Generated Chart")
+    palette = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6"]
 
-    if ctype == "horizontal_bar" and "event_name" in df.columns:
-        limit_n = max(1, min(int(config.get("limit", 12)), 32))
-        x_val = config.get("x", "total_event_count")
-        if x_val not in df.columns:
+    def _is_rate_col(name: str) -> bool:
+        return any(tok in name.lower() for tok in ("rate", "ratio", "pct", "share"))
+
+    def _pick_color(name: str, idx: int) -> str:
+        is_neg = any(
+            neg in name.lower() for neg in ("fail", "error", "return", "churn", "drop")
+        )
+        return "#ef4444" if is_neg else palette[idx % len(palette)]
+
+    x_col = config.get("x", "event_date")
+    raw_y = config.get("y", [])
+    y_cols = [raw_y] if isinstance(raw_y, str) else list(raw_y)
+    color_col = config.get("color")
+    valid_color = color_col if color_col and color_col in df.columns else None
+
+    # 1. Horizontal Top-N Ranking Bar Chart (X=numeric, Y=categorical)
+    if ctype == "horizontal_bar":
+        y_cat = y_cols[0] if y_cols and y_cols[0] in df.columns else ("event_name" if "event_name" in df.columns else None)
+        x_num = x_col if x_col in df.columns and pd.api.types.is_numeric_dtype(df[x_col]) else None
+        if not y_cat or not x_num:
             return None
-        sub = df.sort_values(x_val, ascending=False).head(limit_n).copy()
-        color_col = config.get("color")
+        limit_n = max(1, min(int(config.get("limit", 12)), 32))
+        sub = df.sort_values(x_num, ascending=False).head(limit_n).copy()
         fig = px.bar(
             sub,
-            x=x_val,
-            y="event_name",
-            color=color_col if color_col and color_col in sub.columns else None,
+            x=x_num,
+            y=y_cat,
+            color=valid_color,
             orientation="h",
             title=title,
             template="plotly_white",
@@ -527,30 +649,129 @@ def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
         )
         return fig
 
-    x_col = config.get("x", "event_date")
-    y_cols = config.get("y", [])
-    if isinstance(y_cols, str):
-        y_cols = [y_cols]
-    avail_y = [c for c in y_cols if c in df.columns]
+    # 2. Donut / Pie Share Chart (X=categorical slice labels, Y[0]=numeric sum)
+    if ctype == "donut":
+        num_y = [c for c in y_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if x_col not in df.columns or not num_y:
+            return None
+        val_col = num_y[0]
+        agg = df.groupby(x_col, as_index=False)[val_col].sum().sort_values(val_col, ascending=False)
+        agg = agg[agg[val_col] > 0]
+        if agg.empty:
+            return None
+        fig = px.pie(
+            agg,
+            names=x_col,
+            values=val_col,
+            hole=0.45,
+            title=title,
+            template="plotly_white",
+            color_discrete_sequence=palette + ["#ec4899", "#06b6d4"],
+        )
+        fig.update_traces(textposition="inside", textinfo="percent+label")
+        fig.update_layout(
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    # 3. Scatter Correlation Chart (X=numeric, Y[0]=numeric)
+    if ctype == "scatter":
+        num_y = [c for c in y_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if x_col not in df.columns or not pd.api.types.is_numeric_dtype(df[x_col]) or not num_y:
+            return None
+        fig = px.scatter(
+            df,
+            x=x_col,
+            y=num_y[0],
+            color=valid_color,
+            title=title,
+            template="plotly_white",
+        )
+        fig.update_layout(
+            height=390,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        return fig
+
+    # 4. Dual-Axis Combo Chart (Left Y=Bar, Right Y=Line — solves mixed units!)
+    avail_y = [c for c in y_cols if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
     if not avail_y or x_col not in df.columns:
         return None
 
-    is_rate_chart = all(
-        any(tok in c.lower() for tok in ("rate", "ratio", "pct", "share"))
-        for c in avail_y
-    )
-
     sub = df.sort_values(x_col).copy()
-    fig = go.Figure()
-    palette = ["#2563eb", "#10b981", "#f59e0b", "#8b5cf6"]
-    for idx, col in enumerate(avail_y):
-        is_neg = any(
-            neg in col.lower() for neg in ("fail", "error", "return", "churn", "drop")
+
+    if ctype == "dual_axis" and len(avail_y) >= 2:
+        from plotly.subplots import make_subplots
+
+        left_col, right_col = avail_y[0], avail_y[1]
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Bar(
+                x=sub[x_col],
+                y=sub[left_col],
+                name=left_col,
+                marker_color=_pick_color(left_col, 0),
+                opacity=0.82,
+            ),
+            secondary_y=False,
         )
-        color = "#ef4444" if is_neg else palette[idx % len(palette)]
-        if ctype == "bar":
+        fig.add_trace(
+            go.Scatter(
+                x=sub[x_col],
+                y=sub[right_col],
+                mode="lines+markers",
+                name=right_col,
+                line={
+                    "color": _pick_color(right_col, 1),
+                    "width": 2.5,
+                    "shape": "linear" if _is_rate_col(right_col) else "spline",
+                },
+            ),
+            secondary_y=True,
+        )
+        fig.update_yaxes(
+            title_text=left_col,
+            tickformat=".0%" if _is_rate_col(left_col) else None,
+            secondary_y=False,
+        )
+        fig.update_yaxes(
+            title_text=right_col,
+            tickformat=".0%" if _is_rate_col(right_col) else None,
+            secondary_y=True,
+        )
+        fig.update_layout(
+            title=title,
+            template="plotly_white",
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            hovermode="x unified",
+            legend={"orientation": "h", "y": 1.12},
+        )
+        return fig
+
+    # 5. Line / Area / Bar / Stacked Bar (strictly numeric Y)
+    is_rate_chart = all(_is_rate_col(c) for c in avail_y)
+    fig = go.Figure()
+    for idx, col in enumerate(avail_y):
+        color = _pick_color(col, idx)
+        if ctype in ("bar", "stacked_bar"):
             fig.add_trace(
                 go.Bar(x=sub[x_col], y=sub[col], name=col, marker_color=color)
+            )
+        elif ctype == "area":
+            fig.add_trace(
+                go.Scatter(
+                    x=sub[x_col],
+                    y=sub[col],
+                    mode="lines+markers",
+                    name=col,
+                    fill="tozeroy" if idx == 0 else "tonexty",
+                    line={"color": color, "width": 2.2, "shape": "linear" if is_rate_chart else "spline"},
+                )
             )
         else:
             fig.add_trace(
@@ -568,7 +789,7 @@ def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
             )
 
     layout_kwargs = {
-        "barmode": "group",
+        "barmode": "stack" if ctype == "stacked_bar" else "group",
         "title": title,
         "template": "plotly_white",
         "height": 390,
@@ -620,7 +841,7 @@ def refine_ai_chart_config(
                 '  "reply": "<concise helpful answer/confirmation in the user language>",\n'
                 '  "config": {\n'
                 '    "dataset": "<valid dataset key>",\n'
-                '    "chart_type": "line" | "bar" | "horizontal_bar",\n'
+                '    "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
                 '    "x": "<valid column>",\n'
                 '    "y": ["<valid column(s)>"],\n'
                 '    "color": "<optional valid column or null>",\n'
@@ -661,7 +882,7 @@ def refine_ai_chart_config(
                         ctype = str(
                             new_cfg.get("chart_type", updated.get("chart_type", "line"))
                         ).strip().lower()
-                        if ctype in ("line", "bar", "horizontal_bar"):
+                        if ctype in SUPPORTED_CHART_TYPES:
                             updated["chart_type"] = ctype
                         x_c = str(new_cfg.get("x", updated.get("x", ""))).strip()
                         if x_c in valid_cols:
@@ -898,7 +1119,7 @@ def _render_nl2chart_studio_body(
                     f"**其他欄位或資訊：** ({' ｜ '.join(other_parts)})"
                 )
 
-            # Editable Parameter Controls (Instant manual adjustment without spending LLM tokens)
+            # Editable Parameter Controls with Typed Axis Guardrails (📅 Temporal / 🏷️ Text / 🔢 Numeric)
             r1_c1, r1_c2, r1_c3 = st.columns(3)
             with r1_c1:
                 sel_ds = st.selectbox(
@@ -913,18 +1134,51 @@ def _render_nl2chart_studio_body(
                 all_cols = list(cur_schema.keys())
                 draft_cfg["dataset"] = cur_ds
 
-            chart_types = ["line", "bar", "horizontal_bar"]
-            cur_ctype = draft_cfg.get("chart_type", "line")
+            # Inspect real DataFrame dtypes to enforce Tableau/Looker-style typed column guardrails
+            ds_getter = dataset_getters.get(cur_ds)
+            preview_df = ds_getter() if callable(ds_getter) else ds_getter
+            col_types = classify_dataframe_columns(preview_df, all_cols)
+            chart_types = get_supported_chart_types_for_df(col_types)
+
+            cur_ctype = draft_cfg.get("chart_type", chart_types[0])
             if cur_ctype not in chart_types:
-                cur_ctype = "line"
+                cur_ctype = chart_types[0]
+
+            ctype_labels = {
+                "line": "📈 line (折線圖)" if not is_en else "📈 line (Line Chart)",
+                "area": "🌊 area (面積圖)" if not is_en else "🌊 area (Area Chart)",
+                "bar": "📊 bar (並列長條圖)" if not is_en else "📊 bar (Grouped Bar)",
+                "stacked_bar": "🧱 stacked_bar (堆疊長條圖)"
+                if not is_en
+                else "🧱 stacked_bar (Stacked Bar)",
+                "horizontal_bar": "🏆 horizontal_bar (橫向排行圖)"
+                if not is_en
+                else "🏆 horizontal_bar (Horizontal Ranking)",
+                "donut": "🍩 donut (甜甜圈佔比圖)"
+                if not is_en
+                else "🍩 donut (Donut Share)",
+                "scatter": "✨ scatter (雙指標散佈圖)"
+                if not is_en
+                else "✨ scatter (Scatter Correlation)",
+                "dual_axis": "⚖️ dual_axis (雙 Y 軸：柱＋線)"
+                if not is_en
+                else "⚖️ dual_axis (Dual Y-Axis: Bar + Line)",
+            }
             with r1_c2:
                 sel_ctype = st.selectbox(
                     "圖表類型 (Chart Type)" if not is_en else "Chart Type",
                     options=chart_types,
                     index=chart_types.index(cur_ctype),
-                    key=f"{state_prefix}_sel_ctype",
+                    format_func=lambda ct: ctype_labels.get(ct, ct),
+                    key=f"{state_prefix}_sel_ctype_{cur_ds}",
                 )
             draft_cfg["chart_type"] = sel_ctype
+
+            allowed_x, allowed_y, allowed_color = get_allowed_axis_columns(
+                sel_ctype, col_types
+            )
+            allowed_x = allowed_x or all_cols
+            allowed_y = allowed_y or all_cols
 
             with r1_c3:
                 if sel_ctype == "horizontal_bar":
@@ -936,55 +1190,115 @@ def _render_nl2chart_studio_body(
                         key=f"{state_prefix}_sel_limit",
                     )
                     draft_cfg["limit"] = int(sel_limit)
-                else:
-                    color_opts = ["(None)"] + all_cols
+                elif allowed_color:
+                    color_opts = ["(None)"] + allowed_color
                     cur_color = draft_cfg.get("color")
-                    color_idx = color_opts.index(cur_color) if cur_color in color_opts else 0
+                    color_idx = (
+                        color_opts.index(cur_color) if cur_color in color_opts else 0
+                    )
                     sel_color = st.selectbox(
-                        "顏色分組 (Color)" if not is_en else "Color Group",
+                        "顏色分組 (🏷️ 分類)" if not is_en else "Color Group (🏷️ Cat)",
                         options=color_opts,
                         index=color_idx,
-                        key=f"{state_prefix}_sel_color",
+                        key=f"{state_prefix}_sel_color_{cur_ds}_{sel_ctype}",
                     )
                     if sel_color == "(None)":
                         draft_cfg.pop("color", None)
                     else:
                         draft_cfg["color"] = sel_color
+                else:
+                    draft_cfg.pop("color", None)
+                    st.caption(
+                        "🛡️ 此資料表／圖表無分類顏色欄位"
+                        if not is_en
+                        else "🛡️ No categorical color column for this chart type"
+                    )
+
+            def _fmt_typed(c: str) -> str:
+                return f"{_col_type_icon(c, col_types)} {_format_col_label(c, cur_schema)}"
 
             r2_c1, r2_c2 = st.columns([1.2, 2.0])
-            cur_x = draft_cfg.get("x", all_cols[0])
-            if cur_x not in all_cols:
-                cur_x = "event_date" if "event_date" in all_cols else all_cols[0]
+            cur_x = draft_cfg.get("x", allowed_x[0])
+            if cur_x not in allowed_x:
+                cur_x = allowed_x[0]
+            x_title_hint = (
+                "X 軸（🏷️ 分類切片）"
+                if sel_ctype == "donut" and not is_en
+                else (
+                    "Slice Labels (🏷️ Cat)"
+                    if sel_ctype == "donut"
+                    else (
+                        "X 軸（🔢 數值）"
+                        if sel_ctype in ("horizontal_bar", "scatter") and not is_en
+                        else ("X 軸欄位 (X-Axis)" if not is_en else "X-Axis Column")
+                    )
+                )
+            )
             with r2_c1:
                 sel_x = st.selectbox(
-                    "X 軸欄位 (X-Axis)" if not is_en else "X-Axis Column",
-                    options=all_cols,
-                    index=all_cols.index(cur_x),
-                    format_func=lambda c: _format_col_label(c, cur_schema),
-                    key=f"{state_prefix}_sel_x_{cur_ds}",
+                    x_title_hint,
+                    options=allowed_x,
+                    index=allowed_x.index(cur_x),
+                    format_func=_fmt_typed,
+                    key=f"{state_prefix}_sel_x_{cur_ds}_{sel_ctype}",
                 )
             draft_cfg["x"] = sel_x
 
             raw_y_cur = draft_cfg.get("y", [])
             y_cur_list = [raw_y_cur] if isinstance(raw_y_cur, str) else list(raw_y_cur)
-            valid_y_defaults = [c for c in y_cur_list if c in all_cols]
-            if not valid_y_defaults and len(all_cols) > 1:
-                valid_y_defaults = [all_cols[1]]
-            with r2_c2:
-                sel_y = st.multiselect(
-                    "Y 軸欄位 (Y-Axis)" if not is_en else "Y-Axis Columns",
-                    options=all_cols,
-                    default=valid_y_defaults,
-                    format_func=lambda c: _format_col_label(c, cur_schema),
-                    key=f"{state_prefix}_sel_y_{cur_ds}",
-                )
-            if sel_y:
-                draft_cfg["y"] = (
-                    sel_y[0]
-                    if sel_ctype == "horizontal_bar" and "event_name" in sel_y
-                    else sel_y
-                )
+            valid_y_defaults = [c for c in y_cur_list if c in allowed_y]
+            if not valid_y_defaults:
+                if sel_ctype == "dual_axis" and len(allowed_y) >= 2:
+                    valid_y_defaults = allowed_y[:2]
+                else:
+                    valid_y_defaults = [allowed_y[0]]
+            elif sel_ctype == "dual_axis" and len(valid_y_defaults) < 2 and len(allowed_y) >= 2:
+                second = next((c for c in allowed_y if c not in valid_y_defaults), allowed_y[1])
+                valid_y_defaults = [valid_y_defaults[0], second]
 
+            y_title_hint = (
+                "Y 軸（左柱 ＋ 右線，選 2 個 🔢 數值）"
+                if sel_ctype == "dual_axis" and not is_en
+                else (
+                    "Y-Axis (Left Bar + Right Line, pick 2 🔢 Numeric)"
+                    if sel_ctype == "dual_axis"
+                    else (
+                        "Y 軸（🏷️ 分類項目）"
+                        if sel_ctype == "horizontal_bar" and not is_en
+                        else (
+                            "數值指標（🔢 僅限數值）"
+                            if not is_en
+                            else "Y-Axis Columns (🔢 Numeric Guard)"
+                        )
+                    )
+                )
+            )
+            with r2_c2:
+                if sel_ctype in ("horizontal_bar", "donut", "scatter"):
+                    sel_y_single = st.selectbox(
+                        y_title_hint,
+                        options=allowed_y,
+                        index=allowed_y.index(valid_y_defaults[0]),
+                        format_func=_fmt_typed,
+                        key=f"{state_prefix}_sel_y1_{cur_ds}_{sel_ctype}",
+                    )
+                    draft_cfg["y"] = [sel_y_single] if sel_ctype != "horizontal_bar" else sel_y_single
+                else:
+                    sel_y = st.multiselect(
+                        y_title_hint,
+                        options=allowed_y,
+                        default=valid_y_defaults,
+                        format_func=_fmt_typed,
+                        key=f"{state_prefix}_sel_y_{cur_ds}_{sel_ctype}",
+                    )
+                    if sel_y:
+                        draft_cfg["y"] = sel_y
+
+            st.caption(
+                "🛡️ 型別防呆已啟用：📅 時間維度 ｜ 🏷️ 文字分類 ｜ 🔢 數值度量（系統已自動過濾不合法欄位，防止文本誤入數值軸）"
+                if not is_en
+                else "🛡️ Typed Axis Guardrails active: 📅 Temporal | 🏷️ Categorical | 🔢 Numeric (invalid text columns are automatically blocked from numeric axes)"
+            )
             st.session_state[k_draft] = draft_cfg
 
             # Accumulating Q&A / Refinement Chat Box (no full-page reload!)
