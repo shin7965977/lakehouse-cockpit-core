@@ -214,117 +214,187 @@ def render_text_to_chart_module(
     is_en: bool = True,
     scope_key: str = "default",
 ) -> None:
-    """Render the interactive Natural Language AI Smart Chart Generator (Text-to-Chart) widget."""
+    """Render the 2-step HITL Natural Language AI Chart Studio (with Spec Preview Form & Q&A Chat)."""
+    import os
+
     st.subheader(
-        "✨ Natural Language AI Chart Generator (Text-to-Chart)"
+        "✨ Natural Language AI Chart Studio (2-Step HITL & Q&A Refinement)"
         if is_en
-        else "✨ 自然語言 AI 智能圖表生成器 (Text-to-Chart)"
+        else "✨ 自然語言 AI 智慧圖表工作台（兩階段規格確認 & 對話微調）"
     )
     st.caption(
-        "🤖 Enter any business chart request in natural language to synthesize an interactive Plotly visualization and consulting takeaway."
+        "🤖 Step 1: Enter chart goal -> Step 2: Review & refine X/Y axes, 8 chart types, and chat -> Step 3: Render verified Plotly chart."
         if is_en
-        else "🤖 支援自然語言輸入圖表需求，AI 即時解析意圖、選取指標欄位並繪製互動式 Plotly 圖表與顧問洞察摘要。"
+        else "🤖 步驟 1：輸入圖表需求 ➔ 步驟 2：確認資料表、X/Y 軸型別防呆與對話微調 ➔ 步驟 3：繪製互動圖表與檢視底層明細。"
     )
 
-    state_query_key = f"nl_chart_query_{scope_key}"
-    input_widget_key = f"nl_chart_input_{scope_key}"
+    safe_dict = {
+        k: v
+        for k, v in (data_dict or {}).items()
+        if isinstance(v, pd.DataFrame) and not v.empty
+    }
+    if not safe_dict:
+        st.error(
+            "❌ No non-empty datasets available for Text-to-Chart."
+            if is_en
+            else "❌ 目前無非空資料表可供生圖。"
+        )
+        return
 
-    default_prompt = (
-        "Show daily GMV revenue trend"
-        if is_en
-        else "請畫出每日 GMV 營收趨勢走勢圖"
-    )
-    if state_query_key not in st.session_state:
-        st.session_state[state_query_key] = default_prompt
+    col_desc_en = {
+        "order_id": "Order ID",
+        "event_date": "Order Date",
+        "category": "Product Category",
+        "region": "Sales Region",
+        "gross_amount": "Gross Order Amount ($)",
+        "units": "Units Sold",
+        "is_returned": "Returned Flag (0/1)",
+        "total_gmv": "Total GMV ($)",
+        "order_count": "Total Orders",
+        "returned_orders": "Returned Orders",
+        "avg_order_value": "Average Order Value ($)",
+        "return_rate_pct": "Return Rate (%)",
+        "ingested_at": "Ingestion Timestamp",
+        "source_system": "Source System",
+    }
+    col_desc_zh = {
+        "order_id": "訂單編號",
+        "event_date": "訂單日期",
+        "category": "商品品類",
+        "region": "銷售地區",
+        "gross_amount": "單筆訂單金額 ($)",
+        "units": "銷售件數",
+        "is_returned": "是否退貨 (0/1)",
+        "total_gmv": "總銷售額 GMV ($)",
+        "order_count": "訂單總數",
+        "returned_orders": "退貨訂單數",
+        "avg_order_value": "平均客單價 AOV ($)",
+        "return_rate_pct": "退貨率 (%)",
+        "ingested_at": "資料攝取時間",
+        "source_system": "來源系統",
+    }
+    active_desc_map = col_desc_en if is_en else col_desc_zh
 
-    def _set_preset_query(q: str) -> None:
-        st.session_state[state_query_key] = q
-        st.session_state[input_widget_key] = q
+    dataset_schemas: dict[str, dict[str, str]] = {}
+    dataset_getters: dict[str, Any] = {}
+    for tbl_name, df in safe_dict.items():
+        dataset_schemas[tbl_name] = {
+            str(col): active_desc_map.get(str(col), str(df[col].dtype))
+            for col in df.columns
+        }
+        dataset_getters[tbl_name] = df
 
-    st.markdown("##### 💡 Click an example prompt:" if is_en else "##### 💡 點擊範例指令立即生圖：")
     presets = (
         [
-            ("📈 Daily GMV Trend", "Show daily GMV revenue trend"),
-            ("🏆 Category GMV Bar Chart", "Plot category GMV comparison bar chart"),
-            ("⚠️ Category Return Rate", "Compare return rate by category"),
-            ("🥧 Regional Share Pie Chart", "Show revenue share by region in a pie chart"),
+            {"label": "📈 Daily GMV Trend", "query": "Show daily GMV revenue trend"},
+            {"label": "🏆 Category GMV Bar Chart", "query": "Plot category GMV comparison bar chart"},
+            {"label": "⚠️ Category Return Rate", "query": "Compare return rate by category"},
+            {"label": "🍩 Regional Share Donut", "query": "Show revenue share by region in a donut chart"},
         ]
         if is_en
         else [
-            ("📈 每日 GMV 趨勢走勢", "請畫出每日 GMV 營收趨勢走勢圖"),
-            ("🏆 各品類銷售額長條圖", "用長條圖呈現各品類 GMV 銷售額排行"),
-            ("⚠️ 各品類退貨率監控", "比較各品類的退貨率表現"),
-            ("🥧 各區域營收佔比圓餅圖", "用圓餅圖呈現各區域營收佔比"),
+            {"label": "📈 每日 GMV 趨勢走勢", "query": "請畫出每日 GMV 營收趨勢走勢圖"},
+            {"label": "🏆 各品類銷售額長條圖", "query": "用長條圖呈現各品類 GMV 銷售額排行"},
+            {"label": "⚠️ 各品類退貨率監控", "query": "比較各品類的退貨率表現"},
+            {"label": "🍩 各區域營收佔比圖", "query": "用甜甜圈圖呈現各區域營收佔比"},
         ]
     )
 
-    cols = st.columns(len(presets))
-    for idx, (btn_label, preset_prompt) in enumerate(presets):
-        with cols[idx]:
-            if st.button(
-                btn_label,
-                key=f"btn_nl_preset_{scope_key}_{idx}",
-                use_container_width=True,
-            ):
-                _set_preset_query(preset_prompt)
-                st.rerun()
+    first_tbl = next(iter(safe_dict.keys()))
+    fact_tbl = "fact_orders" if "fact_orders" in safe_dict else first_tbl
+    mart_tbl = "mart_product_performance" if "mart_product_performance" in safe_dict else fact_tbl
 
-    in_col, btn_col = st.columns([8, 2])
-    with in_col:
-        user_input = st.text_input(
-            label="Natural Language Chart Prompt",
-            value=st.session_state[state_query_key],
-            placeholder=(
-                "e.g., Compare return rate by category..."
+    def _fallback_cfg(query: str) -> dict[str, Any]:
+        q_l = (query or "").strip().lower()
+        if any(k in q_l for k in ("圓餅", "甜甜圈", "佔比", "地區", "區域", "城市", "pie", "donut", "region", "share")):
+            return {
+                "dataset": fact_tbl,
+                "chart_type": "donut",
+                "x": "region" if "region" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[0],
+                "y": ["gross_amount" if "gross_amount" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[-1]],
+                "title": "Revenue Share by Region" if is_en else "各區域 GMV 營收貢獻佔比",
+                "takeaway": (
+                    "Displays regional GMV contribution share across cities."
+                    if is_en
+                    else "呈現各銷售區域對總 GMV 的營收貢獻佔比。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+        if any(k in q_l for k in ("退貨", "退款", "異常", "return", "refund")):
+            return {
+                "dataset": mart_tbl,
+                "chart_type": "bar",
+                "x": "category" if "category" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[0],
+                "y": ["return_rate_pct" if "return_rate_pct" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[-1]],
+                "title": "Return Rate (%) by Category" if is_en else "各品類退貨率監控比較 (%)",
+                "takeaway": (
+                    "Compares return rate percentage across product categories."
+                    if is_en
+                    else "比較各商品品類的退貨率表現，協助定位高退貨品類。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+        if any(k in q_l for k in ("每日", "趨勢", "走勢", "時間", "日期", "daily", "trend", "date", "time", "area", "line")):
+            return {
+                "dataset": fact_tbl,
+                "chart_type": "area",
+                "x": "event_date" if "event_date" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[0],
+                "y": ["gross_amount" if "gross_amount" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[-1]],
+                "title": "Daily GMV Revenue Trend ($)" if is_en else "每日 GMV 營收趨勢走勢圖 ($)",
+                "takeaway": (
+                    "Tracks daily gross merchandise value trajectory over time."
+                    if is_en
+                    else "追蹤期間內每日 GMV 營收變化走勢與單日高峰。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+        if any(k in q_l for k in ("品類", "品項", "項目", "類別", "商品", "產品", "長條", "柱狀", "排行", "銷售", "營收", "category", "product", "item", "sku", "bar", "gmv", "revenue", "sales")):
+            return {
+                "dataset": mart_tbl,
+                "chart_type": "bar",
+                "x": "category" if "category" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[0],
+                "y": ["total_gmv" if "total_gmv" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[-1]],
+                "title": "GMV Ranking by Category ($)" if is_en else "各品類／品項 GMV 總銷售額排行 ($)",
+                "takeaway": (
+                    "Compares total GMV across product categories."
+                    if is_en
+                    else "比較各商品品類／品項的累計總銷售額 (GMV) 與訂單貢獻。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+
+        # Strict Fail-Loud policy: never silently substitute a default chart for unrecognized queries
+        return {
+            "error": (
+                f"Cannot parse offline chart request '{query}'. Please specify a valid dimension/metric (category, region, daily trend, or return rate) or provide a Gemini API Key."
                 if is_en
-                else "例如：用長條圖呈現各品類 GMV 銷售額排行..."
+                else f"離線規則無法解析「{query}」的圖表維度或指標。請明確指定維度（如：各品類/品項、各地區、每日趨勢、退貨率），或於右側填入 Gemini API Key 啟用完整 AI 解析。"
             ),
-            label_visibility="collapsed",
-            key=input_widget_key,
-        )
-    with btn_col:
-        gen_label = "🚀 Generate" if is_en else "🚀 立即生圖"
-        if st.button(
-            gen_label,
-            key=f"btn_nl_generate_{scope_key}",
-            type="primary",
-            use_container_width=True,
-        ):
-            if user_input and user_input.strip():
-                st.session_state[state_query_key] = user_input.strip()
-                st.rerun()
+            "query": query,
+        }
 
-    active_prompt = (user_input or st.session_state[state_query_key]).strip() or default_prompt
+    active_api_key = (
+        st.session_state.get("user_gemini_key")
+        or st.session_state.get("sidebar_gemini_api_key")
+        or st.session_state.get("gemini_api_key")
+        or os.getenv("GEMINI_API_KEY", "")
+    ).strip()
 
-    # Allow domain adapter override if implemented, otherwise use built-in engine
-    custom_fn = getattr(adapter, "generate_nl_chart", None) if adapter is not None else None
-    if callable(custom_fn):
-        fig, chart_title, insight_text, raw_df = custom_fn(
-            prompt=active_prompt,
-            data_dict=data_dict or {},
-            is_en=is_en,
-        )
-    else:
-        fig, chart_title, insight_text, raw_df = generate_chart_from_nl(
-            prompt=active_prompt,
-            data_dict=data_dict or {},
-            is_en=is_en,
-        )
-
-    st.markdown("---")
-    if fig is None:
-        st.warning(f"### {chart_title}")
-        st.markdown(insight_text)
-    else:
-        st.markdown(f"#### 📊 {chart_title}")
-        st.info(f"💡 **AI Takeaway**: {insight_text}")
-        st.plotly_chart(fig, use_container_width=True)
-        if isinstance(raw_df, pd.DataFrame) and not raw_df.empty:
-            with st.expander(
-                "📋 Underlying Chart Data" if is_en else "📋 檢視圖表底層數據明細",
-                expanded=False,
-            ):
-                st.dataframe(raw_df, use_container_width=True)
+    lang_tag = "en" if is_en else "zh"
+    render_interactive_nl2chart_studio(
+        dataset_schemas=dataset_schemas,
+        dataset_getters=dataset_getters,
+        api_key=active_api_key,
+        domain_context="Retail E-Commerce Lakehouse (fact_orders, mart_product_performance, raw_order_events).",
+        presets=presets,
+        fallback_fn=_fallback_cfg,
+        is_en=is_en,
+        state_prefix=f"nl2chart_{scope_key}_{lang_tag}",
+    )
 
 
 # ==============================================================================
@@ -979,6 +1049,21 @@ def _render_nl2chart_studio_body(
         )
     if k_chat not in st.session_state:
         st.session_state[k_chat] = []
+    if k_draft not in st.session_state and callable(fallback_fn):
+        init_cfg = fallback_fn(st.session_state[k_query])
+        if init_cfg and not init_cfg.get("error"):
+            st.session_state[k_draft] = dict(init_cfg)
+            st.session_state[k_rendered] = dict(init_cfg)
+            st.session_state[k_chat] = [
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"Drafted chart spec for **{st.session_state[k_query]}**. Review or refine parameters below, then click **Confirm & Generate Chart**."
+                        if is_en
+                        else f"已為「**{st.session_state[k_query]}**」解析出圖表參數規格！請確認下方 X/Y 軸與其他參數，若有疑問可直接在對話視窗補充，確認無誤後點擊「**確認參數，產生圖表**」。"
+                    ),
+                }
+            ]
 
     # Optional preset quick buttons
     if presets:
@@ -1060,7 +1145,9 @@ def _render_nl2chart_studio_body(
 
     # Step 2: Interactive Chart Spec Confirmation Form + Accumulating Q&A Box
     draft_cfg = st.session_state.get(k_draft)
-    if draft_cfg:
+    if draft_cfg and draft_cfg.get("error"):
+        st.error(f"❌ {draft_cfg['error']}")
+    elif draft_cfg:
         ds_keys = list(dataset_schemas.keys())
         cur_ds = draft_cfg.get("dataset", ds_keys[0])
         if cur_ds not in dataset_schemas:
@@ -1413,6 +1500,14 @@ def _render_nl2chart_studio_body(
 
         if fig_out:
             st.plotly_chart(fig_out, use_container_width=True)
+            if isinstance(target_df, pd.DataFrame) and not target_df.empty:
+                with st.expander(
+                    f"📋 Underlying Chart Data (`{r_ds}`)"
+                    if is_en
+                    else f"📋 檢視圖表底層數據明細（`{r_ds}`）",
+                    expanded=False,
+                ):
+                    st.dataframe(target_df, use_container_width=True, hide_index=True)
         else:
             st.warning(
                 "⚠️ No matching data rows for selected columns."
