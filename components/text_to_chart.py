@@ -6,6 +6,7 @@ for the reusable `lakehouse-cockpit-core` microkernel.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pandas as pd
@@ -15,11 +16,14 @@ import streamlit as st
 
 try:
     from ..adapter import BaseCockpitAdapter
+    from ..services.duckdb_executor import generate_gemini_text
 except (ImportError, ValueError):
     try:
         from adapter import BaseCockpitAdapter
+        from services.duckdb_executor import generate_gemini_text
     except (ImportError, ValueError):
         from cockpit_core.adapter import BaseCockpitAdapter
+        from cockpit_core.services.duckdb_executor import generate_gemini_text
 
 
 BUSINESS_CHART_KEYWORDS = (
@@ -246,13 +250,13 @@ def render_text_to_chart_module(
         "event_date": "Order Date",
         "category": "Product Category",
         "region": "Sales Region",
-        "gross_amount": "Gross Order Amount ($)",
+        "gross_amount": "Gross Order Amount (USD)",
         "units": "Units Sold",
         "is_returned": "Returned Flag (0/1)",
-        "total_gmv": "Total GMV ($)",
+        "total_gmv": "Total GMV (USD)",
         "order_count": "Total Orders",
         "returned_orders": "Returned Orders",
-        "avg_order_value": "Average Order Value ($)",
+        "avg_order_value": "Average Order Value (USD)",
         "return_rate_pct": "Return Rate (%)",
         "ingested_at": "Ingestion Timestamp",
         "source_system": "Source System",
@@ -262,13 +266,13 @@ def render_text_to_chart_module(
         "event_date": "訂單日期",
         "category": "商品品類",
         "region": "銷售地區",
-        "gross_amount": "單筆訂單金額 ($)",
+        "gross_amount": "單筆訂單金額 (USD)",
         "units": "銷售件數",
         "is_returned": "是否退貨 (0/1)",
-        "total_gmv": "總銷售額 GMV ($)",
+        "total_gmv": "總銷售額 GMV (USD)",
         "order_count": "訂單總數",
         "returned_orders": "退貨訂單數",
-        "avg_order_value": "平均客單價 AOV ($)",
+        "avg_order_value": "平均客單價 AOV (USD)",
         "return_rate_pct": "退貨率 (%)",
         "ingested_at": "資料攝取時間",
         "source_system": "來源系統",
@@ -585,7 +589,7 @@ def get_supported_chart_types_for_df(col_types: dict[str, list[str]]) -> list[st
     valid: list[str] = []
     for ct in SUPPORTED_CHART_TYPES:
         ax_x, ax_y, _ = get_allowed_axis_columns(ct, col_types)
-        if ct == "dual_axis":
+        if ct in ("dual_axis", "scatter"):
             if ax_x and len(ax_y) >= 2:
                 valid.append(ct)
         elif ax_x and ax_y:
@@ -628,7 +632,11 @@ def generate_ai_chart_config(
 
             system_prompt = (
                 f"You are a Product & Business Analytics NL2Chart engine. {domain_context}\n"
-                "Given a user's chart request in Chinese or English, return ONLY a valid JSON object:\n"
+                "Given a user's chart request in Chinese or English, return ONLY a valid JSON object.\n"
+                "CRITICAL GUARDRAIL: If the user's request is unrelated to business analytics or cannot be mapped to any columns in DATASET_SCHEMAS "
+                "(e.g., general trivia, politics, people like '柯文哲是誰', weather, or non-existent dimensions), DO NOT guess a chart! Return ONLY:\n"
+                '{"error": "<explicit reason in the user\'s language explaining why the query cannot be plotted from the available datasets>"}\n\n'
+                "Otherwise, when the request clearly maps to DATASET_SCHEMAS, return:\n"
                 "{\n"
                 f'  "dataset": {ds_list},\n'
                 '  "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
@@ -660,6 +668,12 @@ def generate_ai_chart_config(
                     if not resp or not resp.text:
                         continue
                     parsed = json.loads(resp.text.strip())
+                    if parsed.get("error"):
+                        return {
+                            "error": str(parsed["error"]),
+                            "query": query,
+                            "generated_by": f"gemini:{model_name}",
+                        }
                     ds = str(parsed.get("dataset", "")).strip().lower()
                     if ds not in dataset_schemas:
                         continue
@@ -1093,6 +1107,67 @@ def _format_col_label(col: str, schema_map: dict[str, str]) -> str:
     return f"{col}（{desc}）" if desc else col
 
 
+def _audit_chart_logic_with_gemini(
+    current_config: dict[str, Any],
+    df: pd.DataFrame | None,
+    schema_map: dict[str, str],
+    user_query: str,
+    api_key: str,
+    is_en: bool,
+) -> str:
+    """Inspect current chart specification against live DataFrame statistics & semantic ontology via Gemini AI."""
+    profile_lines: list[str] = []
+    if df is not None and not df.empty:
+        profile_lines.append(f"Row count: {len(df)}")
+        for col in df.columns:
+            s = df[col]
+            desc = schema_map.get(str(col), "")
+            cl = str(col).lower()
+            if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+                sem_tag = (
+                    "Non-Additive Rate/Percentage"
+                    if any(k in cl for k in ("rate", "pct", "ratio", "share"))
+                    else (
+                        "Non-Additive Average/Unit Value"
+                        if any(k in cl for k in ("avg", "aov", "price"))
+                        else "Additive Measure"
+                    )
+                )
+                profile_lines.append(
+                    f"- {col} ({desc}) [Numeric | {sem_tag}]: min={s.min()}, max={s.max()}, mean={round(float(s.mean()), 2)}, nunique={s.nunique()}"
+                )
+            elif pd.api.types.is_datetime64_any_dtype(s) or "date" in cl or "time" in cl:
+                profile_lines.append(
+                    f"- {col} ({desc}) [Temporal Time Axis]: nunique={s.nunique()}, range=({s.min()} .. {s.max()})"
+                )
+            else:
+                sem_tag = "High-Cardinality ID" if (cl == "id" or cl.endswith("_id")) else "Nominal Categorical Dimension"
+                profile_lines.append(
+                    f"- {col} ({desc}) [Categorical | {sem_tag}]: nunique={s.nunique()}, sample={list(s.dropna().unique()[:5])}"
+                )
+    profile_text = "\n".join(profile_lines) or "No DataFrame profile available."
+
+    prompt = (
+        "You are a Senior BI & Statistical Visualization Auditor.\n"
+        "Inspect whether the user's current Step 2 Chart Specification is logically, statistically, and semantically valid.\n\n"
+        f"1. Original User Request (Step 1): {user_query}\n"
+        f"2. Current Chart Spec (Step 2): dataset={current_config.get('dataset')}, chart_type={current_config.get('chart_type')}, "
+        f"x={current_config.get('x')}, y={current_config.get('y')}, color={current_config.get('color')}\n"
+        f"3. Live DataFrame & Semantic/Ontology Profile:\n{profile_text}\n\n"
+        "Audit Checklist:\n"
+        "- Magnitude / Unit Mismatch: Are multiple Y columns plotted on a single axis (bar/stacked_bar/line/area) when their means differ by >20x or have incompatible units (e.g. USD vs Order Count)? If so, recommend 'dual_axis'.\n"
+        "- Additivity Violation: Is a Non-Additive metric (average/AOV or percentage/rate) used in a 'donut' share chart or 'stacked_bar' where values are summed?\n"
+        "- Categorical Trend Misuse: Is a 'line' or 'area' chart used on a Nominal Categorical X-axis (e.g. category, region) instead of a Temporal date axis?\n"
+        "- Degenerate Scatter / Low Points: Does a 'scatter' chart have X == Y, or too few rows (e.g. only 4 summary rows)?\n"
+        "- Intent Drift: Does the current X/Y/Color selection omit a key dimension requested in the Original User Request (e.g. user asked for 'daily by region' but either date or region is missing)?\n\n"
+        "Response Format:\n"
+        "- If ALL checks pass with no logical issues: start with '✅' and confirm briefly that the chart specification is statistically and semantically sound.\n"
+        "- If ANY issue is found: start with '⚠️', clearly list which logic check(s) failed, ask a brief clarifying question if user intent is ambiguous, and give concrete parameter fix recommendations.\n"
+        f"Respond concisely in {'English' if is_en else 'Traditional Chinese (繁體中文)'}."
+    )
+    return generate_gemini_text(api_key=api_key, prompt=prompt, model="gemini-2.5-flash")
+
+
 def _render_nl2chart_studio_body(
     dataset_schemas: dict[str, dict[str, str]],
     dataset_getters: dict[str, Any],
@@ -1417,7 +1492,12 @@ def _render_nl2chart_studio_body(
                     format_func=_fmt_typed,
                     key=f"{state_prefix}_sel_x_{cur_ds}_{sel_ctype}_{rev}",
                 )
+            prev_x = draft_cfg.get("x")
+            prev_y = draft_cfg.get("y")
             draft_cfg["x"] = sel_x
+
+            if sel_ctype == "scatter":
+                allowed_y = [c for c in allowed_y if c != sel_x] or allowed_y
 
             raw_y_cur = draft_cfg.get("y", [])
             y_cur_list = [raw_y_cur] if isinstance(raw_y_cur, str) else list(raw_y_cur)
@@ -1469,6 +1549,15 @@ def _render_nl2chart_studio_body(
                     if sel_y:
                         draft_cfg["y"] = sel_y
 
+            if draft_cfg.get("x") != prev_x or draft_cfg.get("y") != prev_y:
+                y_now = draft_cfg.get("y", [])
+                y_now_str = ", ".join(y_now) if isinstance(y_now, list) else str(y_now)
+                draft_cfg["title"] = (
+                    f"{y_now_str} by {draft_cfg.get('x')} ({sel_ctype})"
+                    if is_en
+                    else f"{draft_cfg.get('x')} × {y_now_str} ({sel_ctype})"
+                )
+
             st.caption(
                 "🛡️ 型別防呆已啟用：📅 時間維度 ｜ 🏷️ 文字分類 ｜ 🔢 數值度量（系統已自動過濾不合法欄位，防止文本誤入數值軸）"
                 if not is_en
@@ -1494,7 +1583,7 @@ def _render_nl2chart_studio_body(
                             st.markdown(msg["content"])
 
             with st.form(key=f"{state_prefix}_refine_form", clear_on_submit=True):
-                q_col, b_col = st.columns([4.6, 1.4])
+                q_col, b_send_col, b_audit_col = st.columns([3.2, 1.3, 1.5])
                 with q_col:
                     followup_txt = st.text_input(
                         "疑問或補充說明" if not is_en else "Ask or refine parameters...",
@@ -1506,11 +1595,62 @@ def _render_nl2chart_studio_body(
                         label_visibility="collapsed",
                         key=f"{state_prefix}_followup_input",
                     )
-                with b_col:
+                with b_send_col:
                     btn_send_followup = st.form_submit_button(
                         "💬 " + ("Send" if is_en else "送出補充"),
                         use_container_width=True,
                     )
+                with b_audit_col:
+                    btn_check_logic = st.form_submit_button(
+                        "🩺 " + ("Check Chart Logic" if is_en else "檢查圖表邏輯"),
+                        use_container_width=True,
+                    )
+
+            if btn_check_logic:
+                clean_audit_key = (
+                    api_key
+                    or st.session_state.get("user_gemini_key")
+                    or st.session_state.get("sidebar_gemini_api_key")
+                    or st.session_state.get("gemini_api_key")
+                    or os.getenv("GEMINI_API_KEY", "")
+                ).strip()
+                if not clean_audit_key:
+                    st.warning(
+                        "⚠️ Chart logic inspection requires Gemini AI. Please enter your Gemini API Key in the right drawer first."
+                        if is_en
+                        else "⚠️ 圖表邏輯檢查需調用 Gemini AI，請先於右側填入 Gemini API Key"
+                    )
+                else:
+                    with st.spinner(
+                        "🩺 Gemini AI is auditing chart logic against live DataFrame statistics..."
+                        if is_en
+                        else "🩺 Gemini AI 正在根據底層資料統計與語意規則檢查圖表邏輯..."
+                    ):
+                        try:
+                            audit_reply = _audit_chart_logic_with_gemini(
+                                current_config=dict(st.session_state[k_draft]),
+                                df=preview_df,
+                                schema_map=cur_schema,
+                                user_query=str(st.session_state.get(k_query, "")),
+                                api_key=clean_audit_key,
+                                is_en=is_en,
+                            )
+                        except Exception as exc:
+                            audit_reply = (
+                                f"❌ **Gemini API Error during chart logic inspection**: {exc}"
+                                if is_en
+                                else f"❌ **圖表邏輯檢查呼叫 Gemini API 失敗**：{exc}"
+                            )
+                    st.session_state[k_chat].append(
+                        {
+                            "role": "user",
+                            "content": "🩺 Check Chart Logic" if is_en else "🩺 檢查圖表邏輯",
+                        }
+                    )
+                    st.session_state[k_chat].append(
+                        {"role": "assistant", "content": audit_reply}
+                    )
+                    st.rerun(scope="fragment") if hasattr(st, "fragment") else st.rerun()
 
             if btn_send_followup and followup_txt.strip():
                 st.session_state[k_chat].append(
