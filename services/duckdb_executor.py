@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
+import urllib.error
+import urllib.request
 from typing import Any
 
 import pandas as pd
@@ -94,3 +97,44 @@ class DatabaseReflectionService:
             {"table": tbl, "rows": len(df), "columns": len(df.columns)}
             for tbl, df in self.data_dict.items()
         ]
+
+
+def generate_gemini_text(
+    api_key: str,
+    prompt: str,
+    model: str = "gemini-2.5-flash",
+) -> str:
+    """Call Google Gemini using google-genai SDK or direct REST API if SDK is not installed in environment."""
+    clean_key = (api_key or "").strip()
+    if not clean_key:
+        raise ValueError("Gemini API Key is empty.")
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=clean_key)
+        resp = client.models.generate_content(model=model, contents=prompt)
+        return (resp.text or "").strip()
+    except ImportError:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
+        payload = json.dumps(
+            {"contents": [{"parts": [{"text": prompt}]}]}
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as http_err:
+            err_detail = http_err.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Gemini REST HTTP {http_err.code}: {err_detail}") from http_err
+
+        candidates = body.get("candidates") or []
+        if not candidates:
+            raise RuntimeError(f"Gemini returned no candidates: {body}")
+        parts = candidates[0].get("content", {}).get("parts") or []
+        return "".join(str(p.get("text", "")) for p in parts).strip()

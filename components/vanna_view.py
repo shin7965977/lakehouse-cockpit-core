@@ -15,19 +15,28 @@ import streamlit as st
 
 try:
     from ..adapter import BaseCockpitAdapter
-    from ..services.duckdb_executor import DatabaseReflectionService, execute_readonly_duckdb
+    from ..services.duckdb_executor import (
+        DatabaseReflectionService,
+        execute_readonly_duckdb,
+        generate_gemini_text,
+    )
     from .sql_workbench import load_dbt_manifest_models
 except (ImportError, ValueError):
     try:
         from adapter import BaseCockpitAdapter
         from components.sql_workbench import load_dbt_manifest_models
-        from services.duckdb_executor import DatabaseReflectionService, execute_readonly_duckdb
+        from services.duckdb_executor import (
+            DatabaseReflectionService,
+            execute_readonly_duckdb,
+            generate_gemini_text,
+        )
     except (ImportError, ValueError):
         from cockpit_core.adapter import BaseCockpitAdapter
         from cockpit_core.components.sql_workbench import load_dbt_manifest_models
         from cockpit_core.services.duckdb_executor import (
             DatabaseReflectionService,
             execute_readonly_duckdb,
+            generate_gemini_text,
         )
 
 
@@ -227,8 +236,6 @@ def _synthesize_sql_with_vanna_rag(
         return sql, "Vanna Local RAG + DuckDB (Offline Rule Mode)", err
 
     try:
-        from google import genai
-
         rag_context = "\n\n".join(f"[{r['type'].upper()}] {r['content']}" for r in corpus[:12])
         prompt = (
             "You are Vanna.ai, an open-source RAG Text-to-SQL engine running on DuckDB.\n"
@@ -238,9 +245,8 @@ def _synthesize_sql_with_vanna_rag(
             f"Question: {question}\n"
             "Return ONLY the raw SQL query (or 'ERROR: <reason>') without markdown fences."
         )
-        client = genai.Client(api_key=api_key)
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        candidate = (resp.text or "").strip().strip("`").replace("sql\n", "").strip().rstrip(";")
+        raw_text = generate_gemini_text(api_key=api_key, prompt=prompt, model="gemini-2.5-flash")
+        candidate = raw_text.strip().strip("`").replace("sql\n", "").strip().rstrip(";")
         if candidate.upper().startswith("ERROR:"):
             return "", "Vanna RAG + Gemini + DuckDB", candidate
         if not (candidate.upper().startswith("SELECT") or candidate.upper().startswith("WITH")):
