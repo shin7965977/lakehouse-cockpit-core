@@ -31,7 +31,6 @@ from adapter import (  # noqa: E402
 )
 from components.data_center import render_data_center_view  # noqa: E402
 from components.databot import render_databot  # noqa: E402
-from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
 from components.schema_designer import render_schema_designer_view  # noqa: E402
 from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
@@ -180,10 +179,6 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
         return "zh"
 
     @property
-    def supports_looker(self) -> bool:
-        return True
-
-    @property
     def supports_schema_designer(self) -> bool:
         return True
 
@@ -194,23 +189,6 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
     @property
     def dbt_manifest_path(self) -> Path:
         return Path(__file__).resolve().parent / "sample_manifest.json"
-
-    @property
-    def lookml_view_definition(self) -> str:
-        return (
-            "view: mart_product_performance {\n"
-            "  sql_table_name: `main_silver.mart_product_performance` ;;\n\n"
-            "  dimension: category {\n"
-            "    type: string\n"
-            "    sql: ${TABLE}.category ;;\n"
-            "  }\n\n"
-            "  measure: total_gmv {\n"
-            "    type: sum\n"
-            "    value_format_name: usd\n"
-            "    sql: ${TABLE}.total_gmv ;;\n"
-            "  }\n"
-            "}"
-        )
 
     @property
     def kpi_cards(self) -> list[KPICardSpec]:
@@ -597,32 +575,10 @@ def build_component_registry(
             ),
         ),
         ShowcaseComponentSpec(
-            id="looker_view",
-            tab_title_en="📈 Looker BI",
-            tab_title_zh="📈 Looker 視圖",
-            storybook_label="4. looker_view.py",
-            fn_signature="render_looker_enterprise_view()",
-            source_files=("components/looker_view.py",),
-            snippet="render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description_en="Looker Enterprise BI embed and LookML semantic model viewer.",
-            description_zh="Looker Enterprise BI 嵌入與 LookML 定義檢視器。",
-            problem_solved_en=(
-                "Bridges governed BI tools and custom data apps by embedding Looker Studio reports "
-                "and exposing the underlying LookML Single Source of Truth side by side."
-            ),
-            problem_solved_zh=(
-                "解決『企業正式 BI 報表與自建分析平台割裂』的問題，在同一個介面嵌入 Looker 報表並對照底層 LookML 單一事實來源。"
-            ),
-            placement_in_mode_a="workspace_tab",
-            render=lambda: render_looker_enterprise_view(
-                adapter=adapter, data_dict=data_dict, is_en=is_en
-            ),
-        ),
-        ShowcaseComponentSpec(
             id="schema_designer",
             tab_title_en="🏗️ Schema Designer",
             tab_title_zh="🏗️ Schema 設計器",
-            storybook_label="5. schema_designer.py",
+            storybook_label="4. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -642,7 +598,7 @@ def build_component_registry(
             id="data_center",
             tab_title_en="🏛️ Data Center",
             tab_title_zh="🏛️ 資料中心",
-            storybook_label="6. data_center.py",
+            storybook_label="5. data_center.py",
             fn_signature="render_data_center_view()",
             source_files=("components/data_center.py",),
             snippet="render_data_center_view()",
@@ -662,7 +618,7 @@ def build_component_registry(
             id="databot",
             tab_title_en="🤖 DataBot",
             tab_title_zh="🤖 資料庫問答 DataBot",
-            storybook_label="7. databot.py",
+            storybook_label="6. databot.py",
             fn_signature="render_databot()",
             source_files=("components/databot.py",),
             snippet="render_databot(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
@@ -698,7 +654,7 @@ def build_component_registry(
             id="sidebar_ops",
             tab_title_en="⚡ Pipeline Ops & CSV",
             tab_title_zh="⚡ 管線控制 & CSV 下載",
-            storybook_label="8. sidebar_ops.py",
+            storybook_label="7. sidebar_ops.py",
             fn_signature="render_sidebar_pipeline_ops()",
             source_files=("components/sidebar_ops.py",),
             snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",

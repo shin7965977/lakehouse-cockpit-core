@@ -238,25 +238,6 @@ class BaseCockpitAdapter(ABC):
         return None
 
     # =========================================================================
-    # Looker Enterprise BI Hooks (Optional / Native)
-    # =========================================================================
-
-    @property
-    def supports_looker(self) -> bool:
-        """Whether this adapter provides Looker / LookML enterprise integration."""
-        return True
-
-    @property
-    def looker_embed_url(self) -> str:
-        """Default Looker / Looker Studio embed URL if configured."""
-        return ""
-
-    @property
-    def lookml_view_definition(self) -> str:
-        """LookML code definition string for the primary Gold Mart."""
-        return ""
-
-    # =========================================================================
     # Socratic Spec Guidance & On-Demand Insight Hooks
     # =========================================================================
 

@@ -1,19 +1,16 @@
 """Main Cockpit Runtime Engine.
 
 Assembles UI layout, Medallion layer navigation, KPI grid, On-Demand Insight Panel,
-Interactive SQL Sandbox, Looker Enterprise view, and Conversational Copilot drawer.
+Interactive SQL Sandbox, Autonomous Schema Designer, and Conversational Copilot drawer.
 """
 
 from __future__ import annotations
-
-from datetime import date
 
 import streamlit as st
 
 try:
     from .adapter import BaseCockpitAdapter
     from .components.databot import render_databot
-    from .components.looker_view import render_looker_enterprise_view
     from .components.on_demand_panel import render_on_demand_insight_panel
     from .components.sidebar_ops import render_sidebar_pipeline_ops
     from .components.sql_workbench import render_sql_sandbox
@@ -21,7 +18,6 @@ try:
 except ImportError:
     from adapter import BaseCockpitAdapter
     from components.databot import render_databot
-    from components.looker_view import render_looker_enterprise_view
     from components.on_demand_panel import render_on_demand_insight_panel
     from components.sidebar_ops import render_sidebar_pipeline_ops
     from components.sql_workbench import render_sql_sandbox
@@ -149,12 +145,10 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # 2. Medallion Layer Selector + Looker Enterprise + Schema Designer
+        # 2. Medallion Layer Selector + Schema Designer
         st.subheader("🏛️ Enterprise BI & Medallion Data Lakehouse Layers")
         # Gold Marts removed: Conforms strictly to Kimball where Silver is the atomic truth
         nav_options = ["silver", "bronze"]
-        if getattr(adapter, "supports_looker", False):
-            nav_options.append("looker")
         if getattr(adapter, "supports_schema_designer", False):
             nav_options.append("schema_designer")
 
@@ -173,7 +167,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
             format_func=lambda x: {
                 "silver": "🥈 Silver Layer (Kimball Conformed Facts & Dims)",
                 "bronze": "🥉 Bronze Layer (Raw Ingestion Logs)",
-                "looker": "📊 Looker Enterprise BI (LookML Explorer & Embed)",
                 "schema_designer": "🏗️ Autonomous Schema Designer & dbt Engine",
             }[x],
             horizontal=True,
@@ -184,7 +177,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
 
         st.markdown("---")
 
-        # Render Autonomous Schema Designer or Looker Native View
+        # Render Autonomous Schema Designer or Medallion Layer Preview
         if selected_layer == "schema_designer":
             try:
                 from .components.schema_designer import render_schema_designer_view
@@ -194,8 +187,6 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 except (ImportError, ValueError):
                     from cockpit_core.components.schema_designer import render_schema_designer_view
             render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
-        elif selected_layer == "looker":
-            render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
         else:
             # Display Selected Medallion Layer Preview (with explicit start_date and end_date injection)
             layer_specs = adapter.medallion_layers.get(selected_layer, {})
