@@ -68,12 +68,13 @@ def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> st
     if not tables:
         return "SELECT 'Electronics' AS category, 52000.0 AS total_gmv, 120 AS order_count"
 
+    # 1. Time / Daily trend
     if any(k in q_low for k in ["trend", "daily", "date", "month", "趨勢", "每日", "走勢", "時間"]):
         for tbl, df in tables.items():
             date_col = next((c for c in df.columns if "date" in c.lower() or "time" in c.lower()), None)
             num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and "id" not in c.lower()]
             if date_col and num_cols:
-                metric = num_cols[0]
+                metric = "units" if ("unit" in q_low or "件數" in q_low or "銷量" in q_low) and "units" in df.columns else num_cols[0]
                 return (
                     f"SELECT CAST({date_col} AS DATE) AS report_date, "
                     f"ROUND(SUM(CAST({metric} AS DOUBLE)), 2) AS total_{metric}\n"
@@ -83,6 +84,62 @@ def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> st
                     f"LIMIT 60"
                 )
 
+    # 2. Region / City breakdown (off-preset custom queries!)
+    if any(k in q_low for k in ["region", "city", "area", "taipei", "taichung", "地區", "區域", "城市", "台北", "台中", "高雄", "台南"]):
+        for tbl in ("fact_orders", "fct_orders"):
+            if tbl in tables and "region" in tables[tbl].columns:
+                df = tables[tbl]
+                if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價"]):
+                    agg = "ROUND(AVG(CAST(gross_amount AS DOUBLE)), 2) AS avg_order_value"
+                elif any(k in q_low for k in ["unit", "qty", "件數", "數量", "銷量"]):
+                    agg = "SUM(units) AS total_units_sold"
+                elif any(k in q_low for k in ["count", "orders", "筆數", "訂單數"]):
+                    agg = "COUNT(DISTINCT order_id) AS order_count"
+                else:
+                    agg = "ROUND(SUM(CAST(gross_amount AS DOUBLE)), 2) AS region_gmv, COUNT(DISTINCT order_id) AS order_count"
+                return (
+                    f"SELECT region, {agg}\n"
+                    f"FROM {tbl}\n"
+                    f"GROUP BY region\n"
+                    f"ORDER BY 2 DESC"
+                )
+
+    # 3. Average Order Value (AOV) / Units / Top Individual Orders
+    if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價"]):
+        if "mart_product_performance" in tables and "avg_order_value" in tables["mart_product_performance"].columns:
+            return (
+                "SELECT category, avg_order_value, order_count\n"
+                "FROM mart_product_performance\n"
+                "ORDER BY avg_order_value DESC"
+            )
+        if "fact_orders" in tables:
+            return (
+                "SELECT category, ROUND(AVG(CAST(gross_amount AS DOUBLE)), 2) AS avg_order_value, COUNT(*) AS order_count\n"
+                "FROM fact_orders\n"
+                "GROUP BY category\n"
+                "ORDER BY avg_order_value DESC"
+            )
+
+    if any(k in q_low for k in ["unit", "qty", "quantity", "件數", "數量", "銷量"]):
+        if "fact_orders" in tables and "units" in tables["fact_orders"].columns:
+            dim = "region" if any(k in q_low for k in ["region", "地區", "區域"]) else "category"
+            return (
+                f"SELECT {dim}, SUM(units) AS total_units, ROUND(SUM(gross_amount), 2) AS total_gmv\n"
+                f"FROM fact_orders\n"
+                f"GROUP BY {dim}\n"
+                f"ORDER BY total_units DESC"
+            )
+
+    if any(k in q_low for k in ["top", "highest", "單筆", "最高", "大單", "前10", "前十"]):
+        if "fact_orders" in tables:
+            return (
+                "SELECT order_id, gross_amount, category, region, event_date\n"
+                "FROM fact_orders\n"
+                "ORDER BY gross_amount DESC\n"
+                "LIMIT 10"
+            )
+
+    # 4. Return / Refund / Status
     if any(k in q_low for k in ["return", "refund", "status", "退貨", "退款", "狀態"]):
         for tbl in ("mart_product_performance", "fact_orders", "fct_orders"):
             if tbl in tables:
@@ -247,17 +304,19 @@ def render_vanna_view(
         else "顯示每日訂單營收時間走勢趨勢圖"
     )
 
-    all_default_presets = {
-        "Compare total revenue and performance across product categories",
-        "比較各商品類別的總銷售額與績效表現",
-        "Analyze return rate and order status distribution",
-        "分析各品類退貨率與訂單狀態分佈",
-        "Show daily order revenue trend over time",
-        "顯示每日訂單營收時間走勢趨勢圖",
+    zh_to_en = {
+        "比較各商品類別的總銷售額與績效表現": "Compare total revenue and performance across product categories",
+        "分析各品類退貨率與訂單狀態分佈": "Analyze return rate and order status distribution",
+        "顯示每日訂單營收時間走勢趨勢圖": "Show daily order revenue trend over time",
     }
+    en_to_zh = {v: k for k, v in zh_to_en.items()}
     cur_q = st.session_state.get("vanna_question_input", "")
-    if not cur_q or cur_q in all_default_presets:
+    if not cur_q:
         st.session_state["vanna_question_input"] = preset_q1
+    elif is_en and cur_q in zh_to_en:
+        st.session_state["vanna_question_input"] = zh_to_en[cur_q]
+    elif not is_en and cur_q in en_to_zh:
+        st.session_state["vanna_question_input"] = en_to_zh[cur_q]
 
     p_col1, p_col2, p_col3 = st.columns(3)
     with p_col1:
