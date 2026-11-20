@@ -282,7 +282,7 @@ def render_text_to_chart_module(
             str(col): active_desc_map.get(str(col), str(df[col].dtype))
             for col in df.columns
         }
-        dataset_getters[tbl_name] = df
+        dataset_getters[tbl_name] = lambda _df=df: _df
 
     presets = (
         [
@@ -1476,7 +1476,11 @@ def _render_nl2chart_studio_body(
     if rendered_cfg:
         st.markdown("---")
         r_ds = rendered_cfg.get("dataset", "kpi")
-        getter = dataset_getters.get(r_ds) or next(iter(dataset_getters.values()))
+        getter = (
+            dataset_getters[r_ds]
+            if r_ds in dataset_getters
+            else next(iter(dataset_getters.values()))
+        )
         target_df = getter() if callable(getter) else getter
         fig_out = render_ai_dynamic_chart(rendered_cfg, target_df)
 
