@@ -77,15 +77,46 @@ def test_showcase_mode_b_storybook_catalog() -> None:
     catalog_radio = next(r for r in at.radio if r.key == "storybook_selected_component")
     for cid in [
         "kpi_grid",
-        "text_to_chart",
-        "sql_expander",
         "on_demand_panel",
+        "sql_workbench",
         "looker_view",
         "schema_designer",
+        "data_center",
+        "ai_drawer",
         "sidebar_ops",
     ]:
         catalog_radio.set_value(cid).run(timeout=15)
         assert not at.exception, f"Mode B component '{cid}' raised an exception: {at.exception}"
+
+
+def test_duckdb_executor_readonly_guardrail_and_reflection() -> None:
+    """Shared DuckDB service enforces read-only guardrails and reflects Kimball metadata."""
+    import pandas as pd
+    from services.duckdb_executor import (
+        DatabaseReflectionService,
+        detect_pii_columns,
+        execute_readonly_duckdb,
+    )
+
+    df_orders = pd.DataFrame({"order_id": [1, 2], "amount": [100.0, 250.0]})
+    df_customers = pd.DataFrame({"customer_id": [1], "email": ["a@b.com"]})
+    data_dict = {"fct_orders": df_orders, "dim_customers": df_customers}
+
+    # Read-only guardrail blocks destructive statements
+    _, err = execute_readonly_duckdb("DROP TABLE fct_orders;", data_dict)
+    assert "blocked" in err.lower()
+
+    # Valid SELECT succeeds
+    res_df, err = execute_readonly_duckdb("SELECT SUM(amount) AS total FROM fct_orders", data_dict)
+    assert err == ""
+    assert float(res_df.iloc[0]["total"]) == 350.0
+
+    # Reflection & PII detection
+    reflection = DatabaseReflectionService(data_dict)
+    models = reflection.get_kimball_models()
+    assert "dim_customers" in models["dimensions"]
+    assert "fct_orders" in models["facts"]
+    assert detect_pii_columns(df_customers) == ["email"]
 
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")

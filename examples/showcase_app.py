@@ -29,7 +29,6 @@ from adapter import (  # noqa: E402
     MetricComponent,
     OnDemandInsightResult,
 )
-from components.ae_workflow import render_ae_workflow_stepper  # noqa: E402
 from components.ai_drawer import render_ai_drawer  # noqa: E402
 from components.data_center import render_data_center_view  # noqa: E402
 from components.kpi_grid import render_kpi_grid  # noqa: E402
@@ -37,11 +36,10 @@ from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
 from components.schema_designer import render_schema_designer_view  # noqa: E402
 from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
-from components.sql_expander import (  # noqa: E402
-    render_dynamic_dbt_explorer_with_sandbox,
+from components.sql_workbench import (  # noqa: E402
     render_sql_snippet_module,
+    render_sql_workbench,
 )
-from components.text_to_chart import render_text_to_chart_module  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 
@@ -482,10 +480,6 @@ def build_component_registry(
     def _render_schema() -> None:
         render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)
 
-    def _render_dc_and_ae() -> None:
-        render_data_center_view()
-        render_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)
-
     return [
         ShowcaseComponentSpec(
             id="kpi_grid",
@@ -528,37 +522,15 @@ def build_component_registry(
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
         ),
         ShowcaseComponentSpec(
-            id="text_to_chart",
-            tab_title_en="✨ Text-to-Chart",
-            tab_title_zh="✨ AI 生圖 (Text-to-Chart)",
-            storybook_label="3. text_to_chart.py",
-            fn_signature="render_text_to_chart_module()",
-            source_files=("components/text_to_chart.py",),
-            snippet="render_text_to_chart_module(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description_en="Natural language chart generator with preset prompts, domain guardrail, and underlying data preview.",
-            description_zh="自然語言 AI 智能圖表生成器，支援範例指令一鍵生圖、業務範疇防呆與底層數據預覽。",
-            problem_solved_en=(
-                "Removes SQL/BI tool bottlenecks for non-technical PMs and executives by turning "
-                "plain-language questions into interactive charts while blocking out-of-scope prompts."
-            ),
-            problem_solved_zh=(
-                "解決非技術 PM 或營運人員『想看圖卻不會寫 SQL / 不想等排程』的痛點，用自然語言即時生圖並內建業務範疇防呆。"
-            ),
-            placement_in_mode_a="workspace_tab",
-            render=lambda: render_text_to_chart_module(
-                adapter=adapter, data_dict=data_dict, is_en=is_en
-            ),
-        ),
-        ShowcaseComponentSpec(
-            id="sql_expander",
-            tab_title_en="🥈 Silver / Bronze & SQL Sandbox",
-            tab_title_zh="🥈 Silver / Bronze 動態模型 & SQL 沙盒",
-            storybook_label="4. sql_expander.py & sql_sandbox.py",
-            fn_signature="render_dynamic_dbt_explorer_with_sandbox()",
-            source_files=("components/sql_expander.py", "components/sql_sandbox.py"),
-            snippet="render_dynamic_dbt_explorer_with_sandbox(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
-            description_en="Auto-discovers Silver/Bronze models from dbt manifest.json with live preview, compiled SQL, and merged read-only SQL Sandbox.",
-            description_zh="從 dbt manifest.json 動態解析 Silver / Bronze 模型、上游血緣、左右並排預覽與編譯後 SQL，並整合互動式 SQL 沙盒。",
+            id="sql_workbench",
+            tab_title_en="🥈 SQL & Lineage Workbench",
+            tab_title_zh="🥈 SQL 與血緣工作台",
+            storybook_label="3. sql_workbench.py",
+            fn_signature="render_sql_workbench()",
+            source_files=("components/sql_workbench.py",),
+            snippet="render_sql_workbench(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
+            description_en="Unified Silver/Bronze dbt manifest explorer with live preview, compiled SQL, and read-only DuckDB sandbox.",
+            description_zh="整合式 Silver / Bronze 動態模型工作台：解析 dbt manifest.json 上游血緣、並排預覽與編譯 SQL，內建唯讀 DuckDB 沙盒。",
             problem_solved_en=(
                 "Eliminates code-to-viz desynchronization and manual SQL maintenance by reading dbt "
                 "manifest.json directly and letting analysts verify numbers in a read-only DuckDB sandbox."
@@ -567,7 +539,7 @@ def build_component_registry(
                 "解決『前端寫死 SQL 假文件與後端真實管線脫鉤』的痛點，直接讀取 dbt manifest.json 並提供唯讀 DuckDB 沙盒現場驗算。"
             ),
             placement_in_mode_a="workspace_tab",
-            render=lambda: render_dynamic_dbt_explorer_with_sandbox(
+            render=lambda: render_sql_workbench(
                 adapter=adapter,
                 data_dict=data_dict,
                 start_date=start_date,
@@ -580,7 +552,7 @@ def build_component_registry(
             id="looker_view",
             tab_title_en="📈 Looker BI",
             tab_title_zh="📈 Looker 視圖",
-            storybook_label="5. looker_view.py",
+            storybook_label="4. looker_view.py",
             fn_signature="render_looker_enterprise_view()",
             source_files=("components/looker_view.py",),
             snippet="render_looker_enterprise_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -602,7 +574,7 @@ def build_component_registry(
             id="schema_designer",
             tab_title_en="🏗️ Schema Designer",
             tab_title_zh="🏗️ Schema 設計器",
-            storybook_label="6. schema_designer.py",
+            storybook_label="5. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -619,30 +591,30 @@ def build_component_registry(
             render=_render_schema,
         ),
         ShowcaseComponentSpec(
-            id="data_center_ae",
-            tab_title_en="🏛️ Data Center & AE Flow",
-            tab_title_zh="🏛️ 資料中心 & AE 流程",
-            storybook_label="7. data_center.py / ae_workflow.py",
-            fn_signature="render_data_center_view() & render_ae_workflow_stepper()",
-            source_files=("components/data_center.py", "components/ae_workflow.py"),
-            snippet="render_data_center_view()\nrender_ae_workflow_stepper(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description_en="Elementary observability / dbt Docs portal and 6-step Analytics Engineering delivery lifecycle.",
-            description_zh="Elementary 觀測 / dbt Docs 入口與 6 步驟 AE 交付生命週期。",
+            id="data_center",
+            tab_title_en="🏛️ Data Center",
+            tab_title_zh="🏛️ 資料中心",
+            storybook_label="6. data_center.py",
+            fn_signature="render_data_center_view()",
+            source_files=("components/data_center.py",),
+            snippet="render_data_center_view()",
+            description_en="Elementary observability and dbt Docs lineage portal.",
+            description_zh="Elementary 數據觀測與 dbt Docs 血緣文件入口。",
             problem_solved_en=(
-                "Gives Data Engineers and stakeholders one unified portal for pipeline health "
-                "(Elementary), full DAG documentation (dbt Docs), and step-by-step AE delivery governance."
+                "Reuses best-in-class open-source Elementary observability and dbt Docs DAG views "
+                "in a single zero-clutter portal instead of reinventing lineage tooling."
             ),
             problem_solved_zh=(
-                "解決工程監控與交付流程分散在多處的問題，整合管線健康度（Elementary）、靜態血緣（dbt Docs）與 6 步驟 AE 交付治理。"
+                "直接復用業界成熟的 Elementary 觀測與 dbt Docs 血緣報表，避免重複造輪子，提供單一無干擾的監控入口。"
             ),
             placement_in_mode_a="workspace_tab",
-            render=_render_dc_and_ae,
+            render=render_data_center_view,
         ),
         ShowcaseComponentSpec(
             id="ai_drawer",
             tab_title_en="🤖 AI Drawer",
             tab_title_zh="🤖 AI 抽屜",
-            storybook_label="8. ai_drawer.py",
+            storybook_label="7. ai_drawer.py",
             fn_signature="render_ai_drawer()",
             source_files=("components/ai_drawer.py",),
             snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
@@ -678,7 +650,7 @@ def build_component_registry(
             id="sidebar_ops",
             tab_title_en="⚡ Pipeline Ops & CSV",
             tab_title_zh="⚡ 管線控制 & CSV 下載",
-            storybook_label="9. sidebar_ops.py",
+            storybook_label="8. sidebar_ops.py",
             fn_signature="render_sidebar_pipeline_ops()",
             source_files=("components/sidebar_ops.py",),
             snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",

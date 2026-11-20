@@ -1,4 +1,4 @@
-"""SQL Query Expander, Dynamic dbt Manifest Explorer & Merged SQL Sandbox Component."""
+"""Unified SQL & Lineage Workbench (Dynamic dbt Manifest Explorer + Read-Only DuckDB Sandbox)."""
 
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ import streamlit as st
 
 try:
     from ..adapter import BaseCockpitAdapter
-    from .sql_sandbox import render_sql_sandbox
+    from ..services.duckdb_executor import execute_readonly_duckdb
 except (ImportError, ValueError):
     try:
         from adapter import BaseCockpitAdapter
-        from components.sql_sandbox import render_sql_sandbox
+        from services.duckdb_executor import execute_readonly_duckdb
     except (ImportError, ValueError):
         from cockpit_core.adapter import BaseCockpitAdapter
-        from cockpit_core.components.sql_sandbox import render_sql_sandbox
+        from cockpit_core.services.duckdb_executor import execute_readonly_duckdb
 
 
 def load_dbt_manifest_models(
@@ -78,10 +78,7 @@ def render_sql_snippet_module(
     title_zh: str = "",
     is_en: bool = True,
 ) -> None:
-    """Render a collapsible expander containing syntax-highlighted SQL with dynamic date injection,
-
-    accompanied by an aligned Table Data Snippet.
-    """
+    """Render a collapsible expander containing syntax-highlighted SQL with dynamic date injection."""
     display_title = title_en if is_en else (title_zh or title_en or module_id)
     expander_title = f"📄 {display_title}"
 
@@ -105,7 +102,120 @@ def render_sql_snippet_module(
             st.info("No data returned for the selected filter.")
 
 
-def render_dynamic_dbt_explorer_with_sandbox(
+def _run_sandbox_query(
+    adapter: BaseCockpitAdapter | None,
+    sql_query: str,
+    data_dict: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Execute query via adapter if implemented, otherwise fall back to shared DuckDB executor."""
+    if adapter is not None and hasattr(adapter, "execute_custom_sql"):
+        return adapter.execute_custom_sql(sql_query=sql_query, data_dict=data_dict)
+    res_df, err = execute_readonly_duckdb(sql_query, data_dict)
+    if err:
+        raise ValueError(err)
+    return res_df
+
+
+def render_sql_sandbox(
+    adapter: BaseCockpitAdapter,
+    data_dict: dict[str, pd.DataFrame],
+    start_date: date | None = None,
+    end_date: date | None = None,
+    is_en: bool = True,
+) -> None:
+    """Render an interactive read-only SQL query box allowing stakeholders to verify data and export CSV."""
+    title = (
+        "🧪 SQL Verification Sandbox & Raw Data Explorer"
+        if is_en
+        else "🧪 互動式 SQL 驗證沙盒與原始數據探查器"
+    )
+
+    with st.expander(title, expanded=False):
+        st.caption(
+            "🔒 **FinOps Safe & Read-Only**: Enter custom SQL queries against BigQuery / DuckDB Gold & Silver tables. "
+            "Verify calculation accuracy directly and export audit-ready CSV records."
+            if is_en
+            else "🔒 **唯讀與成本安全保證**：可手動輸入 SQL 針對金牌與銀牌層表格進行自由探查，親自驗證數據真實性，並將結果匯出為 CSV 稽核清單。"
+        )
+
+        col_input, col_ctrl = st.columns([8, 2])
+        default_query = getattr(
+            adapter,
+            "default_sandbox_sql",
+            "SELECT * FROM mart_product_performance LIMIT 10;",
+        )
+
+        with col_input:
+            query_text = st.text_area(
+                "SQL Query:" if is_en else "SQL 查詢語法：",
+                value=st.session_state.get("sandbox_sql_text", default_query),
+                height=120,
+                key="sandbox_sql_textarea",
+                help=(
+                    "Type standard read-only SQL queries against registered data tables."
+                    if is_en
+                    else "針對已註冊的湖倉資料表輸入唯讀 SQL 查詢。"
+                ),
+            )
+
+        with col_ctrl:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            btn_run_label = "▶️ Run Query" if is_en else "▶️ 執行查詢"
+            btn_reset_label = "🔄 Reset SQL" if is_en else "🔄 重置 SQL"
+            run_clicked = st.button(btn_run_label, type="primary", use_container_width=True)
+            if st.button(btn_reset_label, use_container_width=True):
+                st.session_state["sandbox_sql_text"] = default_query
+                st.session_state.pop("sandbox_query_result", None)
+                st.rerun()
+
+        if run_clicked and query_text.strip():
+            spinner_label = (
+                "Executing query against in-memory DuckDB engine..."
+                if is_en
+                else "正在透過記憶體 DuckDB 引擎執行查詢..."
+            )
+            with st.spinner(spinner_label):
+                try:
+                    res_df = _run_sandbox_query(
+                        adapter=adapter,
+                        sql_query=query_text.strip(),
+                        data_dict=data_dict,
+                    )
+                    st.session_state["sandbox_query_result"] = res_df
+                    st.session_state["sandbox_query_error"] = None
+                except Exception as exc:
+                    st.session_state["sandbox_query_result"] = None
+                    st.session_state["sandbox_query_error"] = str(exc)
+
+        err_msg = st.session_state.get("sandbox_query_error")
+        if err_msg:
+            st.error(f"❌ SQL Execution Error: {err_msg}")
+
+        result_df: pd.DataFrame | None = st.session_state.get("sandbox_query_result")
+        if result_df is not None:
+            st.success(
+                f"✅ Query executed successfully! Returned `{len(result_df)}` rows."
+                if is_en
+                else f"✅ 查詢執行成功！共檢索出 `{len(result_df)}` 筆紀錄。"
+            )
+            st.dataframe(result_df, use_container_width=True, height=280)
+
+            csv_data = result_df.to_csv(index=False).encode("utf-8")
+            download_label = (
+                f"⬇️ Download Results as CSV ({len(result_df)} records)"
+                if is_en
+                else f"⬇️ 下載查詢結果為 CSV（共 {len(result_df)} 筆）"
+            )
+            st.download_button(
+                label=download_label,
+                data=csv_data,
+                file_name="lakehouse_sql_export.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
+def render_sql_workbench(
     adapter: BaseCockpitAdapter,
     data_dict: dict[str, pd.DataFrame],
     start_date: date | None = None,
@@ -118,9 +228,9 @@ def render_dynamic_dbt_explorer_with_sandbox(
     side-by-side Table Preview + Compiled SQL, and the merged SQL Verification Sandbox.
     """
     st.subheader(
-        "🥈 Silver / Bronze Dynamic dbt Models & SQL Sandbox"
+        "🥈 Silver / Bronze SQL & Lineage Workbench"
         if is_en
-        else "🥈 Silver / Bronze 動態 dbt 模型與 SQL 沙盒"
+        else "🥈 Silver / Bronze 動態 SQL 與血緣工作台"
     )
     st.caption(
         "Auto-discovered from `dbt manifest.json`: inspect upstream lineage, live table preview, compiled SQL, and run custom queries below."
@@ -164,7 +274,6 @@ def render_dynamic_dbt_explorer_with_sandbox(
     )
     active_model = model_options[selected_label]
 
-    # Lineage & Description Card
     deps_str = (
         " , ".join(f"`{d}`" for d in active_model["depends_on"])
         if active_model["depends_on"]
@@ -181,7 +290,6 @@ def render_dynamic_dbt_explorer_with_sandbox(
             else f"**上游血緣依賴 (`depends_on`)**：{deps_str}"
         )
 
-    # Side-by-Side: Left Live Table Preview | Right Compiled Production SQL
     col_tbl, col_sql = st.columns([1.05, 0.95])
     model_name = active_model["name"]
 
@@ -192,9 +300,10 @@ def render_dynamic_dbt_explorer_with_sandbox(
             else "##### 📊 即時資料表預覽 (`LIMIT 50`)"
         )
         try:
-            preview_df = adapter.execute_custom_sql(
-                f"SELECT * FROM {model_name} LIMIT 50;",
-                data_dict,
+            preview_df = _run_sandbox_query(
+                adapter=adapter,
+                sql_query=f"SELECT * FROM {model_name} LIMIT 50;",
+                data_dict=data_dict,
             )
         except Exception:
             preview_df = data_dict.get(model_name, pd.DataFrame()).head(50)
@@ -213,7 +322,6 @@ def render_dynamic_dbt_explorer_with_sandbox(
         st.code(active_model["compiled_sql"], language="sql")
 
     st.markdown("---")
-    # Merged Interactive SQL Verification Sandbox
     render_sql_sandbox(
         adapter=adapter,
         data_dict=data_dict,
@@ -221,3 +329,7 @@ def render_dynamic_dbt_explorer_with_sandbox(
         end_date=end_date,
         is_en=is_en,
     )
+
+
+# Backward-compatible alias for callers expecting the previous function name
+render_dynamic_dbt_explorer_with_sandbox = render_sql_workbench

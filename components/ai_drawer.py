@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any
 
 import pandas as pd
@@ -11,14 +10,11 @@ import streamlit as st
 
 try:
     from ..adapter import AnalyticalSpecContract, BaseCockpitAdapter
-    from .ae_workflow import render_ae_workflow_stepper
 except (ImportError, ValueError):
     try:
         from adapter import AnalyticalSpecContract, BaseCockpitAdapter
-        from components.ae_workflow import render_ae_workflow_stepper
     except (ImportError, ValueError):
         from cockpit_core.adapter import AnalyticalSpecContract, BaseCockpitAdapter
-        from cockpit_core.components.ae_workflow import render_ae_workflow_stepper
 
 
 def reset_inquiry_state(active_scope_id: str) -> None:
@@ -82,16 +78,6 @@ def _delete_persisted_key() -> None:
         try:
             if os.path.exists(path):
                 os.remove(path)
-        except Exception:
-            pass
-
-
-def _delete_persisted_key() -> None:
-    """Remove persisted Gemini key from local safe cache."""
-    path = _get_local_cache_path()
-    if os.path.exists(path):
-        try:
-            os.remove(path)
         except Exception:
             pass
 

@@ -216,47 +216,22 @@ try:
         SocraticSessionState,
     )
 except ImportError:
-
-    class DatabaseReflectionService:  # type: ignore[no-redef]
-        """Lightweight standalone reflection & DuckDB dry-run helper when host `ai` package is absent."""
-
-        def __init__(self, data_dict: dict[str, pd.DataFrame]) -> None:
-            self.data_dict = {
-                k: v
-                for k, v in (data_dict or {}).items()
-                if isinstance(v, pd.DataFrame) and not v.empty
-            }
-
-        def get_kimball_models(self) -> dict[str, list[str]]:
-            dims = [
-                k
-                for k in self.data_dict
-                if k.startswith("dim_") or "product" in k or "customer" in k
-            ]
-            facts = [
-                k
-                for k in self.data_dict
-                if k.startswith("fct_") or k.startswith("fact_") or "order" in k
-            ]
-            return {
-                "dimensions": dims or ["dim_products", "dim_regions"],
-                "facts": facts or ["fact_orders"],
-            }
-
-        def get_schema_summary(self) -> str:
-            lines: list[str] = []
-            for tbl, df in self.data_dict.items():
-                cols = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns[:15])
-                lines.append(f"- {tbl} ({len(df)} rows): {cols}")
-            return "\n".join(lines) or "- (no tables loaded)"
-
-        def get_distinct_column_values(
-            self, table_name: str, column_name: str
-        ) -> list[str]:
-            df = self.data_dict.get(table_name)
-            if df is None or column_name not in df.columns:
-                return []
-            return [str(v) for v in df[column_name].dropna().unique().tolist()[:50]]
+    try:
+        from ..services.duckdb_executor import (
+            DatabaseReflectionService,
+            execute_readonly_duckdb,
+        )
+    except (ImportError, ValueError):
+        try:
+            from services.duckdb_executor import (
+                DatabaseReflectionService,
+                execute_readonly_duckdb,
+            )
+        except (ImportError, ValueError):
+            from cockpit_core.services.duckdb_executor import (
+                DatabaseReflectionService,
+                execute_readonly_duckdb,
+            )
 
     @dataclass
     class SocraticSessionState:  # type: ignore[no-redef]
@@ -560,22 +535,10 @@ except ImportError:
     def _run_duckdb_dry_run(
         sql: str, data_dict: dict[str, pd.DataFrame], preview_limit: int = 25
     ) -> tuple[pd.DataFrame, str]:
-        """Execute SQL against live DataFrames using DuckDB in-memory engine with safe preview bounding."""
-        import duckdb
-
-        con = duckdb.connect(":memory:")
-        try:
-            for tbl_name, df in data_dict.items():
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    con.register(tbl_name, df)
-            clean_sql = sql.strip().rstrip(";")
-            bounded_sql = f"SELECT * FROM ({clean_sql}) _preview LIMIT {preview_limit}"
-            res_df = con.execute(bounded_sql).df()
-            return res_df, ""
-        except Exception as exc:
-            return pd.DataFrame(), str(exc)
-        finally:
-            con.close()
+        """Execute SQL against live DataFrames via shared read-only DuckDB service."""
+        clean_sql = sql.strip().rstrip(";")
+        bounded_sql = f"SELECT * FROM ({clean_sql}) _preview LIMIT {preview_limit}"
+        return execute_readonly_duckdb(bounded_sql, data_dict)
 
     def _build_schema_yaml_from_df(
         model_name: str, user_goal: str, df: pd.DataFrame

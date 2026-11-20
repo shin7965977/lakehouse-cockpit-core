@@ -17,7 +17,7 @@ try:
     from .components.looker_view import render_looker_enterprise_view
     from .components.on_demand_panel import render_on_demand_insight_panel
     from .components.sidebar_ops import render_sidebar_pipeline_ops
-    from .components.sql_sandbox import render_sql_sandbox
+    from .components.sql_workbench import render_sql_sandbox
     from .styles import MODERN_COCKPIT_CSS
 except ImportError:
     from adapter import BaseCockpitAdapter
@@ -26,7 +26,7 @@ except ImportError:
     from components.looker_view import render_looker_enterprise_view
     from components.on_demand_panel import render_on_demand_insight_panel
     from components.sidebar_ops import render_sidebar_pipeline_ops
-    from components.sql_sandbox import render_sql_sandbox
+    from components.sql_workbench import render_sql_sandbox
     from styles import MODERN_COCKPIT_CSS
 
 
