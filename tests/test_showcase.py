@@ -192,3 +192,34 @@ def test_english_mode_has_no_chinese_in_mode_a_and_mode_b() -> None:
         leaks = _find_cjk_leaks(at)
         assert not leaks, f"Chinese text leaked in Mode B '{cid}' English UI: {leaks}"
 
+
+def test_schema_designer_fails_loud_without_api_key() -> None:
+    """Schema Designer must reject without silent heuristic fallback when API key is missing."""
+    import pandas as pd
+    from components.schema_designer import (
+        analyze_socratic_inquiry,
+        synthesize_dynamic_dbt_model,
+    )
+    from services.duckdb_executor import DatabaseReflectionService
+
+    data_dict = {
+        "fact_orders": pd.DataFrame(
+            {"event_date": ["2026-10-01"], "category": ["Electronics"], "gross_amount": [1200.0]}
+        )
+    }
+    reflection = DatabaseReflectionService(data_dict=data_dict)
+
+    session = analyze_socratic_inquiry(
+        "我想要分析每天不同產品的銷售額", reflection=reflection, api_key="", is_en=False
+    )
+    assert session.is_out_of_domain is True
+    assert session.is_api_key_missing is True
+
+    res = synthesize_dynamic_dbt_model(
+        "我想要分析每天不同產品的銷售額", {}, reflection=reflection, api_key=""
+    )
+    assert res.is_rejected is True
+    assert res.data_preview.empty
+    assert "Gemini API Key" in res.rejection_reason
+
+

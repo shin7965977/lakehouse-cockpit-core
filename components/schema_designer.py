@@ -220,17 +220,20 @@ except ImportError:
         from ..services.duckdb_executor import (
             DatabaseReflectionService,
             execute_readonly_duckdb,
+            generate_gemini_text,
         )
     except (ImportError, ValueError):
         try:
             from services.duckdb_executor import (
                 DatabaseReflectionService,
                 execute_readonly_duckdb,
+                generate_gemini_text,
             )
         except (ImportError, ValueError):
             from cockpit_core.services.duckdb_executor import (
                 DatabaseReflectionService,
                 execute_readonly_duckdb,
+                generate_gemini_text,
             )
 
     @dataclass
@@ -239,6 +242,7 @@ except ImportError:
         needs_clarification: bool = False
         is_out_of_domain: bool = False
         is_api_key_missing: bool = False
+        rejection_reason: str = ""
         locked_decisions: dict[str, Any] = field(default_factory=dict)
         questions: list[dict[str, Any]] = field(default_factory=list)
 
@@ -594,17 +598,24 @@ except ImportError:
         api_key: str = "",
         is_en: bool = True,
     ) -> SocraticSessionState:
-        intent = _infer_goal_intent(query, getattr(reflection, "data_dict", {}))
+        if not (api_key or "").strip():
+            return SocraticSessionState(
+                user_goal=query,
+                needs_clarification=False,
+                is_out_of_domain=True,
+                is_api_key_missing=True,
+                rejection_reason=(
+                    "Schema Designer requires a Gemini API Key. Silent offline keyword fallback is disabled."
+                    if is_en
+                    else "Schema 設計器需調用 Gemini AI，已停用離線關鍵字猜測與靜默替代。"
+                ),
+            )
         return SocraticSessionState(
             user_goal=query,
             needs_clarification=False,
             is_out_of_domain=False,
             is_api_key_missing=False,
-            locked_decisions={
-                "model_name": intent["model_name"],
-                "grain": intent["grain"],
-                "upstream": intent["upstream"],
-            },
+            locked_decisions={},
         )
 
     def chat_socratic_turn(  # type: ignore[no-redef]
@@ -635,65 +646,138 @@ except ImportError:
             .hexdigest()[:4]
             .upper()
         )
+        spec_id = f"SPEC-{spec_hash}"
 
-        llm_sql = ""
-        model_name = ""
-        target_grain = ""
-        upstream_tables: list[str] = []
-        semantic_spec: dict[str, Any] = {}
-        missing_fields_warning = ""
-        used_gemini = False
+        def _rejected(
+            reason: str,
+            step_label: str,
+            step_status: str = "REJECTED",
+            step_detail: str = "",
+            failed_sql: str = "",
+        ) -> _StandaloneSchemaResult:
+            return _StandaloneSchemaResult(
+                spec_id=spec_id,
+                is_rejected=True,
+                target_grain="",
+                upstream_tables=[],
+                audit_trace=[
+                    {
+                        "step": "1. Reflection",
+                        "status": "PASSED",
+                        "detail": f"{len(data_dict)} tables",
+                    },
+                    {
+                        "step": step_label,
+                        "status": step_status,
+                        "detail": step_detail or reason[:72],
+                    },
+                ],
+                data_preview=pd.DataFrame(),
+                schema_yaml="",
+                dbt_sql=failed_sql,
+                rejection_reason=reason,
+            )
 
-        if api_key and data_dict:
-            try:
-                from google import genai
+        if not (api_key or "").strip():
+            return _rejected(
+                reason="⚠️ Schema 設計器需調用 Gemini AI，請先於右側填入 Gemini API Key（嚴格禁止靜默離線替代）。",
+                step_label="2. Gemini API Key Check",
+                step_status="BLOCKED",
+                step_detail="Missing Gemini API Key",
+            )
 
-                client = genai.Client(api_key=api_key)
-                prompt = (
-                    "You are a Semantic-First Analytics Engineer.\n"
-                    "Step 1: Inspect these live DuckDB tables & columns:\n"
-                    f"{reflection.get_schema_summary()}\n\n"
-                    f"User Goal: {user_goal}\n"
-                    f"Decisions: {json.dumps(decisions, ensure_ascii=False)}\n\n"
-                    "Step 2: First establish the governed Semantic Layer before writing SQL. "
-                    "If key business columns (e.g., cost/COGS for profit) are missing, explain the proxy assumption in 'missing_fields_warning'. "
-                    "Never put identifier columns (*_id, id), rank columns, or unit_price as SUM measures.\n\n"
-                    "Step 3: Write a valid DuckDB SELECT query WITHOUT LIMIT so the materialized Gold Mart is complete.\n\n"
-                    "Return ONLY a JSON object with keys:\n"
-                    '- "model_name": snake_case mart name (e.g. mart_product_profitability)\n'
-                    '- "target_grain": short grain description\n'
-                    '- "upstream_tables": list of exact table names used from above\n'
-                    '- "missing_fields_warning": string warning if required business fields are absent (else "")\n'
-                    '- "semantic_spec": {"primary_entity": "<id_col>", "dimensions": ["<dim1>", ...], '
-                    '"measures": [{"name": "<metric_col>", "agg": "sum|avg|count"}], "primary_metric": "<metric_col>"}\n'
-                    '- "duckdb_sql": valid DuckDB SELECT query using ONLY the exact table & column names above (NO LIMIT clause)\n'
-                )
-                resp = client.models.generate_content(
-                    model="gemini-2.5-flash", contents=prompt
-                )
-                raw = (resp.text or "").strip()
-                m = re.search(r"\{.*\}", raw, re.DOTALL)
-                if m:
-                    parsed = json.loads(m.group(0))
-                    llm_sql = str(parsed.get("duckdb_sql", "")).strip().rstrip(";")
-                    model_name = str(parsed.get("model_name", "")).strip()
-                    target_grain = str(parsed.get("target_grain", "")).strip()
-                    upstream_tables = list(parsed.get("upstream_tables", []))
-                    semantic_spec = parsed.get("semantic_spec", {}) or {}
-                    missing_fields_warning = str(
-                        parsed.get("missing_fields_warning", "")
-                    ).strip()
-                    used_gemini = bool(llm_sql)
-            except Exception:
-                used_gemini = False
+        if not data_dict:
+            return _rejected(
+                reason="No live Lakehouse tables available in data_dict for reflection.",
+                step_label="2. Table Reflection",
+                step_status="BLOCKED",
+                step_detail="0 tables registered",
+            )
 
-        fallback_intent = _infer_goal_intent(user_goal, data_dict)
-        exec_sql = llm_sql or fallback_intent["duckdb_sql"]
-        model_name = model_name or fallback_intent["model_name"]
-        target_grain = target_grain or fallback_intent["grain"]
-        upstream_tables = upstream_tables or fallback_intent["upstream"]
-        if not used_gemini and not missing_fields_warning:
-            missing_fields_warning = fallback_intent.get("missing_fields_warning", "")
+        prompt = (
+            "You are a Semantic-First Analytics Engineer.\n"
+            "Step 1: Inspect these live DuckDB tables & columns:\n"
+            f"{reflection.get_schema_summary()}\n\n"
+            f"User Goal: {user_goal}\n"
+            f"Decisions: {json.dumps(decisions, ensure_ascii=False)}\n\n"
+            "Step 2: Validate domain relevance. If the User Goal is completely unrelated to the available tables "
+            "(e.g. politics, poetry, trivia, or asks for entities that cannot be derived from any column above), "
+            'set "is_out_of_domain": true and explain clearly in "rejection_reason" (in the same language as User Goal).\n'
+            "If key business columns (e.g., cost/COGS for profit) are missing but a reasonable proxy exists, "
+            "explain the proxy assumption in 'missing_fields_warning'.\n"
+            "Never put identifier columns (*_id, id), rank columns, or unit_price as SUM measures.\n\n"
+            "Step 3: Write a valid DuckDB SELECT query WITHOUT LIMIT that faithfully satisfies EVERY dimension and grain "
+            "requested in User Goal (for example, if User Goal asks for daily + product/category, GROUP BY both date and product/category).\n\n"
+            "Return ONLY a JSON object with keys:\n"
+            '- "is_out_of_domain": boolean\n'
+            '- "rejection_reason": string (empty if in-domain)\n'
+            '- "model_name": snake_case mart name (e.g. mart_daily_category_sales)\n'
+            '- "target_grain": short grain description\n'
+            '- "upstream_tables": list of exact table names used from above\n'
+            '- "missing_fields_warning": string warning if required business fields are absent (else "")\n'
+            '- "semantic_spec": {"primary_entity": "<id_or_dim_col>", "dimensions": ["<dim1>", ...], '
+            '"measures": [{"name": "<metric_col>", "agg": "sum|avg|count"}], "primary_metric": "<metric_col>"}\n'
+            '- "duckdb_sql": valid DuckDB SELECT query using ONLY the exact table & column names above (NO LIMIT clause)\n'
+        )
+
+        try:
+            raw = generate_gemini_text(prompt, api_key=api_key).strip()
+        except Exception as exc:
+            return _rejected(
+                reason=f"Gemini API synthesis failed: {exc}",
+                step_label="2. Gemini Synthesis",
+                step_status="REJECTED",
+                step_detail=f"API Error: {type(exc).__name__}",
+            )
+
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return _rejected(
+                reason=f"Gemini returned non-JSON output and cannot be safely compiled: {raw[:240]}",
+                step_label="2. Gemini JSON Parse",
+                step_status="REJECTED",
+                step_detail="Invalid JSON payload",
+            )
+
+        try:
+            parsed = json.loads(m.group(0))
+        except Exception as exc:
+            return _rejected(
+                reason=f"Failed to parse Gemini JSON payload: {exc}",
+                step_label="2. Gemini JSON Parse",
+                step_status="REJECTED",
+                step_detail="JSON decode error",
+            )
+
+        if parsed.get("is_out_of_domain"):
+            return _rejected(
+                reason=str(
+                    parsed.get("rejection_reason")
+                    or "Request is outside the available Lakehouse schema."
+                ).strip(),
+                step_label="2. Domain Boundary Check",
+                step_status="REJECTED",
+                step_detail="Out of domain",
+            )
+
+        exec_sql = str(parsed.get("duckdb_sql", "")).strip().rstrip(";")
+        model_name = str(parsed.get("model_name", "")).strip() or f"mart_custom_{spec_hash.lower()}"
+        target_grain = str(parsed.get("target_grain", "")).strip() or "Custom Synthesized Grain"
+        upstream_tables = [
+            str(t).strip()
+            for t in (parsed.get("upstream_tables") or [])
+            if str(t).strip() in data_dict
+        ]
+        semantic_spec = parsed.get("semantic_spec", {}) or {}
+        missing_fields_warning = str(parsed.get("missing_fields_warning", "")).strip()
+
+        if not exec_sql:
+            return _rejected(
+                reason="Gemini did not produce an executable DuckDB SQL query.",
+                step_label="2. Gemini Synthesis",
+                step_status="REJECTED",
+                step_detail="Empty SQL output",
+            )
 
         # Strip any trailing LIMIT clause so the physical dbt Mart table is un-truncated
         exec_sql = re.sub(
@@ -703,31 +787,28 @@ except ImportError:
         preview_df, dry_run_err = _run_duckdb_dry_run(
             exec_sql, data_dict, preview_limit=25
         )
-        if dry_run_err or preview_df.empty:
-            # Retry with deterministic intent SQL if LLM SQL had a column mismatch
-            exec_sql = fallback_intent["duckdb_sql"]
-            upstream_tables = fallback_intent["upstream"]
-            model_name = fallback_intent["model_name"]
-            target_grain = fallback_intent["grain"]
-            semantic_spec = {}
-            missing_fields_warning = fallback_intent.get("missing_fields_warning", "")
-            preview_df, dry_run_err = _run_duckdb_dry_run(
-                exec_sql, data_dict, preview_limit=25
+        if dry_run_err:
+            return _rejected(
+                reason=f"DuckDB Dry-Run failed on Gemini-generated SQL: {dry_run_err}",
+                step_label="3. DuckDB Dry-Run",
+                step_status="REJECTED",
+                step_detail="SQL execution error",
+                failed_sql=exec_sql,
             )
-            if preview_df.empty:
-                preview_df = next(
-                    (
-                        v.head(20)
-                        for v in data_dict.values()
-                        if isinstance(v, pd.DataFrame) and not v.empty
-                    ),
-                    pd.DataFrame(
-                        {
-                            "category": ["Electronics", "Apparel"],
-                            "total_gmv": [52000.0, 48000.0],
-                        }
-                    ),
-                )
+
+        if preview_df.empty:
+            return _rejected(
+                reason="DuckDB Dry-Run succeeded but returned 0 rows for the synthesized SQL.",
+                step_label="3. DuckDB Dry-Run",
+                step_status="REJECTED",
+                step_detail="0 rows returned",
+                failed_sql=exec_sql,
+            )
+
+        if not upstream_tables:
+            upstream_tables = [
+                tbl for tbl in data_dict if re.search(rf"\b{re.escape(tbl)}\b", exec_sql)
+            ]
 
         dbt_sql_body = exec_sql
         for tbl in upstream_tables:
@@ -741,7 +822,6 @@ except ImportError:
             f"{dbt_sql_body};\n"
         )
         schema_yaml = _build_schema_yaml_from_df(model_name, user_goal, preview_df)
-        spec_id = f"SPEC-{spec_hash}"
         semantic_yaml, lookml_code = _build_governed_semantic_artifacts(
             spec_id=spec_id,
             model_name=model_name,
@@ -757,7 +837,6 @@ except ImportError:
                 p in c.lower() for p in ["email", "phone", "address", "password", "ssn"]
             )
         ]
-        engine_label = "Gemini + DuckDB" if used_gemini else "Heuristic + DuckDB"
 
         return _StandaloneSchemaResult(
             spec_id=spec_id,
@@ -776,7 +855,7 @@ except ImportError:
                     "detail": f"{len(pii_cols)} PII columns",
                 },
                 {
-                    "step": f"3. {engine_label} Dry-Run",
+                    "step": "3. Gemini + DuckDB Dry-Run",
                     "status": "PASSED",
                     "detail": f"{len(preview_df)} preview rows",
                 },
@@ -1020,7 +1099,7 @@ def render_schema_designer_view(
                             任何商業分析意圖均須經由 Google Gemini GenAI 進行實體型錄邊界檢驗與意圖錨定。
                         </div>
                         <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEF3C7; border-radius: 6px; font-size: 0.88rem; color: #78350F;">
-                            👉 <strong>如何啟用</strong>：請在左側側邊欄 <em>Gemini API Configuration</em> 輸入您的 API Key。輸入後系統將即時調用 Gemini 模型進行真實的意圖驗證與 dbt 模型合成。
+                            👉 <strong>如何啟用</strong>：請在右側面板的 <em>Gemini API Key</em> 欄位輸入您的 API Key。輸入後系統將即時調用 Gemini 模型進行真實的意圖驗證與 dbt 模型合成。
                         </div>
                     </div>
                     """
@@ -1036,7 +1115,7 @@ def render_schema_designer_view(
                             All analytical goals must be grounded against conformed lakehouse entities via Google Gemini GenAI.
                         </div>
                         <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEF3C7; border-radius: 6px; font-size: 0.88rem; color: #78350F;">
-                            👉 <strong>Action Required</strong>: Please provide your Gemini API Key in the left sidebar under <em>Gemini API Configuration</em>.
+                            👉 <strong>Action Required</strong>: Please enter your Gemini API Key in the right-hand panel.
                         </div>
                     </div>
                     """,
@@ -1045,6 +1124,9 @@ def render_schema_designer_view(
             else:
                 reason_text = (
                     active_session.rejection_reason or "輸入超出湖倉分析範疇。"
+                )
+                available_tables_html = "、".join(
+                    f"<code>{t}</code>" for t in list(data_dict.keys())[:6]
                 )
                 st.markdown(
                     f"""
@@ -1058,7 +1140,7 @@ def render_schema_designer_view(
                             為了落實 <strong>Zero-Facade 架構治理</strong>，系統拒絕模擬偽造不存在的數據血緣與 SQL 運算。
                         </div>
                         <div style="margin-top: 12px; padding: 10px 14px; background-color: #FEE2E2; border-radius: 6px; font-size: 0.88rem; color: #991B1B;">
-                            💡 <strong>建議做法</strong>：請點擊上方預設場景按鈕，或輸入與 <code>fct_order_items</code>、<code>fct_returns</code>、<code>dim_products</code> (12 款歐洲堅果/果乾 SKU) 相關的真實商業分析指標。
+                            💡 <strong>建議做法</strong>：請輸入與現有資料表（{available_tables_html}）相關的商業分析指標。
                         </div>
                     </div>
                     """
@@ -1771,3 +1853,12 @@ def render_schema_designer_view(
                         """,
                         unsafe_allow_html=True,
                     )
+
+        if getattr(result, "dbt_sql", ""):
+            with st.expander(
+                "📜 Inspect Failed SQL (Debug)"
+                if is_en
+                else "📜 檢視驗證失敗的 SQL（供除錯）",
+                expanded=True,
+            ):
+                st.code(result.dbt_sql, language="sql")
