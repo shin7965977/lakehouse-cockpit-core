@@ -77,7 +77,7 @@ def test_showcase_mode_b_storybook_catalog() -> None:
     catalog_radio = next(r for r in at.radio if r.key == "storybook_selected_component")
     for cid in [
         "on_demand_panel",
-        "wrenai_view",
+        "vanna_view",
         "sql_workbench",
         "looker_view",
         "schema_designer",

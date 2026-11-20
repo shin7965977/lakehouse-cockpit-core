@@ -39,7 +39,7 @@ from components.sql_workbench import (  # noqa: E402
     render_sql_snippet_module,
     render_sql_workbench,
 )
-from components.wrenai_view import render_wrenai_view  # noqa: E402
+from components.vanna_view import render_vanna_view  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 
@@ -502,24 +502,24 @@ def build_component_registry(
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
         ),
         ShowcaseComponentSpec(
-            id="wrenai_view",
-            tab_title_en="📊 WrenAI Ad-Hoc Charts",
-            tab_title_zh="📊 WrenAI 臨時生圖",
-            storybook_label="2. wrenai_view.py",
-            fn_signature="render_wrenai_view()",
-            source_files=("components/wrenai_view.py",),
-            snippet="render_wrenai_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description_en="Embedded open-source WrenAI GenBI iframe for ad-hoc natural language charting backed by dbt-synced MDL.",
-            description_zh="嵌入開源 WrenAI GenBI（iframe），透過與 dbt 同步的 MDL 語意層提供 Ad-Hoc 自然語言生圖。",
+            id="vanna_view",
+            tab_title_en="📊 Vanna.ai Ad-Hoc Charts",
+            tab_title_zh="📊 Vanna.ai 語意生圖",
+            storybook_label="2. vanna_view.py",
+            fn_signature="render_vanna_view()",
+            source_files=("components/vanna_view.py",),
+            snippet="render_vanna_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
+            description_en="100% open-source (MIT) Vanna.ai RAG Text-to-SQL & Auto-Plotly charting trained on Lakehouse DDL and dbt manifest.json.",
+            description_zh="100% 開源免費（MIT）的 Vanna.ai RAG 自然語言生圖工作台：自動讀取湖倉 DDL 與 dbt manifest.json 現場執行 DuckDB 並繪製 Plotly 圖表。",
             problem_solved_en=(
-                "Replaces brittle hand-coded text-to-chart scripts with open-source WrenAI's governed "
-                "semantic-layer SQL & charting engine for ad-hoc exploration."
+                "Replaces paid external GenBI iframes and brittle 1,400-line regex scripts with an "
+                "in-process, MIT-open-source Vanna RAG Text-to-SQL & auto-Plotly charting workbench."
             ),
             problem_solved_zh=(
-                "避免重複造輪子維護上千行手寫生圖邏輯，直接嵌入開源 WrenAI 處理複雜多表 Join 與臨時 Ad-Hoc 自然語言生圖。"
+                "取代需付費的外部雲端 iframe 與上千行手寫生圖規則，直接以 MIT 開源免費的 Vanna RAG 架構在 Streamlit 內即時生成 SQL 與互動圖表。"
             ),
             placement_in_mode_a="workspace_tab",
-            render=lambda: render_wrenai_view(adapter=adapter, data_dict=data_dict, is_en=is_en),
+            render=lambda: render_vanna_view(adapter=adapter, data_dict=data_dict, is_en=is_en),
         ),
         ShowcaseComponentSpec(
             id="sql_workbench",
@@ -696,7 +696,7 @@ def _render_integrated_cockpit_mode_a(
     with main_col:
         st.title(adapter.brand_title)
         st.caption(
-            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · DataBot & WrenAI GenBI"
+            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · DataBot & Vanna.ai GenBI"
         )
 
         st.markdown("---")
