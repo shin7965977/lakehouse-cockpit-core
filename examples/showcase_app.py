@@ -39,7 +39,7 @@ from components.sql_workbench import (  # noqa: E402
     render_sql_snippet_module,
     render_sql_workbench,
 )
-from components.vanna_view import render_vanna_view  # noqa: E402
+from components.text_to_chart import render_text_to_chart_module  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 
@@ -502,24 +502,26 @@ def build_component_registry(
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
         ),
         ShowcaseComponentSpec(
-            id="vanna_view",
-            tab_title_en="📊 Vanna.ai Ad-Hoc Charts",
-            tab_title_zh="📊 Vanna.ai 語意生圖",
-            storybook_label="2. vanna_view.py",
-            fn_signature="render_vanna_view()",
-            source_files=("components/vanna_view.py",),
-            snippet="render_vanna_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
-            description_en="100% open-source (MIT) Vanna.ai RAG Text-to-SQL & Auto-Plotly charting trained on Lakehouse DDL and dbt manifest.json.",
-            description_zh="100% 開源免費（MIT）的 Vanna.ai RAG 自然語言生圖工作台：自動讀取湖倉 DDL 與 dbt manifest.json 現場執行 DuckDB 並繪製 Plotly 圖表。",
+            id="text_to_chart",
+            tab_title_en="✨ Text-to-Chart",
+            tab_title_zh="✨ AI 生圖 (Text-to-Chart)",
+            storybook_label="2. text_to_chart.py",
+            fn_signature="render_text_to_chart_module()",
+            source_files=("components/text_to_chart.py",),
+            snippet="render_text_to_chart_module(adapter=adapter, data_dict=data_dict, is_en=is_en)",
+            description_en="2-step HITL Natural Language Chart Generator with 8 chart types, Tableau-style typed axis guardrails, and Q&A refinement chat.",
+            description_zh="兩階段 HITL 自然語言智能圖表生成器，支援 8 種圖表類型、Tableau 式型別軸防呆與對話式微調。",
             problem_solved_en=(
-                "Replaces paid external GenBI iframes and brittle 1,400-line regex scripts with an "
-                "in-process, MIT-open-source Vanna RAG Text-to-SQL & auto-Plotly charting workbench."
+                "Eliminates black-box chart generation by giving users a 2-step Human-in-the-Loop (HITL) "
+                "Chart Spec preview form with typed axis guardrails and conversational refinement before rendering."
             ),
             problem_solved_zh=(
-                "取代需付費的外部雲端 iframe 與上千行手寫生圖規則，直接以 MIT 開源免費的 Vanna RAG 架構在 Streamlit 內即時生成 SQL 與互動圖表。"
+                "解決傳統 AI 生圖『一步黑箱直接畫錯』的痛點，提供兩階段 HITL 圖表規格預覽表單、型別軸防呆與對話式微調後再正式渲染。"
             ),
             placement_in_mode_a="workspace_tab",
-            render=lambda: render_vanna_view(adapter=adapter, data_dict=data_dict, is_en=is_en),
+            render=lambda: render_text_to_chart_module(
+                adapter=adapter, data_dict=data_dict, is_en=is_en
+            ),
         ),
         ShowcaseComponentSpec(
             id="sql_workbench",
@@ -696,7 +698,7 @@ def _render_integrated_cockpit_mode_a(
     with main_col:
         st.title(adapter.brand_title)
         st.caption(
-            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · DataBot & Vanna.ai GenBI"
+            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · DataBot & HITL Text-to-Chart"
         )
 
         st.markdown("---")
