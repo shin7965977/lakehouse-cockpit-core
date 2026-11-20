@@ -10,11 +10,17 @@ import streamlit as st
 
 try:
     from ..adapter import AnalyticalSpecContract, BaseCockpitAdapter
+    from ..services.duckdb_executor import DatabaseReflectionService, generate_gemini_text
 except (ImportError, ValueError):
     try:
         from adapter import AnalyticalSpecContract, BaseCockpitAdapter
+        from services.duckdb_executor import DatabaseReflectionService, generate_gemini_text
     except (ImportError, ValueError):
         from cockpit_core.adapter import AnalyticalSpecContract, BaseCockpitAdapter
+        from cockpit_core.services.duckdb_executor import (
+            DatabaseReflectionService,
+            generate_gemini_text,
+        )
 
 
 def reset_inquiry_state(active_scope_id: str) -> None:
@@ -329,6 +335,7 @@ def render_databot(
 
     if query_to_run:
         st.session_state[hist_key].append({"role": "user", "content": query_to_run})
+        active_sys_prompt = st.session_state.get(custom_prompt_state_key, base_default_prompt)
 
         if adapter is not None and getattr(adapter, "supports_spec_guidance", False):
             turn_result = adapter.handle_spec_inquiry_turn(
@@ -336,7 +343,8 @@ def render_databot(
                 chat_history=st.session_state[hist_key],
                 data_dict=data_dict or {},
                 is_en=is_en,
-                api_key=display_key,
+                api_key=display_key if has_valid_key else "",
+                system_prompt=active_sys_prompt,
             )
             if turn_result.get("spec_contract") is not None:
                 st.session_state["locked_spec_contract"] = turn_result["spec_contract"]
@@ -344,6 +352,19 @@ def render_databot(
             st.session_state[hist_key].append(
                 {"role": "assistant", "content": turn_result["reply"]}
             )
+            st.rerun()
+        elif has_valid_key:
+            reflection = DatabaseReflectionService(data_dict or {})
+            prompt = (
+                f"{active_sys_prompt}\n\n"
+                f"Lakehouse Tables & Columns:\n{reflection.get_schema_summary()}\n\n"
+                f"User Question: {query_to_run}"
+            )
+            try:
+                reply = generate_gemini_text(api_key=display_key, prompt=prompt)
+            except Exception as exc:
+                reply = f"❌ **Gemini API Error**: {exc}"
+            st.session_state[hist_key].append({"role": "assistant", "content": reply})
             st.rerun()
         else:
             reply = f"Thank you for your question: '{query_to_run}'. Analytics guidance is ready."

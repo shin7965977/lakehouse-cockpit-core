@@ -40,6 +40,10 @@ from components.sql_workbench import (  # noqa: E402
     render_sql_workbench,
 )
 from components.text_to_chart import render_text_to_chart_module  # noqa: E402
+from services.duckdb_executor import (  # noqa: E402
+    DatabaseReflectionService,
+    generate_gemini_text,
+)
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 
@@ -449,7 +453,49 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
         api_key: str = "",
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Offline Mock AI response when no Gemini API key is provided."""
+        """Execute live Gemini database Q&A when API key is active; fall back to Mock only when key is empty."""
+        clean_key = (api_key or "").strip()
+        if clean_key:
+            safe_data = data_dict or self.load_domain_data()
+            reflection = DatabaseReflectionService(safe_data)
+            sample_snippets: list[str] = []
+            for tbl, df in reflection.data_dict.items():
+                sample_snippets.append(f"[{tbl} sample rows]\n{df.head(5).to_string(index=False)}")
+            samples_block = "\n\n".join(sample_snippets)
+
+            sys_prompt = kwargs.get("system_prompt") or (
+                self.default_system_prompt_en if is_en else self.default_system_prompt_zh
+            )
+            hist_lines: list[str] = []
+            for msg in (chat_history or [])[-6:]:
+                if not msg.get("is_welcome"):
+                    hist_lines.append(f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}")
+            hist_block = "\n".join(hist_lines)
+
+            full_prompt = (
+                f"{sys_prompt}\n\n"
+                f"=== ACTIVE LAKEHOUSE SCHEMA & COLUMNS ===\n{reflection.get_schema_summary()}\n\n"
+                f"=== SAMPLE DATA ROWS ===\n{samples_block}\n\n"
+                f"=== RECENT CONVERSATION ===\n{hist_block}\n\n"
+                f"USER QUESTION: {user_query}\n"
+                f"Answer directly and accurately based ONLY on the schema and data above "
+                f"({'in English' if is_en else '請使用繁體中文回答'})."
+            )
+            try:
+                live_reply = generate_gemini_text(
+                    api_key=clean_key,
+                    prompt=full_prompt,
+                    model="gemini-2.5-flash",
+                )
+                return {"reply": live_reply, "spec_contract": None}
+            except Exception as exc:
+                err_reply = (
+                    f"❌ **Gemini API Error**: {exc}"
+                    if is_en
+                    else f"❌ **Gemini API 呼叫失敗**：{exc}"
+                )
+                return {"reply": err_reply, "spec_contract": None}
+
         if is_en:
             reply = (
                 "### 📌 Offline Mock Advisor Diagnosis (Showcase Mode)\n"
