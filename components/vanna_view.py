@@ -238,18 +238,28 @@ def _synthesize_sql_with_vanna_rag(
     try:
         rag_context = "\n\n".join(f"[{r['type'].upper()}] {r['content']}" for r in corpus[:12])
         prompt = (
-            "You are Vanna.ai, an open-source RAG Text-to-SQL & Charting engine running on DuckDB.\n"
-            "Use ONLY the trained DDL and dbt documentation below to write a single valid DuckDB SELECT query suitable for plotting a comparison chart.\n"
-            "CRITICAL CHARTING RULES:\n"
-            "1. Always SELECT both the dimension column (e.g. category, region, event_date) AND at least one numeric metric column (e.g. total_gmv, gross_amount, return_rate_pct, order_count). Never SELECT only a single text column.\n"
-            "2. Even when the user asks 'which one is best/worst/highest/lowest', return the full ranked comparison across groups (e.g. ORDER BY metric ASC/DESC LIMIT 15) instead of LIMIT 1, so the chart shows why it ranks first/last.\n"
-            "3. If the user's request cannot be answered using the provided tables/columns, return starting with 'ERROR: <reason>'.\n\n"
+            "You are Vanna.ai, a strict, zero-guessing RAG Text-to-SQL engine running on DuckDB.\n"
+            "Use ONLY the trained DDL and dbt documentation below.\n"
+            "STRICT RULES:\n"
+            "1. NO SILENT GUESSING ON AMBIGUOUS QUERIES: If the user's question is vague or ambiguous — for example, "
+            "it does not specify which dimension to compare (e.g. 'which one' without saying category vs region), "
+            "uses undefined subjective terms ('best/worst performance', 'doing well') without specifying the metric "
+            "(revenue/GMV vs return_rate vs order_count vs units), or asks for 'recently' without a defined time window — "
+            "DO NOT guess a SQL query! Instead, return starting with:\n"
+            "AMBIGUOUS: <briefly explain in the user's language which dimension, metric, or time window is missing, and list the available columns from the DDL>.\n"
+            "2. OUT OF DOMAIN / MISSING COLUMNS: If the user asks for columns or entities that do not exist in the DDL (e.g. customer VIP retention), "
+            "return starting with:\n"
+            "ERROR: <explain which required columns are missing from the schema>.\n"
+            "3. UNAMBIGUOUS QUERIES ONLY: Only when the dimension and metric are clearly specified, write a single valid DuckDB SELECT query "
+            "that projects both the requested dimension column and the requested numeric metric column.\n\n"
             f"{rag_context}\n\n"
             f"Question: {question}\n"
-            "Return ONLY the raw SQL query (or 'ERROR: <reason>') without markdown fences."
+            "Return ONLY the raw SQL query, 'AMBIGUOUS: <reason>', or 'ERROR: <reason>' without markdown fences."
         )
         raw_text = generate_gemini_text(api_key=api_key, prompt=prompt, model="gemini-2.5-flash")
         candidate = raw_text.strip().strip("`").replace("sql\n", "").strip().rstrip(";")
+        if candidate.upper().startswith("AMBIGUOUS:"):
+            return "", "Vanna RAG + Gemini + DuckDB", candidate
         if candidate.upper().startswith("ERROR:"):
             return "", "Vanna RAG + Gemini + DuckDB", candidate
         if not (candidate.upper().startswith("SELECT") or candidate.upper().startswith("WITH")):
@@ -437,11 +447,19 @@ def render_vanna_view(
     )
 
     if synth_err:
-        st.error(
-            f"❌ **Query Synthesis Failed ({engine_badge})**: {synth_err}"
-            if is_en
-            else f"❌ **SQL 生成失敗（{engine_badge}）**：{synth_err}"
-        )
+        if synth_err.upper().startswith("AMBIGUOUS:"):
+            detail = synth_err[len("AMBIGUOUS:"):].strip()
+            st.warning(
+                f"⚠️ **Ambiguous Query — Clarification Required ({engine_badge})**: {detail}"
+                if is_en
+                else f"⚠️ **語意模糊需釐清（{engine_badge}）**：{detail}"
+            )
+        else:
+            st.error(
+                f"❌ **Query Synthesis Failed ({engine_badge})**: {synth_err}"
+                if is_en
+                else f"❌ **SQL 生成失敗（{engine_badge}）**：{synth_err}"
+            )
         if sql_query:
             st.code(sql_query, language="sql")
         return
