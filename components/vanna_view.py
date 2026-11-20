@@ -238,9 +238,12 @@ def _synthesize_sql_with_vanna_rag(
     try:
         rag_context = "\n\n".join(f"[{r['type'].upper()}] {r['content']}" for r in corpus[:12])
         prompt = (
-            "You are Vanna.ai, an open-source RAG Text-to-SQL engine running on DuckDB.\n"
-            "Use ONLY the trained DDL and dbt documentation below to write a single valid DuckDB SELECT query.\n"
-            "If the user's request cannot be answered using the provided tables/columns, return starting with 'ERROR: <reason>'.\n\n"
+            "You are Vanna.ai, an open-source RAG Text-to-SQL & Charting engine running on DuckDB.\n"
+            "Use ONLY the trained DDL and dbt documentation below to write a single valid DuckDB SELECT query suitable for plotting a comparison chart.\n"
+            "CRITICAL CHARTING RULES:\n"
+            "1. Always SELECT both the dimension column (e.g. category, region, event_date) AND at least one numeric metric column (e.g. total_gmv, gross_amount, return_rate_pct, order_count). Never SELECT only a single text column.\n"
+            "2. Even when the user asks 'which one is best/worst/highest/lowest', return the full ranked comparison across groups (e.g. ORDER BY metric ASC/DESC LIMIT 15) instead of LIMIT 1, so the chart shows why it ranks first/last.\n"
+            "3. If the user's request cannot be answered using the provided tables/columns, return starting with 'ERROR: <reason>'.\n\n"
             f"{rag_context}\n\n"
             f"Question: {question}\n"
             "Return ONLY the raw SQL query (or 'ERROR: <reason>') without markdown fences."
@@ -265,9 +268,13 @@ def _build_auto_plotly_figure(
         return go.Figure()
 
     num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if not num_cols:
+        raise ValueError(
+            f"Cannot plot chart: query result has no numeric metric columns (projected columns: {list(df.columns)})."
+        )
     non_num_cols = [c for c in df.columns if c not in num_cols]
     x_col = non_num_cols[0] if non_num_cols else df.columns[0]
-    y_col = num_cols[0] if num_cols else df.columns[-1]
+    y_col = num_cols[0]
     truthful_title = f"{y_col} by {x_col}"
 
     resolved_type = chart_type.lower()
@@ -464,8 +471,11 @@ def render_vanna_view(
         else f"⚡ **執行引擎**：`{engine_badge}` &nbsp;|&nbsp; **檢索筆數**：`{len(res_df)}`"
     )
 
-    fig = _build_auto_plotly_figure(res_df, chart_type=chart_type)
-    st.plotly_chart(fig, use_container_width=True)
+    try:
+        fig = _build_auto_plotly_figure(res_df, chart_type=chart_type)
+        st.plotly_chart(fig, use_container_width=True)
+    except ValueError as chart_err:
+        st.warning(f"⚠️ {chart_err}")
 
     c_sql, c_data = st.columns([0.95, 1.05])
     with c_sql:
