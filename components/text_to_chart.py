@@ -275,6 +275,25 @@ def render_text_to_chart_module(
     }
     active_desc_map = col_desc_en if is_en else col_desc_zh
 
+    # Synthesize regional performance mart if fact_orders has region + gross_amount
+    if (
+        "mart_region_performance" not in safe_dict
+        and "fact_orders" in safe_dict
+        and {"region", "gross_amount", "order_id"}.issubset(safe_dict["fact_orders"].columns)
+    ):
+        f_df = safe_dict["fact_orders"]
+        reg_mart = (
+            f_df.groupby("region", as_index=False)
+            .agg(
+                total_gmv=("gross_amount", "sum"),
+                order_count=("order_id", "count"),
+                avg_order_value=("gross_amount", "mean"),
+            )
+            .assign(avg_order_value=lambda d: d["avg_order_value"].round(2))
+            .sort_values("avg_order_value", ascending=False)
+        )
+        safe_dict["mart_region_performance"] = reg_mart
+
     dataset_schemas: dict[str, dict[str, str]] = {}
     dataset_getters: dict[str, Any] = {}
     for tbl_name, df in safe_dict.items():
@@ -303,20 +322,62 @@ def render_text_to_chart_module(
     first_tbl = next(iter(safe_dict.keys()))
     fact_tbl = "fact_orders" if "fact_orders" in safe_dict else first_tbl
     mart_tbl = "mart_product_performance" if "mart_product_performance" in safe_dict else fact_tbl
+    reg_tbl = "mart_region_performance" if "mart_region_performance" in safe_dict else fact_tbl
 
     def _fallback_cfg(query: str) -> dict[str, Any]:
         q_l = (query or "").strip().lower()
-        if any(k in q_l for k in ("圓餅", "甜甜圈", "佔比", "地區", "區域", "城市", "pie", "donut", "region", "share")):
+        is_aov = any(k in q_l for k in ("客單價", "平均", "單價", "aov", "avg", "average"))
+        is_region = any(k in q_l for k in ("地區", "區域", "城市", "region", "city", "area"))
+
+        # 1. Regional AOV (Average Order Value by Region) -> Bar Chart on mart_region_performance
+        if is_region and is_aov and "avg_order_value" in safe_dict[reg_tbl].columns:
             return {
-                "dataset": fact_tbl,
-                "chart_type": "donut",
-                "x": "region" if "region" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[0],
-                "y": ["gross_amount" if "gross_amount" in safe_dict[fact_tbl].columns else safe_dict[fact_tbl].columns[-1]],
-                "title": "Revenue Share by Region" if is_en else "各區域 GMV 營收貢獻佔比",
+                "dataset": reg_tbl,
+                "chart_type": "bar",
+                "x": "region",
+                "y": ["avg_order_value"],
+                "title": "Average Order Value (AOV) by Region ($)" if is_en else "各地區平均客單價 (AOV) 比較 ($)",
                 "takeaway": (
-                    "Displays regional GMV contribution share across cities."
+                    "Compares average order value ($) across sales regions."
                     if is_en
-                    else "呈現各銷售區域對總 GMV 的營收貢獻佔比。"
+                    else "比較各銷售地區的平均客單價 (AOV)，呈現各地區單筆消費力差異。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+
+        # 2. Category AOV (Average Order Value by Category) -> Bar Chart on mart_product_performance
+        if is_aov and "avg_order_value" in safe_dict[mart_tbl].columns:
+            return {
+                "dataset": mart_tbl,
+                "chart_type": "bar",
+                "x": "category" if "category" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[0],
+                "y": ["avg_order_value"],
+                "title": "Average Order Value (AOV) by Category ($)" if is_en else "各品類平均客單價 (AOV) 比較 ($)",
+                "takeaway": (
+                    "Compares average order value ($) across product categories."
+                    if is_en
+                    else "比較各商品品類的平均客單價 (AOV)。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+
+        # 3. Regional GMV Share / Donut or Bar
+        if is_region or any(k in q_l for k in ("圓餅", "甜甜圈", "佔比", "pie", "donut", "share")):
+            ctype = "donut" if any(k in q_l for k in ("圓餅", "甜甜圈", "佔比", "pie", "donut", "share")) else "bar"
+            target_reg_tbl = reg_tbl if "total_gmv" in safe_dict[reg_tbl].columns else fact_tbl
+            y_reg_col = "total_gmv" if "total_gmv" in safe_dict[target_reg_tbl].columns else "gross_amount"
+            return {
+                "dataset": target_reg_tbl,
+                "chart_type": ctype,
+                "x": "region" if "region" in safe_dict[target_reg_tbl].columns else safe_dict[target_reg_tbl].columns[0],
+                "y": [y_reg_col],
+                "title": "Revenue by Region ($)" if is_en else "各區域 GMV 營收比較 ($)",
+                "takeaway": (
+                    "Displays regional GMV contribution across cities."
+                    if is_en
+                    else "呈現各銷售區域的 GMV 營收表現。"
                 ),
                 "query": query,
                 "generated_by": "fallback_rules",
@@ -491,6 +552,8 @@ def classify_dataframe_columns(
             numeric.append(c)
         else:
             categorical.append(c)
+    # Place high-cardinality primary key ID columns (e.g. order_id) after true business dimensions (region, category)
+    categorical.sort(key=lambda col: (1 if col.lower() == "id" or col.lower().endswith("_id") else 0))
     return {"temporal": temporal, "numeric": numeric, "categorical": categorical}
 
 
@@ -1043,6 +1106,21 @@ def _render_nl2chart_studio_body(
     k_chat = f"{state_prefix}_chat_hist"
     k_rendered = f"{state_prefix}_rendered_cfg"
 
+    def _clear_spec_widget_state() -> None:
+        """Clear cached selectbox/multiselect keys so newly analyzed specs take effect immediately."""
+        prefixes = (
+            f"{state_prefix}_sel_ds",
+            f"{state_prefix}_sel_ctype_",
+            f"{state_prefix}_sel_limit",
+            f"{state_prefix}_sel_color_",
+            f"{state_prefix}_sel_x_",
+            f"{state_prefix}_sel_y1_",
+            f"{state_prefix}_sel_y_",
+        )
+        for k in list(st.session_state.keys()):
+            if any(str(k).startswith(p) for p in prefixes):
+                st.session_state.pop(k, None)
+
     if k_query not in st.session_state:
         st.session_state[k_query] = (
             presets[0]["query"] if presets else "Show daily active users trend"
@@ -1083,6 +1161,7 @@ def _render_nl2chart_studio_body(
                     fallback_fn=fallback_fn,
                 )
                 st.session_state[k_draft] = cfg
+                _clear_spec_widget_state()
                 st.session_state[k_chat] = [
                     {
                         "role": "assistant",
@@ -1127,6 +1206,7 @@ def _render_nl2chart_studio_body(
                 fallback_fn=fallback_fn,
             )
         st.session_state[k_draft] = cfg
+        _clear_spec_widget_state()
         ds_k = cfg.get("dataset", "")
         x_v = cfg.get("x", "")
         y_v = cfg.get("y", [])
@@ -1441,6 +1521,7 @@ def _render_nl2chart_studio_body(
                         is_en=is_en,
                     )
                 st.session_state[k_draft] = new_cfg
+                _clear_spec_widget_state()
                 st.session_state[k_chat].append(
                     {"role": "assistant", "content": ai_reply}
                 )
