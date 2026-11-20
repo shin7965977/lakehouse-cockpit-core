@@ -972,103 +972,97 @@ def refine_ai_chart_config(
     clean_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
 
     if clean_key and dataset_schemas:
+        schema_doc = json.dumps(dataset_schemas, ensure_ascii=False, indent=2)
+        hist_text = "\n".join(
+            f"{m['role'].upper()}: {m['content']}" for m in chat_history[-8:]
+        )
+        full_prompt = (
+            f"You are a Human-in-the-Loop BI Chart Spec Assistant. {domain_context}\n"
+            "The user is inspecting a pending Plotly chart specification BEFORE rendering it.\n"
+            "They may ask a question (e.g. why a column was chosen, why daily data is missing, what a metric means) "
+            "OR ask to modify parameters (e.g. switch dataset to fact_orders, change X to event_date, set color to region, change chart_type).\n"
+            "Return ONLY a valid JSON object without markdown fences:\n"
+            "{\n"
+            '  "reply": "<concise helpful answer/confirmation in the user language>",\n'
+            '  "config": {\n'
+            '    "dataset": "<valid dataset key>",\n'
+            '    "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
+            '    "x": "<valid column>",\n'
+            '    "y": ["<valid column(s)>"],\n'
+            '    "color": "<optional valid column or null>",\n'
+            '    "limit": 12,\n'
+            '    "title": "<chart title>",\n'
+            '    "takeaway": "<1-sentence takeaway>"\n'
+            "  }\n"
+            "}\n"
+            "Rules: Only use exact columns from DATASET_SCHEMAS. Preserve unchanged fields from current_config.\n\n"
+            f"DATASET_SCHEMAS:\n{schema_doc}\n\n"
+            f"Current Chart Spec:\n{json.dumps(current_config, ensure_ascii=False, indent=2)}\n\n"
+            f"Conversation History:\n{hist_text}\n\n"
+            f"New User Message: {user_message}"
+        )
         try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=clean_key)
-            candidates = _discover_gemini_flash_models(client)
-            schema_doc = json.dumps(dataset_schemas, ensure_ascii=False, indent=2)
-            hist_text = "\n".join(
-                f"{m['role'].upper()}: {m['content']}" for m in chat_history[-8:]
+            raw_txt = generate_gemini_text(
+                api_key=clean_key,
+                prompt=full_prompt,
+                model="gemini-2.5-flash",
             )
-            system_prompt = (
-                f"You are a Human-in-the-Loop BI Chart Spec Assistant. {domain_context}\n"
-                "The user is inspecting a pending Plotly chart specification BEFORE rendering it.\n"
-                "They may ask a question (e.g. why a column was chosen, what a metric means) OR ask to modify parameters (e.g. switch to bar chart, change X/Y columns, change top-N limit).\n"
-                "Return ONLY a valid JSON object:\n"
-                "{\n"
-                '  "reply": "<concise helpful answer/confirmation in the user language>",\n'
-                '  "config": {\n'
-                '    "dataset": "<valid dataset key>",\n'
-                '    "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
-                '    "x": "<valid column>",\n'
-                '    "y": ["<valid column(s)>"],\n'
-                '    "color": "<optional valid column or null>",\n'
-                '    "limit": 12,\n'
-                '    "title": "<chart title>",\n'
-                '    "takeaway": "<1-sentence takeaway>"\n'
-                "  }\n"
-                "}\n"
-                "Rules: Only use exact columns from DATASET_SCHEMAS. Preserve unchanged fields from current_config.\n\n"
-                f"DATASET_SCHEMAS:\n{schema_doc}"
-            )
-            contents = (
-                f"Current Chart Spec:\n{json.dumps(current_config, ensure_ascii=False, indent=2)}\n\n"
-                f"Conversation History:\n{hist_text}\n\n"
-                f"New User Message: {user_message}"
-            )
-
-            for model_name in candidates:
-                try:
-                    resp = client.models.generate_content(
-                        model=model_name,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            temperature=0.1,
-                            response_mime_type="application/json",
-                        ),
+            m_json = re.search(r"\{.*\}", raw_txt, re.DOTALL)
+            if not m_json:
+                return updated, (
+                    f"❌ Gemini returned non-JSON response: {raw_txt[:200]}"
+                    if is_en
+                    else f"❌ Gemini 未回傳有效 JSON 格式：{raw_txt[:200]}"
+                )
+            parsed = json.loads(m_json.group(0))
+            reply = str(parsed.get("reply") or "").strip()
+            new_cfg = parsed.get("config") or {}
+            ds = str(new_cfg.get("dataset", updated.get("dataset", ""))).strip().lower()
+            if ds in dataset_schemas:
+                valid_cols = set(dataset_schemas[ds].keys())
+                updated["dataset"] = ds
+                ctype = str(
+                    new_cfg.get("chart_type", updated.get("chart_type", "line"))
+                ).strip().lower()
+                if ctype in SUPPORTED_CHART_TYPES:
+                    updated["chart_type"] = ctype
+                x_c = str(new_cfg.get("x", updated.get("x", ""))).strip()
+                if x_c in valid_cols:
+                    updated["x"] = x_c
+                raw_y = new_cfg.get("y", updated.get("y", []))
+                if isinstance(raw_y, str):
+                    raw_y = [raw_y]
+                valid_y = [c for c in raw_y if isinstance(c, str) and c in valid_cols]
+                if valid_y:
+                    updated["y"] = (
+                        valid_y[0]
+                        if updated.get("chart_type") == "horizontal_bar"
+                        and "event_name" in valid_y
+                        else valid_y[:3]
                     )
-                    if not resp or not resp.text:
-                        continue
-                    parsed = json.loads(resp.text.strip())
-                    reply = str(parsed.get("reply") or "").strip()
-                    new_cfg = parsed.get("config") or {}
-                    ds = str(new_cfg.get("dataset", updated.get("dataset", ""))).strip().lower()
-                    if ds in dataset_schemas:
-                        valid_cols = set(dataset_schemas[ds].keys())
-                        updated["dataset"] = ds
-                        ctype = str(
-                            new_cfg.get("chart_type", updated.get("chart_type", "line"))
-                        ).strip().lower()
-                        if ctype in SUPPORTED_CHART_TYPES:
-                            updated["chart_type"] = ctype
-                        x_c = str(new_cfg.get("x", updated.get("x", ""))).strip()
-                        if x_c in valid_cols:
-                            updated["x"] = x_c
-                        raw_y = new_cfg.get("y", updated.get("y", []))
-                        if isinstance(raw_y, str):
-                            raw_y = [raw_y]
-                        valid_y = [c for c in raw_y if isinstance(c, str) and c in valid_cols]
-                        if valid_y:
-                            updated["y"] = (
-                                valid_y[0]
-                                if updated.get("chart_type") == "horizontal_bar"
-                                and "event_name" in valid_y
-                                else valid_y[:3]
-                            )
-                        col_c = new_cfg.get("color")
-                        if col_c in valid_cols:
-                            updated["color"] = col_c
-                        elif col_c is None:
-                            updated.pop("color", None)
-                        if "limit" in new_cfg and new_cfg["limit"]:
-                            updated["limit"] = max(1, min(int(new_cfg["limit"]), 32))
-                        if new_cfg.get("title"):
-                            updated["title"] = str(new_cfg["title"])
-                        if new_cfg.get("takeaway"):
-                            updated["takeaway"] = str(new_cfg["takeaway"])
-                        updated["generated_by"] = f"gemini:{model_name}"
-                    return updated, reply or (
-                        "Updated chart specification above."
-                        if is_en
-                        else "已依據您的補充更新上方圖表參數。"
-                    )
-                except Exception:  # noqa: BLE001
-                    continue
-        except Exception:  # noqa: BLE001
-            pass
+                col_c = new_cfg.get("color")
+                if col_c in valid_cols:
+                    updated["color"] = col_c
+                elif col_c is None:
+                    updated.pop("color", None)
+                if "limit" in new_cfg and new_cfg["limit"]:
+                    updated["limit"] = max(1, min(int(new_cfg["limit"]), 32))
+                if new_cfg.get("title"):
+                    updated["title"] = str(new_cfg["title"])
+                if new_cfg.get("takeaway"):
+                    updated["takeaway"] = str(new_cfg["takeaway"])
+                updated["generated_by"] = "gemini:gemini-2.5-flash"
+            return updated, reply or (
+                "Updated chart specification above."
+                if is_en
+                else "已依據您的補充更新上方圖表參數。"
+            )
+        except Exception as exc:
+            return updated, (
+                f"❌ **Gemini API Error during refinement**: {exc}"
+                if is_en
+                else f"❌ **Gemini 對話微調呼叫失敗**：{exc}"
+            )
 
     # Deterministic offline refinement fallback (no API key needed for simple tweaks)
     msg_l = user_message.strip().lower()
@@ -1186,6 +1180,15 @@ def _render_nl2chart_studio_body(
     k_init = f"{state_prefix}_initialized"
     k_rev = f"{state_prefix}_spec_rev"
 
+    # Always resolve the freshest Gemini API Key inside the fragment (never rely on stale parameter capture)
+    live_api_key = (
+        st.session_state.get("user_gemini_key")
+        or st.session_state.get("sidebar_gemini_api_key")
+        or st.session_state.get("gemini_api_key")
+        or api_key
+        or os.getenv("GEMINI_API_KEY", "")
+    ).strip()
+
     def _clear_spec_widget_state() -> None:
         """Bump widget revision counter and clear cached selectbox keys so new specs take effect 100% of the time."""
         st.session_state[k_rev] = int(st.session_state.get(k_rev, 0)) + 1
@@ -1238,7 +1241,7 @@ def _render_nl2chart_studio_body(
                 cfg = generate_ai_chart_config(
                     query=p["query"],
                     dataset_schemas=dataset_schemas,
-                    api_key=api_key,
+                    api_key=live_api_key,
                     domain_context=domain_context,
                     fallback_fn=fallback_fn,
                 )
@@ -1283,7 +1286,7 @@ def _render_nl2chart_studio_body(
             cfg = generate_ai_chart_config(
                 query=nl_q.strip(),
                 dataset_schemas=dataset_schemas,
-                api_key=api_key,
+                api_key=live_api_key,
                 domain_context=domain_context,
                 fallback_fn=fallback_fn,
             )
@@ -1664,7 +1667,7 @@ def _render_nl2chart_studio_body(
                         user_message=followup_txt.strip(),
                         chat_history=st.session_state[k_chat],
                         dataset_schemas=dataset_schemas,
-                        api_key=api_key,
+                        api_key=live_api_key,
                         domain_context=domain_context,
                         is_en=is_en,
                     )
