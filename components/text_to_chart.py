@@ -564,17 +564,20 @@ def get_allowed_axis_columns(
     temp = col_types.get("temporal", [])
     num = col_types.get("numeric", [])
     cat = col_types.get("categorical", [])
+    color_cat = [
+        c for c in cat if c.lower() != "id" and not c.lower().endswith("_id")
+    ]
 
     if chart_type == "horizontal_bar":
-        return num, cat, cat
+        return num, cat, color_cat
     if chart_type == "donut":
         return cat, num, []
     if chart_type == "scatter":
-        return num, num, cat
+        return num, num, color_cat
     if chart_type == "dual_axis":
         return temp + cat, num, []
     # line, area, bar, stacked_bar
-    return temp + cat, num, cat
+    return temp + cat, num, color_cat
 
 
 def get_supported_chart_types_for_df(col_types: dict[str, list[str]]) -> list[str]:
@@ -1105,9 +1108,12 @@ def _render_nl2chart_studio_body(
     k_draft = f"{state_prefix}_draft_cfg"
     k_chat = f"{state_prefix}_chat_hist"
     k_rendered = f"{state_prefix}_rendered_cfg"
+    k_init = f"{state_prefix}_initialized"
+    k_rev = f"{state_prefix}_spec_rev"
 
     def _clear_spec_widget_state() -> None:
-        """Clear cached selectbox/multiselect keys so newly analyzed specs take effect immediately."""
+        """Bump widget revision counter and clear cached selectbox keys so new specs take effect 100% of the time."""
+        st.session_state[k_rev] = int(st.session_state.get(k_rev, 0)) + 1
         prefixes = (
             f"{state_prefix}_sel_ds",
             f"{state_prefix}_sel_ctype_",
@@ -1127,7 +1133,8 @@ def _render_nl2chart_studio_body(
         )
     if k_chat not in st.session_state:
         st.session_state[k_chat] = []
-    if k_draft not in st.session_state and callable(fallback_fn):
+    if k_init not in st.session_state and callable(fallback_fn):
+        st.session_state[k_init] = True
         init_cfg = fallback_fn(st.session_state[k_query])
         if init_cfg and not init_cfg.get("error"):
             st.session_state[k_draft] = dict(init_cfg)
@@ -1287,13 +1294,14 @@ def _render_nl2chart_studio_body(
                 )
 
             # Editable Parameter Controls with Typed Axis Guardrails (📅 Temporal / 🏷️ Text / 🔢 Numeric)
+            rev = int(st.session_state.get(k_rev, 0))
             r1_c1, r1_c2, r1_c3 = st.columns(3)
             with r1_c1:
                 sel_ds = st.selectbox(
                     "資料表 (Dataset)" if not is_en else "Dataset",
                     options=ds_keys,
                     index=ds_keys.index(cur_ds),
-                    key=f"{state_prefix}_sel_ds",
+                    key=f"{state_prefix}_sel_ds_{rev}",
                 )
             if sel_ds != cur_ds:
                 cur_ds = sel_ds
@@ -1337,7 +1345,7 @@ def _render_nl2chart_studio_body(
                     options=chart_types,
                     index=chart_types.index(cur_ctype),
                     format_func=lambda ct: ctype_labels.get(ct, ct),
-                    key=f"{state_prefix}_sel_ctype_{cur_ds}",
+                    key=f"{state_prefix}_sel_ctype_{cur_ds}_{rev}",
                 )
             draft_cfg["chart_type"] = sel_ctype
 
@@ -1354,7 +1362,7 @@ def _render_nl2chart_studio_body(
                         min_value=1,
                         max_value=32,
                         value=int(draft_cfg.get("limit", 12)),
-                        key=f"{state_prefix}_sel_limit",
+                        key=f"{state_prefix}_sel_limit_{rev}",
                     )
                     draft_cfg["limit"] = int(sel_limit)
                 elif allowed_color:
@@ -1367,7 +1375,7 @@ def _render_nl2chart_studio_body(
                         "顏色分組 (🏷️ 分類)" if not is_en else "Color Group (🏷️ Cat)",
                         options=color_opts,
                         index=color_idx,
-                        key=f"{state_prefix}_sel_color_{cur_ds}_{sel_ctype}",
+                        key=f"{state_prefix}_sel_color_{cur_ds}_{sel_ctype}_{rev}",
                     )
                     if sel_color == "(None)":
                         draft_cfg.pop("color", None)
@@ -1407,7 +1415,7 @@ def _render_nl2chart_studio_body(
                     options=allowed_x,
                     index=allowed_x.index(cur_x),
                     format_func=_fmt_typed,
-                    key=f"{state_prefix}_sel_x_{cur_ds}_{sel_ctype}",
+                    key=f"{state_prefix}_sel_x_{cur_ds}_{sel_ctype}_{rev}",
                 )
             draft_cfg["x"] = sel_x
 
@@ -1447,7 +1455,7 @@ def _render_nl2chart_studio_body(
                         options=allowed_y,
                         index=allowed_y.index(valid_y_defaults[0]),
                         format_func=_fmt_typed,
-                        key=f"{state_prefix}_sel_y1_{cur_ds}_{sel_ctype}",
+                        key=f"{state_prefix}_sel_y1_{cur_ds}_{sel_ctype}_{rev}",
                     )
                     draft_cfg["y"] = [sel_y_single] if sel_ctype != "horizontal_bar" else sel_y_single
                 else:
@@ -1456,7 +1464,7 @@ def _render_nl2chart_studio_body(
                         options=allowed_y,
                         default=valid_y_defaults,
                         format_func=_fmt_typed,
-                        key=f"{state_prefix}_sel_y_{cur_ds}_{sel_ctype}",
+                        key=f"{state_prefix}_sel_y_{cur_ds}_{sel_ctype}_{rev}",
                     )
                     if sel_y:
                         draft_cfg["y"] = sel_y
@@ -1549,7 +1557,9 @@ def _render_nl2chart_studio_body(
                     use_container_width=True,
                 ):
                     st.session_state.pop(k_draft, None)
+                    st.session_state.pop(k_rendered, None)
                     st.session_state[k_chat] = []
+                    _clear_spec_widget_state()
                     st.rerun(scope="fragment") if hasattr(st, "fragment") else st.rerun()
 
     # Step 3: Render Confirmed Plotly Chart (stays untouched during Q&A until user clicks Generate!)
