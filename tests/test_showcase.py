@@ -118,6 +118,13 @@ def test_duckdb_executor_readonly_guardrail_and_reflection() -> None:
     assert "fct_orders" in models["facts"]
     assert detect_pii_columns(df_customers) == ["email"]
 
+    # Fail-loud policy: Vanna offline matcher must NOT silently fall back on unrecognized prompts
+    from components.vanna_view import _match_offline_sql
+
+    sql_unmatched, err_unmatched = _match_offline_sql("請告訴我明天天氣如何", data_dict)
+    assert sql_unmatched == ""
+    assert err_unmatched != ""
+
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 

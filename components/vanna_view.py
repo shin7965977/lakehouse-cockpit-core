@@ -1,4 +1,8 @@
-"""Vanna.ai Open-Source GenBI (RAG Text-to-SQL & Auto-Plotly Charting) Component."""
+"""Vanna.ai Open-Source GenBI (RAG Text-to-SQL & Auto-Plotly Charting) Component.
+
+Enforces strict Fail-Loud policy: zero silent fallbacks. Unrecognized offline queries,
+LLM API errors, and DuckDB execution errors are surfaced explicitly in the UI.
+"""
 
 from __future__ import annotations
 
@@ -61,12 +65,19 @@ def _build_vanna_training_corpus(
     return records
 
 
-def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> str:
-    """Schema-aware fallback SQL generator when running without an external LLM key."""
-    q_low = (question or "").lower()
+def _match_offline_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> tuple[str, str]:
+    """Match question against explicit schema intents without any silent catch-all fallback.
+
+    Returns ``(sql_query, error_message)``. If the question does not match any known
+    schema rule in offline mode, ``sql_query`` is ``""`` and ``error_message`` explains why.
+    """
+    q_low = (question or "").strip().lower()
+    if not q_low:
+        return "", "Question cannot be empty."
+
     tables = {k: v for k, v in (data_dict or {}).items() if isinstance(v, pd.DataFrame) and not v.empty}
     if not tables:
-        return "SELECT 'Electronics' AS category, 52000.0 AS total_gmv, 120 AS order_count"
+        return "", "No non-empty tables available in data_dict."
 
     # 1. Time / Daily trend
     if any(k in q_low for k in ["trend", "daily", "date", "month", "趨勢", "每日", "走勢", "時間"]):
@@ -75,21 +86,22 @@ def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> st
             num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and "id" not in c.lower()]
             if date_col and num_cols:
                 metric = "units" if ("unit" in q_low or "件數" in q_low or "銷量" in q_low) and "units" in df.columns else num_cols[0]
+                alias = metric if metric.startswith("total_") else f"total_{metric}"
                 return (
                     f"SELECT CAST({date_col} AS DATE) AS report_date, "
-                    f"ROUND(SUM(CAST({metric} AS DOUBLE)), 2) AS total_{metric}\n"
+                    f"ROUND(SUM(CAST({metric} AS DOUBLE)), 2) AS {alias}\n"
                     f"FROM {tbl}\n"
                     f"GROUP BY 1\n"
                     f"ORDER BY 1 ASC\n"
-                    f"LIMIT 60"
+                    f"LIMIT 60",
+                    "",
                 )
 
-    # 2. Region / City breakdown (off-preset custom queries!)
+    # 2. Region / City breakdown
     if any(k in q_low for k in ["region", "city", "area", "taipei", "taichung", "地區", "區域", "城市", "台北", "台中", "高雄", "台南"]):
         for tbl in ("fact_orders", "fct_orders"):
             if tbl in tables and "region" in tables[tbl].columns:
-                df = tables[tbl]
-                if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價"]):
+                if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價", "單價"]):
                     agg = "ROUND(AVG(CAST(gross_amount AS DOUBLE)), 2) AS avg_order_value"
                 elif any(k in q_low for k in ["unit", "qty", "件數", "數量", "銷量"]):
                     agg = "SUM(units) AS total_units_sold"
@@ -101,45 +113,52 @@ def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> st
                     f"SELECT region, {agg}\n"
                     f"FROM {tbl}\n"
                     f"GROUP BY region\n"
-                    f"ORDER BY 2 DESC"
+                    f"ORDER BY 2 DESC",
+                    "",
                 )
+        return "", "No table with a `region` column was found in the loaded datasets."
 
-    # 3. Average Order Value (AOV) / Units / Top Individual Orders
-    if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價"]):
+    # 3. Average Order Value (AOV)
+    if any(k in q_low for k in ["avg", "aov", "average", "平均", "客單價", "單價"]):
         if "mart_product_performance" in tables and "avg_order_value" in tables["mart_product_performance"].columns:
             return (
                 "SELECT category, avg_order_value, order_count\n"
                 "FROM mart_product_performance\n"
-                "ORDER BY avg_order_value DESC"
+                "ORDER BY avg_order_value DESC",
+                "",
             )
         if "fact_orders" in tables:
             return (
                 "SELECT category, ROUND(AVG(CAST(gross_amount AS DOUBLE)), 2) AS avg_order_value, COUNT(*) AS order_count\n"
                 "FROM fact_orders\n"
                 "GROUP BY category\n"
-                "ORDER BY avg_order_value DESC"
+                "ORDER BY avg_order_value DESC",
+                "",
             )
 
+    # 4. Units / Quantity sold
     if any(k in q_low for k in ["unit", "qty", "quantity", "件數", "數量", "銷量"]):
         if "fact_orders" in tables and "units" in tables["fact_orders"].columns:
-            dim = "region" if any(k in q_low for k in ["region", "地區", "區域"]) else "category"
             return (
-                f"SELECT {dim}, SUM(units) AS total_units, ROUND(SUM(gross_amount), 2) AS total_gmv\n"
-                f"FROM fact_orders\n"
-                f"GROUP BY {dim}\n"
-                f"ORDER BY total_units DESC"
+                "SELECT category, SUM(units) AS total_units, ROUND(SUM(gross_amount), 2) AS total_gmv\n"
+                "FROM fact_orders\n"
+                "GROUP BY category\n"
+                "ORDER BY total_units DESC",
+                "",
             )
 
+    # 5. Top Individual Orders
     if any(k in q_low for k in ["top", "highest", "單筆", "最高", "大單", "前10", "前十"]):
         if "fact_orders" in tables:
             return (
                 "SELECT order_id, gross_amount, category, region, event_date\n"
                 "FROM fact_orders\n"
                 "ORDER BY gross_amount DESC\n"
-                "LIMIT 10"
+                "LIMIT 10",
+                "",
             )
 
-    # 4. Return / Refund / Status
+    # 6. Return / Refund / Status
     if any(k in q_low for k in ["return", "refund", "status", "退貨", "退款", "狀態"]):
         for tbl in ("mart_product_performance", "fact_orders", "fct_orders"):
             if tbl in tables:
@@ -153,32 +172,43 @@ def _select_default_sql(question: str, data_dict: dict[str, pd.DataFrame]) -> st
                     None,
                 )
                 agg = f"ROUND(AVG(CAST({ret} AS DOUBLE)), 2) AS avg_{ret}" if ret else "COUNT(*) AS record_count"
-                return f"SELECT {dim}, {agg}, COUNT(*) AS records FROM {tbl} GROUP BY {dim} ORDER BY 2 DESC LIMIT 15"
+                return f"SELECT {dim}, {agg}, COUNT(*) AS records FROM {tbl} GROUP BY {dim} ORDER BY 2 DESC LIMIT 15", ""
 
-    # Default: Category / Product ranking
-    pref_tbl = (
-        "mart_product_performance"
-        if "mart_product_performance" in tables
-        else next(iter(tables.keys()))
-    )
-    df = tables[pref_tbl]
-    dim_col = next(
-        (c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])),
-        df.columns[0],
-    )
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and "id" not in c.lower()]
-    metric_col = num_cols[0] if num_cols else None
-    agg_expr = (
-        f"ROUND(SUM(CAST({metric_col} AS DOUBLE)), 2) AS total_{metric_col}"
-        if metric_col
-        else "COUNT(*) AS record_count"
-    )
+    # 7. Explicit Category / Product revenue or performance
+    if any(k in q_low for k in ["category", "categories", "product", "revenue", "gmv", "sales", "品類", "類別", "商品", "營收", "銷售", "業績"]):
+        pref_tbl = (
+            "mart_product_performance"
+            if "mart_product_performance" in tables
+            else next(iter(tables.keys()))
+        )
+        df = tables[pref_tbl]
+        dim_col = next(
+            (c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])),
+            df.columns[0],
+        )
+        num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and "id" not in c.lower()]
+        metric_col = num_cols[0] if num_cols else None
+        alias = metric_col if (metric_col and metric_col.startswith("total_")) else f"total_{metric_col}"
+        agg_expr = (
+            f"ROUND(SUM(CAST({metric_col} AS DOUBLE)), 2) AS {alias}"
+            if metric_col
+            else "COUNT(*) AS record_count"
+        )
+        return (
+            f"SELECT {dim_col}, {agg_expr}\n"
+            f"FROM {pref_tbl}\n"
+            f"GROUP BY {dim_col}\n"
+            f"ORDER BY 2 DESC\n"
+            f"LIMIT 15",
+            "",
+        )
+
+    # STRICT NO SILENT FALLBACK: refuse to guess an unrelated default table!
     return (
-        f"SELECT {dim_col}, {agg_expr}\n"
-        f"FROM {pref_tbl}\n"
-        f"GROUP BY {dim_col}\n"
-        f"ORDER BY 2 DESC\n"
-        f"LIMIT 15"
+        "",
+        "Offline rule parser could not match your question to any known schema dimension/metric "
+        "(supported offline dimensions: category, region, event_date, return_rate, avg_order_value, units, top orders). "
+        "Please provide a Gemini API Key to enable full Vanna LLM Text-to-SQL generation.",
     )
 
 
@@ -187,11 +217,14 @@ def _synthesize_sql_with_vanna_rag(
     corpus: list[dict[str, str]],
     data_dict: dict[str, pd.DataFrame],
     api_key: str,
-) -> tuple[str, str]:
-    """Generate DuckDB SQL using Vanna RAG corpus + Gemini if API key is available."""
-    fallback_sql = _select_default_sql(question, data_dict)
+) -> tuple[str, str, str]:
+    """Generate DuckDB SQL without silent fallbacks.
+
+    Returns ``(sql_query, engine_badge, error_message)``.
+    """
     if not api_key:
-        return fallback_sql, "Vanna Local RAG + DuckDB"
+        sql, err = _match_offline_sql(question, data_dict)
+        return sql, "Vanna Local RAG + DuckDB (Offline Rule Mode)", err
 
     try:
         from google import genai
@@ -199,30 +232,29 @@ def _synthesize_sql_with_vanna_rag(
         rag_context = "\n\n".join(f"[{r['type'].upper()}] {r['content']}" for r in corpus[:12])
         prompt = (
             "You are Vanna.ai, an open-source RAG Text-to-SQL engine running on DuckDB.\n"
-            "Use ONLY the trained DDL and dbt documentation below to write a single valid DuckDB SELECT query.\n\n"
+            "Use ONLY the trained DDL and dbt documentation below to write a single valid DuckDB SELECT query.\n"
+            "If the user's request cannot be answered using the provided tables/columns, return starting with 'ERROR: <reason>'.\n\n"
             f"{rag_context}\n\n"
             f"Question: {question}\n"
-            "Return ONLY the raw SQL query without markdown fences."
+            "Return ONLY the raw SQL query (or 'ERROR: <reason>') without markdown fences."
         )
         client = genai.Client(api_key=api_key)
         resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        candidate_sql = (resp.text or "").strip().strip("`").replace("sql\n", "").strip().rstrip(";")
-        if candidate_sql.upper().startswith("SELECT") or candidate_sql.upper().startswith("WITH"):
-            test_df, err = execute_readonly_duckdb(candidate_sql, data_dict)
-            if not err and not test_df.empty:
-                return candidate_sql, "Vanna RAG + Gemini + DuckDB"
-    except Exception:
-        pass
-
-    return fallback_sql, "Vanna Local RAG + DuckDB"
+        candidate = (resp.text or "").strip().strip("`").replace("sql\n", "").strip().rstrip(";")
+        if candidate.upper().startswith("ERROR:"):
+            return "", "Vanna RAG + Gemini + DuckDB", candidate
+        if not (candidate.upper().startswith("SELECT") or candidate.upper().startswith("WITH")):
+            return candidate, "Vanna RAG + Gemini + DuckDB", f"LLM did not return a valid SELECT query: {candidate}"
+        return candidate, "Vanna RAG + Gemini + DuckDB", ""
+    except Exception as exc:
+        return "", "Vanna RAG + Gemini + DuckDB", f"Gemini API Error: {exc}"
 
 
 def _build_auto_plotly_figure(
     df: pd.DataFrame,
     chart_type: str,
-    title: str,
 ) -> go.Figure:
-    """Automatically synthesize a responsive Plotly figure from a DuckDB query result DataFrame."""
+    """Synthesize a Plotly figure whose title strictly reflects the actual projected columns."""
     if df is None or df.empty:
         return go.Figure()
 
@@ -230,25 +262,38 @@ def _build_auto_plotly_figure(
     non_num_cols = [c for c in df.columns if c not in num_cols]
     x_col = non_num_cols[0] if non_num_cols else df.columns[0]
     y_col = num_cols[0] if num_cols else df.columns[-1]
+    truthful_title = f"{y_col} by {x_col}"
 
     resolved_type = chart_type.lower()
     if resolved_type == "auto":
         if "date" in x_col.lower() or "time" in x_col.lower() or pd.api.types.is_datetime64_any_dtype(df[x_col]):
             resolved_type = "line"
-        elif len(df) <= 6 and "rate" not in y_col.lower():
-            resolved_type = "bar"
         else:
             resolved_type = "bar"
 
     if resolved_type == "line":
-        fig = px.line(df, x=x_col, y=y_col, markers=True, title=title, template="plotly_white")
+        fig = px.line(df, x=x_col, y=y_col, markers=True, title=truthful_title, template="plotly_white")
     elif resolved_type == "pie":
-        fig = px.pie(df, names=x_col, values=y_col, title=title, hole=0.35, template="plotly_white")
+        fig = px.pie(df, names=x_col, values=y_col, title=truthful_title, hole=0.35, template="plotly_white")
     elif resolved_type == "scatter":
         y2 = num_cols[1] if len(num_cols) > 1 else y_col
-        fig = px.scatter(df, x=x_col, y=y2, size=y_col if y_col in num_cols else None, title=title, template="plotly_white")
+        fig = px.scatter(
+            df,
+            x=x_col,
+            y=y2,
+            size=y_col if y_col in num_cols else None,
+            title=f"{y2} vs {x_col}",
+            template="plotly_white",
+        )
     else:
-        fig = px.bar(df, x=x_col, y=y_col, color=x_col if len(df) <= 10 else None, title=title, template="plotly_white")
+        fig = px.bar(
+            df,
+            x=x_col,
+            y=y_col,
+            color=x_col if len(df) <= 10 else None,
+            title=truthful_title,
+            template="plotly_white",
+        )
 
     fig.update_layout(margin={"l": 20, "r": 20, "t": 48, "b": 20}, height=380)
     return fig
@@ -341,7 +386,7 @@ def render_vanna_view(
         ):
             st.session_state["vanna_question_input"] = preset_q3
 
-    q_col, chart_col = st.columns([3.5, 1.5])
+    q_col, chart_col, btn_col = st.columns([3.0, 1.1, 0.9])
     with q_col:
         question = st.text_input(
             "Ask Vanna to generate an ad-hoc SQL query & chart:"
@@ -355,6 +400,14 @@ def render_vanna_view(
             options=["Auto", "Bar", "Line", "Pie", "Scatter"],
             key="vanna_chart_type_select",
         )
+    with btn_col:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        st.button(
+            "🚀 Run" if is_en else "🚀 執行生圖",
+            type="primary",
+            use_container_width=True,
+            key="vanna_run_btn",
+        )
 
     active_api_key = (
         st.session_state.get("user_gemini_key")
@@ -363,16 +416,41 @@ def render_vanna_view(
         or os.getenv("GEMINI_API_KEY", "")
     ).strip()
 
-    sql_query, engine_badge = _synthesize_sql_with_vanna_rag(
+    sql_query, engine_badge, synth_err = _synthesize_sql_with_vanna_rag(
         question=question,
         corpus=corpus,
         data_dict=reflection.data_dict,
         api_key=active_api_key,
     )
-    res_df, err = execute_readonly_duckdb(sql_query, reflection.data_dict)
-    if err or res_df.empty:
-        sql_query = _select_default_sql(question, reflection.data_dict)
-        res_df, err = execute_readonly_duckdb(sql_query, reflection.data_dict)
+
+    if synth_err:
+        st.error(
+            f"❌ **Query Synthesis Failed ({engine_badge})**: {synth_err}"
+            if is_en
+            else f"❌ **SQL 生成失敗（{engine_badge}）**：{synth_err}"
+        )
+        if sql_query:
+            st.code(sql_query, language="sql")
+        return
+
+    res_df, exec_err = execute_readonly_duckdb(sql_query, reflection.data_dict)
+    if exec_err:
+        st.error(
+            f"❌ **DuckDB Execution Error ({engine_badge})**: {exec_err}"
+            if is_en
+            else f"❌ **DuckDB 執行錯誤（{engine_badge}）**：{exec_err}"
+        )
+        st.code(sql_query, language="sql")
+        return
+
+    if res_df.empty:
+        st.warning(
+            "⚠️ Query executed successfully but returned 0 rows."
+            if is_en
+            else "⚠️ SQL 執行成功，但查詢結果為 0 筆資料。"
+        )
+        st.code(sql_query, language="sql")
+        return
 
     st.caption(
         f"⚡ **Engine**: `{engine_badge}` &nbsp;|&nbsp; **Rows Returned**: `{len(res_df)}`"
@@ -380,7 +458,7 @@ def render_vanna_view(
         else f"⚡ **執行引擎**：`{engine_badge}` &nbsp;|&nbsp; **檢索筆數**：`{len(res_df)}`"
     )
 
-    fig = _build_auto_plotly_figure(res_df, chart_type=chart_type, title=question)
+    fig = _build_auto_plotly_figure(res_df, chart_type=chart_type)
     st.plotly_chart(fig, use_container_width=True)
 
     c_sql, c_data = st.columns([0.95, 1.05])

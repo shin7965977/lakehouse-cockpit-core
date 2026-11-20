@@ -299,19 +299,28 @@ def render_sql_workbench(
             if is_en
             else "##### 📊 即時資料表預覽 (`LIMIT 50`)"
         )
+        preview_df: pd.DataFrame | None = None
         try:
             preview_df = _run_sandbox_query(
                 adapter=adapter,
                 sql_query=f"SELECT * FROM {model_name} LIMIT 50;",
                 data_dict=data_dict,
             )
-        except Exception:
-            preview_df = data_dict.get(model_name, pd.DataFrame()).head(50)
+        except Exception as exc:
+            st.error(
+                f"❌ Preview Query Error for `{model_name}`: {exc}"
+                if is_en
+                else f"❌ `{model_name}` 預覽查詢失敗：{exc}"
+            )
 
         if preview_df is not None and not preview_df.empty:
             st.dataframe(preview_df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No rows available for preview.")
+        elif preview_df is not None:
+            st.warning(
+                "No rows available for preview."
+                if is_en
+                else "目前預覽查詢結果為 0 筆。"
+            )
 
     with col_sql:
         st.markdown(
