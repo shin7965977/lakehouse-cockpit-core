@@ -1,4 +1,4 @@
-"""Conversational Analytics Engineering Copilot Drawer Component with Mandatory BYOK Wall."""
+"""Database-Aware Conversational DataBot Component with Mandatory BYOK Wall."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _delete_persisted_key() -> None:
             pass
 
 
-def render_ai_drawer(
+def render_databot(
     active_scope_id: str,
     active_scope_title: str,
     default_prompt_en: str,
@@ -394,3 +394,7 @@ def render_ai_drawer(
                     st.session_state["active_on_demand_insight"] = insight_res
                     st.session_state.pop("locked_spec_contract", None)
                     st.rerun()
+
+
+# Backward-compatible alias
+render_ai_drawer = render_databot

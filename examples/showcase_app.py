@@ -29,9 +29,8 @@ from adapter import (  # noqa: E402
     MetricComponent,
     OnDemandInsightResult,
 )
-from components.ai_drawer import render_ai_drawer  # noqa: E402
 from components.data_center import render_data_center_view  # noqa: E402
-from components.kpi_grid import render_kpi_grid  # noqa: E402
+from components.databot import render_databot  # noqa: E402
 from components.looker_view import render_looker_enterprise_view  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
 from components.schema_designer import render_schema_designer_view  # noqa: E402
@@ -40,6 +39,7 @@ from components.sql_workbench import (  # noqa: E402
     render_sql_snippet_module,
     render_sql_workbench,
 )
+from components.wrenai_view import render_wrenai_view  # noqa: E402
 from styles import MODERN_COCKPIT_CSS  # noqa: E402
 
 
@@ -482,30 +482,10 @@ def build_component_registry(
 
     return [
         ShowcaseComponentSpec(
-            id="kpi_grid",
-            tab_title_en="📊 KPI Grid",
-            tab_title_zh="📊 KPI 網格",
-            storybook_label="1. kpi_grid.py",
-            fn_signature="render_kpi_grid()",
-            source_files=("components/kpi_grid.py",),
-            snippet="render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)",
-            description_en="4-card executive KPI grid with health status badges and formula hover tooltips.",
-            description_zh="4 卡片高階 KPI 網格，支援健康度狀態標籤與公式 Hover Tooltip。",
-            problem_solved_en=(
-                "Eliminates executive metric ambiguity ('how is Return Rate calculated?') by displaying "
-                "numerator/denominator definitions on hover alongside automated Normal/Warning threshold badges."
-            ),
-            problem_solved_zh=(
-                "解決高階主管看報表時常見的『指標口徑黑箱』問題——滑鼠懸停即可看到分子/分母定義，並以紅綠燈自動標記異常指標。"
-            ),
-            placement_in_mode_a="top_kpi",
-            render=lambda: render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en),
-        ),
-        ShowcaseComponentSpec(
             id="on_demand_panel",
             tab_title_en="🔍 On-Demand Insight",
             tab_title_zh="🔍 洞察面板 (On-Demand)",
-            storybook_label="2. on_demand_panel.py",
+            storybook_label="1. on_demand_panel.py",
             fn_signature="render_on_demand_insight_panel()",
             source_files=("components/on_demand_panel.py",),
             snippet="render_on_demand_insight_panel(insight=OnDemandInsightResult(...), is_en=is_en)",
@@ -520,6 +500,26 @@ def build_component_registry(
             ),
             placement_in_mode_a="workspace_tab",
             render=lambda: render_on_demand_insight_panel(insight=sample_insight, is_en=is_en),
+        ),
+        ShowcaseComponentSpec(
+            id="wrenai_view",
+            tab_title_en="📊 WrenAI Ad-Hoc Charts",
+            tab_title_zh="📊 WrenAI 臨時生圖",
+            storybook_label="2. wrenai_view.py",
+            fn_signature="render_wrenai_view()",
+            source_files=("components/wrenai_view.py",),
+            snippet="render_wrenai_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
+            description_en="Embedded open-source WrenAI GenBI iframe for ad-hoc natural language charting backed by dbt-synced MDL.",
+            description_zh="嵌入開源 WrenAI GenBI（iframe），透過與 dbt 同步的 MDL 語意層提供 Ad-Hoc 自然語言生圖。",
+            problem_solved_en=(
+                "Replaces brittle hand-coded text-to-chart scripts with open-source WrenAI's governed "
+                "semantic-layer SQL & charting engine for ad-hoc exploration."
+            ),
+            problem_solved_zh=(
+                "避免重複造輪子維護上千行手寫生圖邏輯，直接嵌入開源 WrenAI 處理複雜多表 Join 與臨時 Ad-Hoc 自然語言生圖。"
+            ),
+            placement_in_mode_a="workspace_tab",
+            render=lambda: render_wrenai_view(adapter=adapter, data_dict=data_dict, is_en=is_en),
         ),
         ShowcaseComponentSpec(
             id="sql_workbench",
@@ -611,24 +611,24 @@ def build_component_registry(
             render=render_data_center_view,
         ),
         ShowcaseComponentSpec(
-            id="ai_drawer",
-            tab_title_en="🤖 AI Drawer",
-            tab_title_zh="🤖 AI 抽屜",
-            storybook_label="7. ai_drawer.py",
-            fn_signature="render_ai_drawer()",
-            source_files=("components/ai_drawer.py",),
-            snippet="render_ai_drawer(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
-            description_en="7:3 split conversational AI Copilot drawer with BYOK guard, System Prompt Playground, and offline mock mode.",
-            description_zh="7:3 雙欄對話式 AI Copilot 抽屜，內建 BYOK 金鑰安全牆、System Prompt Playground 與離線 Mock 診斷。",
+            id="databot",
+            tab_title_en="🤖 DataBot",
+            tab_title_zh="🤖 資料庫問答 DataBot",
+            storybook_label="7. databot.py",
+            fn_signature="render_databot()",
+            source_files=("components/databot.py",),
+            snippet="render_databot(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
+            description_en="Lightweight database-aware chatbot drawer for quick text Q&A over Lakehouse tables without generating charts.",
+            description_zh="輕量級資料庫問答 Chatbot 抽屜，適合快速查數字、問欄位與口徑解釋（不額外生圖），內建 BYOK 金鑰安全牆。",
             problem_solved_en=(
-                "Solves enterprise AI trust & cost concerns with strict BYOK key isolation, live-editable "
-                "System Prompts for transparency, and contextual diagnosis without leaving the dashboard."
+                "Gives stakeholders instant text answers directly from database tables when they only "
+                "need a quick number or metric explanation—without opening a full BI or charting tool."
             ),
             problem_solved_zh=(
-                "解決企業導入 AI 助理時的『資安金鑰顧慮與黑箱 Prompt』痛點，提供 BYOK 本地隔離與可即時檢視修改的 System Prompt Playground。"
+                "解決日常『只想快速問資料庫一個數字或口徑，不需要特別畫圖或開 BI』的輕量查詢痛點，並透過 BYOK 保障金鑰隔離。"
             ),
             placement_in_mode_a="right_drawer",
-            render=lambda: render_ai_drawer(
+            render=lambda: render_databot(
                 active_scope_id="showcase",
                 active_scope_title="SHOWCASE",
                 default_prompt_en=adapter.default_system_prompt_en,
@@ -681,9 +681,8 @@ def _render_integrated_cockpit_mode_a(
     registry: list[ShowcaseComponentSpec],
     is_en: bool,
 ) -> None:
-    """Mode A: Consumes the unified `registry` to render left sidebar ops, top KPI, workspace tabs, and right AI drawer."""
+    """Mode A: Consumes the unified `registry` to render left sidebar ops, workspace tabs, and right DataBot drawer."""
     sidebar_specs = [c for c in registry if c.placement_in_mode_a == "left_sidebar"]
-    top_kpi = next(c for c in registry if c.placement_in_mode_a == "top_kpi")
     workspace_specs = [c for c in registry if c.placement_in_mode_a == "workspace_tab"]
     right_drawer = next(c for c in registry if c.placement_in_mode_a == "right_drawer")
 
@@ -697,15 +696,12 @@ def _render_integrated_cockpit_mode_a(
     with main_col:
         st.title(adapter.brand_title)
         st.caption(
-            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Conversational Analytics Copilot"
+            "Live Lakehouse Intelligence · Enterprise Medallion Architecture · DataBot & WrenAI GenBI"
         )
-
-        # 1. Top KPI Grid from unified registry
-        top_kpi.render()
 
         st.markdown("---")
 
-        # 2. Embedded Tabbed Feature Workspace dynamically built from unified registry
+        # Embedded Tabbed Feature Workspace dynamically built from unified registry
         feature_tabs = st.tabs(
             [spec.tab_title_en if is_en else spec.tab_title_zh for spec in workspace_specs]
         )

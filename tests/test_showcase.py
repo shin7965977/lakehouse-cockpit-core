@@ -76,13 +76,13 @@ def test_showcase_mode_b_storybook_catalog() -> None:
     # Verify switching across representative Storybook catalog items
     catalog_radio = next(r for r in at.radio if r.key == "storybook_selected_component")
     for cid in [
-        "kpi_grid",
         "on_demand_panel",
+        "wrenai_view",
         "sql_workbench",
         "looker_view",
         "schema_designer",
         "data_center",
-        "ai_drawer",
+        "databot",
         "sidebar_ops",
     ]:
         catalog_radio.set_value(cid).run(timeout=15)

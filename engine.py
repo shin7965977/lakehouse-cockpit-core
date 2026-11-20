@@ -12,8 +12,7 @@ import streamlit as st
 
 try:
     from .adapter import BaseCockpitAdapter
-    from .components.ai_drawer import render_ai_drawer
-    from .components.kpi_grid import render_kpi_grid
+    from .components.databot import render_databot
     from .components.looker_view import render_looker_enterprise_view
     from .components.on_demand_panel import render_on_demand_insight_panel
     from .components.sidebar_ops import render_sidebar_pipeline_ops
@@ -21,8 +20,7 @@ try:
     from .styles import MODERN_COCKPIT_CSS
 except ImportError:
     from adapter import BaseCockpitAdapter
-    from components.ai_drawer import render_ai_drawer
-    from components.kpi_grid import render_kpi_grid
+    from components.databot import render_databot
     from components.looker_view import render_looker_enterprise_view
     from components.on_demand_panel import render_on_demand_insight_panel
     from components.sidebar_ops import render_sidebar_pipeline_ops
@@ -143,10 +141,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
                 "Live Lakehouse Intelligence · Enterprise Medallion Architecture · Conversational Analytics Copilot"
             )
 
-        # 1. Responsive KPI Grid with ReadCall-style Hover Tooltips
-        render_kpi_grid(cards=adapter.kpi_cards, data_dict=data_dict, is_en=is_en)
-
-        # 1.5 Conditional Stakeholder On-Demand Insight Panel
+        # 1. Conditional Stakeholder On-Demand Insight Panel
         active_insight = st.session_state.get("active_on_demand_insight")
         if active_insight is not None:
             st.markdown("---")
@@ -235,7 +230,7 @@ def launch_cockpit_app(adapter: BaseCockpitAdapter) -> None:
     # Right-Hand AI Copilot Drawer (Open Conversational Understanding)
     if ai_col is not None:
         with ai_col:
-            render_ai_drawer(
+            render_databot(
                 active_scope_id=selected_layer,
                 active_scope_title=selected_layer.upper(),
                 default_prompt_en=adapter.default_system_prompt_en,
