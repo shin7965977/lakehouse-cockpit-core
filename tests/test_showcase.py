@@ -118,6 +118,25 @@ def test_duckdb_executor_readonly_guardrail_and_reflection() -> None:
     assert "fct_orders" in models["facts"]
     assert detect_pii_columns(df_customers) == ["email"]
 
+    # Deterministic SQL Compiler eliminates duplicate X-axis rows before plotting
+    from components.text_to_chart import compile_spec_to_duckdb_sql
+
+    df_dup = pd.DataFrame(
+        {
+            "event_date": ["2026-10-01", "2026-10-01", "2026-10-02"],
+            "region": ["Taipei", "Taipei", "Taichung"],
+            "gross_amount": [100.0, 200.0, 300.0],
+        }
+    )
+    sql, agg_df, err = compile_spec_to_duckdb_sql(
+        {"dataset": "fact_orders", "chart_type": "line", "x": "event_date", "y": ["gross_amount"], "agg": "SUM"},
+        df_dup,
+    )
+    assert err == ""
+    assert "GROUP BY" in sql
+    assert len(agg_df) == 2
+    assert float(agg_df.iloc[0]["gross_amount"]) == 300.0
+
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 

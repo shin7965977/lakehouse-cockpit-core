@@ -16,14 +16,17 @@ import streamlit as st
 
 try:
     from ..adapter import BaseCockpitAdapter
-    from ..services.duckdb_executor import generate_gemini_text
+    from ..services.duckdb_executor import execute_readonly_duckdb, generate_gemini_text
 except (ImportError, ValueError):
     try:
         from adapter import BaseCockpitAdapter
-        from services.duckdb_executor import generate_gemini_text
+        from services.duckdb_executor import execute_readonly_duckdb, generate_gemini_text
     except (ImportError, ValueError):
         from cockpit_core.adapter import BaseCockpitAdapter
-        from cockpit_core.services.duckdb_executor import generate_gemini_text
+        from cockpit_core.services.duckdb_executor import (
+            execute_readonly_duckdb,
+            generate_gemini_text,
+        )
 
 
 BUSINESS_CHART_KEYWORDS = (
@@ -332,34 +335,84 @@ def render_text_to_chart_module(
         q_l = (query or "").strip().lower()
         is_aov = any(k in q_l for k in ("客單價", "平均", "單價", "aov", "avg", "average"))
         is_region = any(k in q_l for k in ("地區", "區域", "城市", "region", "city", "area"))
+        is_daily = any(k in q_l for k in ("每日", "趨勢", "走勢", "時間", "日期", "daily", "trend", "date", "time"))
+        is_cat = any(k in q_l for k in ("品類", "品項", "項目", "類別", "商品", "產品", "category", "product", "item", "sku"))
 
-        # 1. Regional AOV (Average Order Value by Region) -> Bar Chart on mart_region_performance
-        if is_region and is_aov and "avg_order_value" in safe_dict[reg_tbl].columns:
+        # 0. Dual-Dimension: Daily by Region or Category (SQL GROUP BY event_date, region/category)
+        if is_daily and is_region and {"event_date", "region", "gross_amount"}.issubset(safe_dict[fact_tbl].columns):
+            agg_mode = "AVG" if is_aov else "SUM"
             return {
-                "dataset": reg_tbl,
-                "chart_type": "bar",
-                "x": "region",
-                "y": ["avg_order_value"],
-                "title": "Average Order Value (AOV) by Region ($)" if is_en else "各地區平均客單價 (AOV) 比較 ($)",
-                "takeaway": (
-                    "Compares average order value ($) across sales regions."
+                "dataset": fact_tbl,
+                "chart_type": "line",
+                "x": "event_date",
+                "y": ["gross_amount"],
+                "color": "region",
+                "agg": agg_mode,
+                "title": (
+                    f"Daily {'Average Order Value' if is_aov else 'Revenue'} by Region (USD)"
                     if is_en
-                    else "比較各銷售地區的平均客單價 (AOV)，呈現各地區單筆消費力差異。"
+                    else f"各地區每日{'平均客單價' if is_aov else '總銷售額'}趨勢 (USD)"
+                ),
+                "takeaway": (
+                    "Compares daily sales trajectories across all regions via DuckDB GROUP BY event_date, region."
+                    if is_en
+                    else "透過 DuckDB SQL 依日期與地區雙維度聚合，呈現各地區每日銷售走勢。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+        if is_daily and is_cat and {"event_date", "category", "gross_amount"}.issubset(safe_dict[fact_tbl].columns):
+            agg_mode = "AVG" if is_aov else "SUM"
+            return {
+                "dataset": fact_tbl,
+                "chart_type": "line",
+                "x": "event_date",
+                "y": ["gross_amount"],
+                "color": "category",
+                "agg": agg_mode,
+                "title": (
+                    f"Daily {'Average Order Value' if is_aov else 'Revenue'} by Category (USD)"
+                    if is_en
+                    else f"各品類每日{'平均客單價' if is_aov else '總銷售額'}趨勢 (USD)"
+                ),
+                "takeaway": (
+                    "Compares daily sales trajectories across product categories via DuckDB GROUP BY event_date, category."
+                    if is_en
+                    else "透過 DuckDB SQL 依日期與品類雙維度聚合，呈現各品類每日走勢。"
                 ),
                 "query": query,
                 "generated_by": "fallback_rules",
             }
 
-        # 2. Category AOV (Average Order Value by Category) -> Bar Chart on mart_product_performance
+        # 1. Regional AOV (Average Order Value by Region) -> Bar Chart on fact_orders with AVG
+        if is_region and is_aov and {"region", "gross_amount"}.issubset(safe_dict[fact_tbl].columns):
+            return {
+                "dataset": fact_tbl,
+                "chart_type": "bar",
+                "x": "region",
+                "y": ["gross_amount"],
+                "agg": "AVG",
+                "title": "Average Order Value (AOV) by Region (USD)" if is_en else "各地區平均客單價 (AOV) 比較 (USD)",
+                "takeaway": (
+                    "Compares average order value (AVG gross_amount) across sales regions."
+                    if is_en
+                    else "透過 DuckDB AVG 聚合比較各銷售地區的平均客單價 (AOV)。"
+                ),
+                "query": query,
+                "generated_by": "fallback_rules",
+            }
+
+        # 2. Category AOV (Average Order Value by Category)
         if is_aov and "avg_order_value" in safe_dict[mart_tbl].columns:
             return {
                 "dataset": mart_tbl,
                 "chart_type": "bar",
                 "x": "category" if "category" in safe_dict[mart_tbl].columns else safe_dict[mart_tbl].columns[0],
                 "y": ["avg_order_value"],
-                "title": "Average Order Value (AOV) by Category ($)" if is_en else "各品類平均客單價 (AOV) 比較 ($)",
+                "agg": "AVG",
+                "title": "Average Order Value (AOV) by Category (USD)" if is_en else "各品類平均客單價 (AOV) 比較 (USD)",
                 "takeaway": (
-                    "Compares average order value ($) across product categories."
+                    "Compares average order value (USD) across product categories."
                     if is_en
                     else "比較各商品品類的平均客單價 (AOV)。"
                 ),
@@ -377,7 +430,8 @@ def render_text_to_chart_module(
                 "chart_type": ctype,
                 "x": "region" if "region" in safe_dict[target_reg_tbl].columns else safe_dict[target_reg_tbl].columns[0],
                 "y": [y_reg_col],
-                "title": "Revenue by Region ($)" if is_en else "各區域 GMV 營收比較 ($)",
+                "agg": "SUM",
+                "title": "Revenue by Region (USD)" if is_en else "各區域 GMV 營收比較 (USD)",
                 "takeaway": (
                     "Displays regional GMV contribution across cities."
                     if is_en
@@ -505,6 +559,112 @@ SUPPORTED_CHART_TYPES: tuple[str, ...] = (
     "scatter",
     "dual_axis",
 )
+
+SUPPORTED_AGGREGATIONS: tuple[str, ...] = (
+    "SUM",
+    "AVG",
+    "COUNT",
+    "MAX",
+    "MIN",
+    "NONE",
+)
+
+
+def compile_spec_to_duckdb_sql(
+    config: dict[str, Any],
+    df: pd.DataFrame,
+) -> tuple[str, pd.DataFrame, str]:
+    """Deterministically compile a validated Chart Spec into read-only DuckDB SQL and execute it.
+
+    Eliminates duplicate X-axis sawtooth artifacts by grouping & aggregating before Plotly rendering.
+    Returns ``(compiled_sql, aggregated_df, error_message)``.
+    """
+    if df is None or df.empty:
+        return "", pd.DataFrame(), "Target dataset is empty."
+
+    valid_cols = set(df.columns)
+    ds_name = str(config.get("dataset") or "active_table")
+    safe_ds = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in ds_name) or "active_table"
+    ctype = str(config.get("chart_type", "line")).strip().lower()
+    agg = str(config.get("agg", "NONE" if ctype == "scatter" else "SUM")).strip().upper()
+    if agg not in SUPPORTED_AGGREGATIONS:
+        agg = "NONE" if ctype == "scatter" else "SUM"
+
+    x_col = str(config.get("x", "")).strip()
+    raw_y = config.get("y", [])
+    y_cols = [raw_y] if isinstance(raw_y, str) else [str(c).strip() for c in (raw_y or [])]
+    color_col = config.get("color")
+    valid_color = str(color_col).strip() if color_col and str(color_col).strip() in valid_cols else None
+
+    if x_col not in valid_cols:
+        return "", pd.DataFrame(), f"X-axis column `{x_col}` not found in `{safe_ds}`."
+    y_cols = [c for c in y_cols if c in valid_cols]
+    if not y_cols:
+        return "", pd.DataFrame(), f"No valid Y-axis columns found in `{safe_ds}`."
+
+    def _q(col: str) -> str:
+        return '"' + col.replace('"', '""') + '"'
+
+    # Raw unaggregated mode (scatter or explicit NONE)
+    if ctype == "scatter" or agg == "NONE":
+        proj = [x_col] + [c for c in y_cols if c != x_col]
+        if valid_color and valid_color not in proj:
+            proj.append(valid_color)
+        sql = f"SELECT {', '.join(_q(c) for c in proj)}\nFROM {_q(safe_ds)}"
+        res_df, err = execute_readonly_duckdb(sql, {safe_ds: df})
+        return sql, res_df, err
+
+    # Horizontal bar: X is numeric, Y[0] is categorical
+    if ctype == "horizontal_bar":
+        cat_col = y_cols[0]
+        num_col = x_col
+        group_cols = [cat_col] + ([valid_color] if valid_color and valid_color != cat_col else [])
+        metric_expr = (
+            f"COUNT({_q(num_col)}) AS {_q(num_col)}"
+            if agg == "COUNT"
+            else f"ROUND({agg}(CAST({_q(num_col)} AS DOUBLE)), 2) AS {_q(num_col)}"
+        )
+        limit_n = max(1, min(int(config.get("limit", 12)), 50))
+        grp_select = ", ".join(_q(c) for c in group_cols)
+        grp_by = ", ".join(str(i + 1) for i in range(len(group_cols)))
+        sql = (
+            f"SELECT {grp_select}, {metric_expr}\n"
+            f"FROM {_q(safe_ds)}\n"
+            f"GROUP BY {grp_by}\n"
+            f"ORDER BY {_q(num_col)} DESC\n"
+            f"LIMIT {limit_n}"
+        )
+        res_df, err = execute_readonly_duckdb(sql, {safe_ds: df})
+        return sql, res_df, err
+
+    # Standard aggregated charts: line, area, bar, stacked_bar, donut, dual_axis
+    group_cols = [x_col] + ([valid_color] if valid_color and valid_color != x_col else [])
+    metric_exprs: list[str] = []
+    for y_c in y_cols:
+        if y_c in group_cols:
+            continue
+        if agg == "COUNT":
+            metric_exprs.append(f"COUNT({_q(y_c)}) AS {_q(y_c)}")
+        else:
+            metric_exprs.append(f"ROUND({agg}(CAST({_q(y_c)} AS DOUBLE)), 2) AS {_q(y_c)}")
+
+    if not metric_exprs:
+        return "", pd.DataFrame(), "No aggregatable metric column selected."
+
+    grp_select = ", ".join(_q(c) for c in group_cols)
+    grp_by = ", ".join(str(i + 1) for i in range(len(group_cols)))
+    is_temporal_x = pd.api.types.is_datetime64_any_dtype(df[x_col]) or "date" in x_col.lower() or "time" in x_col.lower()
+    order_clause = f"ORDER BY {_q(x_col)} ASC" if is_temporal_x else f"ORDER BY {_q(y_cols[0])} DESC"
+
+    sql = (
+        f"SELECT {grp_select},\n"
+        f"       {', '.join(metric_exprs)}\n"
+        f"FROM {_q(safe_ds)}\n"
+        f"GROUP BY {grp_by}\n"
+        f"{order_clause}"
+    )
+    res_df, err = execute_readonly_duckdb(sql, {safe_ds: df})
+    return sql, res_df, err
 
 
 def classify_dataframe_columns(
@@ -642,15 +802,17 @@ def generate_ai_chart_config(
                 '  "chart_type": "line" | "area" | "bar" | "stacked_bar" | "horizontal_bar" | "donut" | "scatter" | "dual_axis",\n'
                 '  "x": "<exact column name from chosen dataset>",\n'
                 '  "y": ["<exact column name(s) from chosen dataset>"],\n'
+                '  "color": "<optional categorical grouping column or null>",\n'
+                '  "agg": "SUM" | "AVG" | "COUNT" | "MAX" | "MIN" | "NONE",\n'
                 '  "title": "<concise chart title matching the user language>",\n'
                 '  "takeaway": "<1-sentence explanation of what this chart measures, matching user language>",\n'
                 '  "limit": 12\n'
                 "}\n\n"
                 "Rules:\n"
                 "1. Use ONLY exact column names from the chosen dataset in DATASET_SCHEMAS. Never invent columns.\n"
-                "2. For time-series datasets containing 'event_date', set x='event_date' and y to 1-3 numeric columns.\n"
-                "3. For ranking/top-N categorical datasets, set chart_type='horizontal_bar' and 'limit' to requested top-N.\n"
-                "4. For sparse daily conversion/failure rates, prefer chart_type='bar' or 'line' depending on user intent.\n\n"
+                "2. Set agg='AVG' for average/AOV/rate queries, agg='SUM' for total revenue/GMV/units, agg='COUNT' for order counts, and agg='NONE' for scatter plots.\n"
+                "3. For multi-dimensional queries like 'daily revenue by region', use the table with event_date, set x='event_date', color='region', y=['gross_amount'], agg='SUM'.\n"
+                "4. For ranking/top-N categorical datasets, set chart_type='horizontal_bar' and 'limit' to requested top-N.\n\n"
                 f"DATASET_SCHEMAS:\n{schema_doc}"
             )
 
@@ -721,11 +883,18 @@ def generate_ai_chart_config(
                     if not y_cols:
                         continue
 
+                    raw_agg = str(parsed.get("agg", "NONE" if ctype == "scatter" else "SUM")).strip().upper()
+                    agg_val = raw_agg if raw_agg in SUPPORTED_AGGREGATIONS else ("NONE" if ctype == "scatter" else "SUM")
+                    col_c = parsed.get("color")
+                    valid_color_c = str(col_c).strip() if isinstance(col_c, str) and str(col_c).strip() in valid_cols else None
+
                     return {
                         "dataset": ds,
                         "chart_type": ctype,
                         "x": x_col,
                         "y": y_cols[:3],
+                        "color": valid_color_c,
+                        "agg": agg_val,
                         "title": str(parsed.get("title") or query),
                         "takeaway": str(parsed.get("takeaway") or ""),
                         "query": query,
@@ -884,11 +1053,13 @@ def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
         )
         fig.update_yaxes(
             title_text=left_col,
+            rangemode="tozero",
             tickformat=".0%" if _is_rate_col(left_col) else None,
             secondary_y=False,
         )
         fig.update_yaxes(
             title_text=right_col,
+            rangemode="tozero",
             tickformat=".0%" if _is_rate_col(right_col) else None,
             secondary_y=True,
         )
@@ -903,8 +1074,52 @@ def render_ai_dynamic_chart(config: dict, df: pd.DataFrame) -> go.Figure | None:
         )
         return fig
 
-    # 5. Line / Area / Bar / Stacked Bar (strictly numeric Y)
+    # 5. Line / Area / Bar / Stacked Bar (strictly numeric Y, supporting Color grouping)
     is_rate_chart = all(_is_rate_col(c) for c in avail_y)
+    if valid_color and len(avail_y) == 1:
+        y_single = avail_y[0]
+        if ctype in ("bar", "stacked_bar"):
+            fig = px.bar(
+                sub,
+                x=x_col,
+                y=y_single,
+                color=valid_color,
+                barmode="stack" if ctype == "stacked_bar" else "group",
+                title=title,
+                template="plotly_white",
+                color_discrete_sequence=palette + ["#ec4899", "#06b6d4"],
+            )
+        elif ctype == "area":
+            fig = px.area(
+                sub,
+                x=x_col,
+                y=y_single,
+                color=valid_color,
+                markers=True,
+                title=title,
+                template="plotly_white",
+                color_discrete_sequence=palette + ["#ec4899", "#06b6d4"],
+            )
+        else:
+            fig = px.line(
+                sub,
+                x=x_col,
+                y=y_single,
+                color=valid_color,
+                markers=True,
+                title=title,
+                template="plotly_white",
+                color_discrete_sequence=palette + ["#ec4899", "#06b6d4"],
+            )
+        fig.update_layout(
+            height=400,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            hovermode="x unified",
+            legend={"orientation": "h", "y": 1.12},
+        )
+        return fig
+
     fig = go.Figure()
     for idx, col in enumerate(avail_y):
         color = _pick_color(col, idx)
@@ -990,6 +1205,7 @@ def refine_ai_chart_config(
             '    "x": "<valid column>",\n'
             '    "y": ["<valid column(s)>"],\n'
             '    "color": "<optional valid column or null>",\n'
+            '    "agg": "SUM" | "AVG" | "COUNT" | "MAX" | "MIN" | "NONE",\n'
             '    "limit": 12,\n'
             '    "title": "<chart title>",\n'
             '    "takeaway": "<1-sentence takeaway>"\n'
@@ -1045,6 +1261,8 @@ def refine_ai_chart_config(
                     updated["color"] = col_c
                 elif col_c is None:
                     updated.pop("color", None)
+                if new_cfg.get("agg") and str(new_cfg["agg"]).upper() in SUPPORTED_AGGREGATIONS:
+                    updated["agg"] = str(new_cfg["agg"]).upper()
                 if "limit" in new_cfg and new_cfg["limit"]:
                     updated["limit"] = max(1, min(int(new_cfg["limit"]), 32))
                 if new_cfg.get("title"):
@@ -1146,9 +1364,10 @@ def _audit_chart_logic_with_gemini(
         "Inspect whether the user's current Step 2 Chart Specification is logically, statistically, and semantically valid.\n\n"
         f"1. Original User Request (Step 1): {user_query}\n"
         f"2. Current Chart Spec (Step 2): dataset={current_config.get('dataset')}, chart_type={current_config.get('chart_type')}, "
-        f"x={current_config.get('x')}, y={current_config.get('y')}, color={current_config.get('color')}\n"
+        f"agg={current_config.get('agg', 'SUM')}, x={current_config.get('x')}, y={current_config.get('y')}, color={current_config.get('color')}\n"
         f"3. Live DataFrame & Semantic/Ontology Profile:\n{profile_text}\n\n"
         "Audit Checklist:\n"
+        "- Aggregation & Sawtooth Check: If chart_type is line/area/bar and agg='NONE' on a dataset where X-axis has duplicate dates/categories (row_count > x.nunique), warn that unaggregated rows will cause zig-zag sawtooth artifacts and recommend SUM or AVG.\n"
         "- Magnitude / Unit Mismatch: Are multiple Y columns plotted on a single axis (bar/stacked_bar/line/area) when their means differ by >20x or have incompatible units (e.g. USD vs Order Count)? If so, recommend 'dual_axis'.\n"
         "- Additivity Violation: Is a Non-Additive metric (average/AOV or percentage/rate) used in a 'donut' share chart or 'stacked_bar' where values are summed?\n"
         "- Categorical Trend Misuse: Is a 'line' or 'area' chart used on a Nominal Categorical X-axis (e.g. category, region) instead of a Temporal date axis?\n"
@@ -1195,6 +1414,7 @@ def _render_nl2chart_studio_body(
         prefixes = (
             f"{state_prefix}_sel_ds",
             f"{state_prefix}_sel_ctype_",
+            f"{state_prefix}_sel_agg_",
             f"{state_prefix}_sel_limit",
             f"{state_prefix}_sel_color_",
             f"{state_prefix}_sel_x_",
@@ -1340,6 +1560,9 @@ def _render_nl2chart_studio_body(
                 f"類型={draft_cfg.get('chart_type', 'line')}"
                 if not is_en
                 else f"Type={draft_cfg.get('chart_type', 'line')}",
+                f"聚合={draft_cfg.get('agg', 'NONE' if draft_cfg.get('chart_type') == 'scatter' else 'SUM')}"
+                if not is_en
+                else f"Agg={draft_cfg.get('agg', 'NONE' if draft_cfg.get('chart_type') == 'scatter' else 'SUM')}",
             ]
             if draft_cfg.get("color"):
                 other_parts.append(
@@ -1470,7 +1693,7 @@ def _render_nl2chart_studio_body(
             def _fmt_typed(c: str) -> str:
                 return f"{_col_type_icon(c, col_types)} {_format_col_label(c, cur_schema)}"
 
-            r2_c1, r2_c2 = st.columns([1.2, 2.0])
+            r2_c1, r2_c2, r2_c3 = st.columns([1.1, 1.8, 0.9])
             cur_x = draft_cfg.get("x", allowed_x[0])
             if cur_x not in allowed_x:
                 cur_x = allowed_x[0]
@@ -1551,6 +1774,29 @@ def _render_nl2chart_studio_body(
                     )
                     if sel_y:
                         draft_cfg["y"] = sel_y
+
+            agg_labels = {
+                "SUM": "➕ SUM (總和)" if not is_en else "➕ SUM",
+                "AVG": "➗ AVG (平均)" if not is_en else "➗ AVG",
+                "COUNT": "#️⃣ COUNT (筆數)" if not is_en else "#️⃣ COUNT",
+                "MAX": "⬆️ MAX (最大)" if not is_en else "⬆️ MAX",
+                "MIN": "⬇️ MIN (最小)" if not is_en else "⬇️ MIN",
+                "NONE": "📄 NONE (明細)" if not is_en else "📄 NONE (Raw)",
+            }
+            cur_agg = str(
+                draft_cfg.get("agg", "NONE" if sel_ctype == "scatter" else "SUM")
+            ).upper()
+            if cur_agg not in SUPPORTED_AGGREGATIONS:
+                cur_agg = "NONE" if sel_ctype == "scatter" else "SUM"
+            with r2_c3:
+                sel_agg = st.selectbox(
+                    "SQL 聚合 (Agg)" if not is_en else "SQL Aggregation",
+                    options=list(SUPPORTED_AGGREGATIONS),
+                    index=SUPPORTED_AGGREGATIONS.index(cur_agg),
+                    format_func=lambda a: agg_labels.get(a, a),
+                    key=f"{state_prefix}_sel_agg_{cur_ds}_{sel_ctype}_{rev}",
+                )
+            draft_cfg["agg"] = sel_agg
 
             if draft_cfg.get("x") != prev_x or draft_cfg.get("y") != prev_y:
                 y_now = draft_cfg.get("y", [])
@@ -1705,7 +1951,7 @@ def _render_nl2chart_studio_body(
                     _clear_spec_widget_state()
                     st.rerun(scope="fragment") if hasattr(st, "fragment") else st.rerun()
 
-    # Step 3: Render Confirmed Plotly Chart (stays untouched during Q&A until user clicks Generate!)
+    # Step 3: Compile Deterministic DuckDB SQL -> Execute Aggregation -> Render Confirmed Plotly Chart
     rendered_cfg = st.session_state.get(k_rendered)
     if rendered_cfg:
         st.markdown("---")
@@ -1716,21 +1962,34 @@ def _render_nl2chart_studio_body(
             else next(iter(dataset_getters.values()))
         )
         target_df = getter() if callable(getter) else getter
-        fig_out = render_ai_dynamic_chart(rendered_cfg, target_df)
+        compiled_sql, agg_df, sql_err = compile_spec_to_duckdb_sql(rendered_cfg, target_df)
+
+        if sql_err:
+            st.error(
+                f"❌ **DuckDB Aggregation Error**: {sql_err}"
+                if is_en
+                else f"❌ **DuckDB SQL 聚合執行錯誤**：{sql_err}"
+            )
+            if compiled_sql:
+                st.code(compiled_sql, language="sql")
+            return
+
+        fig_out = render_ai_dynamic_chart(rendered_cfg, agg_df)
 
         gen_by = rendered_cfg.get("generated_by", "fallback_rules")
+        r_agg = rendered_cfg.get("agg", "NONE" if rendered_cfg.get("chart_type") == "scatter" else "SUM")
         if gen_by.startswith("gemini:"):
             m_tag = gen_by.split(":", 1)[1]
             st.caption(
-                f"✨ **AI-Generated Chart** (`{m_tag}` via `cockpit_core`) · Dataset: `{r_ds}` · X: `{rendered_cfg.get('x')}` · Y: `{rendered_cfg.get('y')}`"
+                f"✨ **AI-Generated Chart** (`{m_tag}` + DuckDB `{r_agg}`) · Dataset: `{r_ds}` · X: `{rendered_cfg.get('x')}` · Y: `{rendered_cfg.get('y')}`"
                 if is_en
-                else f"✨ **Gemini AI 圖表**（`{m_tag}` · `cockpit_core`）· 資料表：`{r_ds}` · X軸：`{rendered_cfg.get('x')}` · Y軸：`{rendered_cfg.get('y')}`"
+                else f"✨ **Gemini AI 圖表**（`{m_tag}` ＋ DuckDB `{r_agg}` 聚合）· 資料表：`{r_ds}` · X軸：`{rendered_cfg.get('x')}` · Y軸：`{rendered_cfg.get('y')}`"
             )
         else:
             st.caption(
-                "ℹ️ **Rule-based preview** (bind your Gemini API Key on the right for full AI chart Q&A)."
+                f"ℹ️ **Rule-based preview** (DuckDB `{r_agg}` aggregation · bind your Gemini API Key on the right for full AI chart Q&A)."
                 if is_en
-                else "ℹ️ **離線規則預覽**（於右側綁定 Gemini API Key 可解鎖完整 AI 對話微調）。"
+                else f"ℹ️ **離線規則預覽**（DuckDB `{r_agg}` 聚合 · 於右側綁定 Gemini API Key 可解鎖完整 AI 對話微調）。"
             )
 
         if rendered_cfg.get("takeaway"):
@@ -1738,14 +1997,24 @@ def _render_nl2chart_studio_body(
 
         if fig_out:
             st.plotly_chart(fig_out, use_container_width=True)
-            if isinstance(target_df, pd.DataFrame) and not target_df.empty:
+            exp_c1, exp_c2 = st.columns(2)
+            with exp_c1:
                 with st.expander(
-                    f"📋 Underlying Chart Data (`{r_ds}`)"
+                    "📜 View Executed DuckDB SQL"
                     if is_en
-                    else f"📋 檢視圖表底層數據明細（`{r_ds}`）",
+                    else "📜 檢視實際執行的 DuckDB SQL",
                     expanded=False,
                 ):
-                    st.dataframe(target_df, use_container_width=True, hide_index=True)
+                    st.code(compiled_sql, language="sql")
+            with exp_c2:
+                if isinstance(agg_df, pd.DataFrame) and not agg_df.empty:
+                    with st.expander(
+                        f"📋 Underlying Aggregated Data (`{r_ds}` · {len(agg_df)} rows)"
+                        if is_en
+                        else f"📋 檢視聚合後底層數據明細（`{r_ds}` · 共 {len(agg_df)} 筆）",
+                        expanded=False,
+                    ):
+                        st.dataframe(agg_df, use_container_width=True, hide_index=True)
         else:
             st.warning(
                 "⚠️ No matching data rows for selected columns."
