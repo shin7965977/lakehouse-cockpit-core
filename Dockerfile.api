@@ -1,0 +1,26 @@
+# Production-hardened container for the AI Analytics Workbench Python Control Plane (FastAPI).
+# Deploy on an internal/private network only; never expose publicly without X-Internal-Token.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY pyproject.toml requirements.txt ./
+COPY adapter.py engine.py styles.py ./
+COPY api/ ./api/
+COPY components/ ./components/
+COPY integrations/ ./integrations/
+COPY services/ ./services/
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir ".[api]" sqlglot pyyaml langfuse
+
+RUN useradd --create-home --shell /bin/bash appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8100
+
+CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8100"]

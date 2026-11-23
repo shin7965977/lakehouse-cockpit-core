@@ -107,10 +107,12 @@ class ObservabilityTracker:
         candidate_relations: list[str] | None = None,
         tenant_id: int | str | None = None,
         spec_hash: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Mask and append a semantic gap event to the local JSONL log (and Langfuse if enabled)."""
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id,
             "masked_question": mask_sensitive_text(question),
             "classification": classification,
             "candidate_relations": list(candidate_relations or []),

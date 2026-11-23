@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import hmac
 import os
+import uuid
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 try:
@@ -181,8 +182,16 @@ def create_app(
     """Create a configured FastAPI control-plane application."""
     app = FastAPI(
         title="AI Analytics Workbench — AE Control Plane",
-        version="0.2.0",
+        version="0.4.0",
     )
+
+    @app.middleware("http")
+    async def attach_request_id(request: Request, call_next: Any) -> Any:
+        req_id = (request.headers.get("X-Request-Id") or "").strip() or f"req-{uuid.uuid4().hex[:12]}"
+        request.state.request_id = req_id
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = req_id
+        return response
     active_catalog = catalog or DbtMetadataCatalog.from_target_dir()
     active_tracker = tracker or ObservabilityTracker()
 
@@ -237,7 +246,10 @@ def create_app(
         response_model=DraftAndClassifyResponse,
         dependencies=[Depends(_require_internal_token)],
     )
-    def draft_and_classify(req: DraftAndClassifyRequest) -> DraftAndClassifyResponse:
+    def draft_and_classify(
+        req: DraftAndClassifyRequest, request: Request
+    ) -> DraftAndClassifyResponse:
+        req_id = getattr(request.state, "request_id", None)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
             resp = draft_and_classify_query_spec(
@@ -258,6 +270,7 @@ def create_app(
                 spec_hash=(
                     resp.query_spec.compute_spec_hash() if resp.query_spec is not None else None
                 ),
+                request_id=req_id,
             )
             return resp
         except RequirementDraftError as exc:

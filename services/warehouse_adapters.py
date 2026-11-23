@@ -85,7 +85,25 @@ class DuckDBAdapter:
                     "DUCKDB_FILE_NOT_FOUND",
                     f"DuckDB database file not found: {self.db_path}",
                 )
-            return duckdb.connect(str(self.db_path), read_only=True)
+            con = duckdb.connect(str(self.db_path), read_only=True)
+            schemas = [
+                str(r[0])
+                for r in con.execute(
+                    "SELECT DISTINCT table_schema FROM information_schema.tables "
+                    "WHERE table_schema NOT IN ('information_schema', 'pg_catalog')"
+                ).fetchall()
+            ]
+            # Prioritize gold -> silver -> bronze -> main so dbt models resolve without schema prefix
+            schemas.sort(
+                key=lambda s: (
+                    0 if "gold" in s.lower() else 1 if "silver" in s.lower() else 2 if "bronze" in s.lower() else 3,
+                    s,
+                )
+            )
+            if schemas:
+                quoted = ",".join(f'"{s}"' for s in schemas)
+                con.execute(f"SET search_path = '{quoted}'")
+            return con
         con = duckdb.connect(":memory:")
         for tbl_name, df in self.dataframes.items():
             if isinstance(df, pd.DataFrame):
