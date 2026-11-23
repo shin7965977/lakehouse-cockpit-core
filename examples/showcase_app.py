@@ -32,6 +32,7 @@ from adapter import (  # noqa: E402
 from components.data_center import render_data_center_view  # noqa: E402
 from components.databot import render_databot  # noqa: E402
 from components.on_demand_panel import render_on_demand_insight_panel  # noqa: E402
+from components.query_review import render_query_review_gate  # noqa: E402
 from components.schema_designer import render_schema_designer_view  # noqa: E402
 from components.sidebar_ops import render_sidebar_pipeline_ops  # noqa: E402
 from components.sql_workbench import (  # noqa: E402
@@ -575,10 +576,34 @@ def build_component_registry(
             ),
         ),
         ShowcaseComponentSpec(
+            id="query_review",
+            tab_title_en="🛡️ Query Review",
+            tab_title_zh="🛡️ QuerySpec 審核",
+            storybook_label="4. query_review.py",
+            fn_signature="render_query_review_gate()",
+            source_files=("components/query_review.py",),
+            snippet="render_query_review_gate(data_dict=data_dict, is_en=is_en)",
+            description_en="Shared QuerySpec review gate with dbt catalog evidence, 7-state gap classification, advanced SQL editor with diff, and SHA-256 spec_hash invalidation.",
+            description_zh="共享 QuerySpec 審核閘門，整合 dbt Catalog 證據、7 狀態語意缺口分診、進階 SQL 編輯器 Diff 與不可變 spec_hash 失效檢核。",
+            problem_solved_en=(
+                "Prevents unreviewed or stale SQL from executing by binding user confirmation to an immutable "
+                "canonical QuerySpec hash and surfacing dbt catalog evidence before execution."
+            ),
+            problem_solved_zh=(
+                "解決『修改 SQL 或條件後沿用舊確認』與『缺口未分診就硬生 SQL』的治理漏洞，強制將確認綁定至不可變 spec_hash。"
+            ),
+            placement_in_mode_a="workspace_tab",
+            render=lambda: render_query_review_gate(
+                data_dict=data_dict,
+                is_en=is_en,
+                scope_key="showcase",
+            ),
+        ),
+        ShowcaseComponentSpec(
             id="schema_designer",
             tab_title_en="🏗️ Schema Designer",
             tab_title_zh="🏗️ Schema 設計器",
-            storybook_label="4. schema_designer.py",
+            storybook_label="5. schema_designer.py",
             fn_signature="render_schema_designer_view()",
             source_files=("components/schema_designer.py",),
             snippet="render_schema_designer_view(adapter=adapter, data_dict=data_dict, is_en=is_en)",
@@ -598,7 +623,7 @@ def build_component_registry(
             id="data_center",
             tab_title_en="🏛️ Data Center",
             tab_title_zh="🏛️ 資料中心",
-            storybook_label="5. data_center.py",
+            storybook_label="6. data_center.py",
             fn_signature="render_data_center_view()",
             source_files=("components/data_center.py",),
             snippet="render_data_center_view()",
@@ -618,7 +643,7 @@ def build_component_registry(
             id="databot",
             tab_title_en="🤖 DataBot",
             tab_title_zh="🤖 資料庫問答 DataBot",
-            storybook_label="6. databot.py",
+            storybook_label="7. databot.py",
             fn_signature="render_databot()",
             source_files=("components/databot.py",),
             snippet="render_databot(active_scope_id='showcase', ..., adapter=adapter, allow_mock_offline=True)",
@@ -654,7 +679,7 @@ def build_component_registry(
             id="sidebar_ops",
             tab_title_en="⚡ Pipeline Ops & CSV",
             tab_title_zh="⚡ 管線控制 & CSV 下載",
-            storybook_label="7. sidebar_ops.py",
+            storybook_label="8. sidebar_ops.py",
             fn_signature="render_sidebar_pipeline_ops()",
             source_files=("components/sidebar_ops.py",),
             snippet="render_sidebar_pipeline_ops(adapter=adapter, data_dict=data_dict, start_date=start_date, end_date=end_date, is_en=is_en)",
