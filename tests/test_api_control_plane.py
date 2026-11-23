@@ -161,3 +161,101 @@ def test_day2_validate_repair_and_confirmed_execute_endpoints() -> None:
     assert repair_resp.status_code == 400
     assert repair_resp.json()["detail"]["code"] == "API_KEY_MISSING"
 
+
+def test_day3_assets_ingestion_promotions_and_draft_pr_endpoints(tmp_path) -> None:
+    import pandas as pd
+    from integrations.langfuse_adapter import ObservabilityTracker
+    from services.query_spec import AggregationSpec, DataSourceRef, QuerySpec
+    from services.warehouse_adapters import DuckDBAdapter
+
+    df = pd.DataFrame(
+        {
+            "tenant_id": [1, 1],
+            "year_month": ["2026-01", "2026-02"],
+            "ledger_amount": [5000.0, 7500.0],
+        }
+    )
+    gap_log = tmp_path / "gap_events.jsonl"
+    tracker = ObservabilityTracker(gap_log_path=gap_log, langfuse_public_key="", langfuse_secret_key="")
+    tracker.record_gap_event(
+        question="Monthly average order value",
+        classification="NEW_SEMANTIC_METRIC",
+        candidate_relations=["fct_monthly_ledger"],
+        tenant_id=1,
+    )
+    tracker.record_gap_event(
+        question="Monthly average order value",
+        classification="NEW_SEMANTIC_METRIC",
+        candidate_relations=["fct_monthly_ledger"],
+        tenant_id=1,
+    )
+
+    app = create_app(
+        catalog=_build_synthetic_catalog(),
+        internal_token=TOKEN,
+        warehouse_adapter=DuckDBAdapter(dataframes={"fct_monthly_ledger": df}),
+        tracker=tracker,
+    )
+    client = TestClient(app)
+    headers = {"X-Internal-Token": TOKEN}
+
+    spec = QuerySpec(
+        spec_id="qs_d3_http",
+        purpose="long_term",
+        question="Monthly ledger summary",
+        data_sources=[DataSourceRef(relation="fct_monthly_ledger", grain=["tenant_id", "year_month"])],
+        projection=["tenant_id", "year_month"],
+        aggregations=[AggregationSpec(field="ledger_amount", func="SUM", alias="total_ledger")],
+        group_by=["tenant_id", "year_month"],
+        dialect="duckdb",
+    ).confirm_intent(confirmed_by="admin")
+
+    # 1. Build & isolated validate
+    build_resp = client.post(
+        "/v1/assets/build-and-validate",
+        json={
+            "query_spec": spec.model_dump(mode="json"),
+            "model_name": "mart_monthly_ledger_summary",
+            "grain": ["tenant_id", "year_month"],
+        },
+        headers=headers,
+    )
+    assert build_resp.status_code == 200
+    build_body = build_resp.json()
+    assert build_body["validation"]["passed"] is True
+    assert build_body["bundle"]["bi_asset_manifest"]["lightdash_status"] == "STAGING_LOCAL_ONLY"
+
+    # 2. Source ingestion proposal (blocked external URL)
+    bad_ing = client.post(
+        "/v1/ingestion/propose",
+        json={
+            "source_type": "http_scrape",
+            "source_locator": "https://untrusted.example/data.csv",
+            "target_bronze_table": "stg_bad",
+        },
+        headers=headers,
+    )
+    assert bad_ing.status_code == 200
+    assert bad_ing.json()["status"] == "BLOCKED"
+
+    # 3. Promotion candidates from JSONL
+    promo_resp = client.get("/v1/promotions/candidates", headers=headers)
+    assert promo_resp.status_code == 200
+    assert len(promo_resp.json()["candidates"]) == 1
+    assert promo_resp.json()["candidates"][0]["certification_status"] == "PROPOSED_ASSET"
+
+    # 4. Draft PR dry-run bundle
+    pr_resp = client.post(
+        "/v1/releases/draft-pr",
+        json={
+            "model_name": "mart_monthly_ledger_summary",
+            "question": "Monthly ledger summary",
+            "files": {"models/gold/mart_monthly_ledger_summary.sql": build_body["bundle"]["dbt_sql"]},
+            "validation_summary": "All isolated checks passed",
+        },
+        headers=headers,
+    )
+    assert pr_resp.status_code == 200
+    assert pr_resp.json()["pr_mode"] == "DRY_RUN_BUNDLE"
+
+

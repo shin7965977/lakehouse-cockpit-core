@@ -23,12 +23,30 @@ from pydantic import BaseModel, Field
 
 try:
     from ..integrations.langfuse_adapter import ObservabilityTracker
+    from ..integrations.lightdash_adapter import LightdashAdapter
+    from ..services.dbt_asset_builder import (
+        DbtAndLightdashBundle,
+        build_dbt_and_lightdash_bundle,
+    )
     from ..services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
+    from ..services.dbt_validator import (
+        IsolatedValidationResult,
+        validate_isolated_dbt_asset,
+    )
     from ..services.query_spec import QueryDialect, QuerySpec
+    from ..services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
     from ..services.requirement_engine import (
         DraftAndClassifyResponse,
         RequirementDraftError,
         draft_and_classify_query_spec,
+    )
+    from ..services.semantic_promotion import (
+        PromotionCandidate,
+        generate_promotion_candidates,
+    )
+    from ..services.source_ingestion import (
+        SourceIngestionProposal,
+        propose_source_ingestion,
     )
     from ..services.sql_repair import RepairError, SqlRepairResult, repair_sql_bounded
     from ..services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
@@ -40,12 +58,30 @@ try:
     )
 except (ImportError, ValueError):
     from integrations.langfuse_adapter import ObservabilityTracker
+    from integrations.lightdash_adapter import LightdashAdapter
+    from services.dbt_asset_builder import (
+        DbtAndLightdashBundle,
+        build_dbt_and_lightdash_bundle,
+    )
     from services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
+    from services.dbt_validator import (
+        IsolatedValidationResult,
+        validate_isolated_dbt_asset,
+    )
     from services.query_spec import QueryDialect, QuerySpec
+    from services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
     from services.requirement_engine import (
         DraftAndClassifyResponse,
         RequirementDraftError,
         draft_and_classify_query_spec,
+    )
+    from services.semantic_promotion import (
+        PromotionCandidate,
+        generate_promotion_candidates,
+    )
+    from services.source_ingestion import (
+        SourceIngestionProposal,
+        propose_source_ingestion,
     )
     from services.sql_repair import RepairError, SqlRepairResult, repair_sql_bounded
     from services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
@@ -91,6 +127,41 @@ class SqlRepairRequest(BaseModel):
 class QuerySpecExecuteRequest(BaseModel):
     query_spec: QuerySpec
     tenant_id: int | str | None = None
+
+
+class AssetBuildRequest(BaseModel):
+    query_spec: QuerySpec
+    model_name: str
+    grain: list[str] = Field(default_factory=list)
+    business_owner: str = "analytics-engineering@company.com"
+    golden_sql: str | None = None
+    reconcile_column: str | None = None
+
+
+class AssetBuildResponse(BaseModel):
+    bundle: DbtAndLightdashBundle
+    validation: IsolatedValidationResult
+    lightdash: dict[str, Any]
+
+
+class SourceIngestionRequest(BaseModel):
+    source_type: str
+    source_locator: str
+    target_bronze_table: str
+    owner: str = "data-engineering@company.com"
+    execute_isolated_bronze_load: bool = False
+
+
+class PromotionCandidatesResponse(BaseModel):
+    candidates: list[PromotionCandidate]
+
+
+class DraftPRRequest(BaseModel):
+    model_name: str
+    question: str
+    files: dict[str, str]
+    validation_summary: str
+    lightdash_status: str = "STAGING_LOCAL_ONLY"
 
 
 def _tenant_scoped_tables_from_catalog(catalog: DbtMetadataCatalog) -> set[str]:
@@ -313,6 +384,78 @@ def create_app(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={"code": exc.code, "message": exc.message},
             ) from exc
+
+    @app.post(
+        "/v1/assets/build-and-validate",
+        response_model=AssetBuildResponse,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def build_and_validate_asset(req: AssetBuildRequest) -> AssetBuildResponse:
+        bundle = build_dbt_and_lightdash_bundle(
+            query_spec=req.query_spec,
+            model_name=req.model_name,
+            grain=req.grain,
+            business_owner=req.business_owner,
+        )
+        candidate_sql = req.query_spec.compile_sql()
+        source_dfs = getattr(active_adapter, "dataframes", None)
+        source_db = getattr(active_adapter, "db_path", None)
+        validation = validate_isolated_dbt_asset(
+            model_name=bundle.contract.model_name,
+            candidate_sql=candidate_sql,
+            source_dataframes=source_dfs,
+            source_duckdb_path=source_db,
+            grain=req.grain,
+            not_null_columns=req.grain,
+            golden_sql=req.golden_sql,
+            reconcile_column=req.reconcile_column,
+        )
+        ld_status = LightdashAdapter().check_status()
+        return AssetBuildResponse(
+            bundle=bundle,
+            validation=validation,
+            lightdash=ld_status,
+        )
+
+    @app.post(
+        "/v1/ingestion/propose",
+        response_model=SourceIngestionProposal,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def propose_ingestion(req: SourceIngestionRequest) -> SourceIngestionProposal:
+        return propose_source_ingestion(
+            source_type=req.source_type,
+            source_locator=req.source_locator,
+            target_bronze_table=req.target_bronze_table,
+            owner=req.owner,
+            execute_isolated_bronze_load=req.execute_isolated_bronze_load,
+        )
+
+    @app.get(
+        "/v1/promotions/candidates",
+        response_model=PromotionCandidatesResponse,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def list_promotion_candidates(min_occurrences: int = 2) -> PromotionCandidatesResponse:
+        candidates = generate_promotion_candidates(
+            active_tracker.gap_log_path,
+            min_occurrences=max(1, min_occurrences),
+        )
+        return PromotionCandidatesResponse(candidates=candidates)
+
+    @app.post(
+        "/v1/releases/draft-pr",
+        response_model=DraftPRResult,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def create_draft_pr(req: DraftPRRequest) -> DraftPRResult:
+        return orchestrate_draft_pr(
+            model_name=req.model_name,
+            question=req.question,
+            files=req.files,
+            validation_summary=req.validation_summary,
+            lightdash_status=req.lightdash_status,
+        )
 
     return app
 
