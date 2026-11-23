@@ -27,5 +27,5 @@ api = [
 py-modules = ["adapter", "engine", "styles"]
 
 [tool.setuptools.packages.find]
-include = ["api*", "components*", "reports*", "services*"]
+include = ["api*", "components*", "integrations*", "reports*", "services*"]
 exclude = ["tests*", "examples*"]
