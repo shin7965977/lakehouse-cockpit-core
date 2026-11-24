@@ -9,6 +9,7 @@ and strictly enforces the Mandatory Fail-Loud Policy.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Any, Callable, Literal
@@ -270,21 +271,25 @@ def clarify_business_intent(
     history_payload = [t.model_dump() for t in turns]
     intent_payload = current_intent.model_dump() if current_intent else {}
 
+    today_taipei = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     prompt = (
         "You are an expert Analytics Engineer conducting a concise Traditional Chinese (繁體中文) "
         "business intent clarification before generating SQL.\n"
+        f"CurrentDate (Asia/Taipei): {today_taipei}\n"
         f"Current turn: {turn_number} of {max_turns}.\n"
         "Rules:\n"
         "1. Map Chinese business concepts strictly to REAL tables in AllowedCatalog or Glossary. NEVER invent table names.\n"
         "2. If the user asks a 'why' / root-cause / decline / growth diagnosis question, set intent_type='DIAGNOSTIC_ANALYSIS'; otherwise 'SINGLE_QUERY'.\n"
         "3. Ask AT MOST ONE highest-priority missing question per turn (priority: Metric basis -> Timeframe/Comparison -> Grain/Breakdown/Filters) with 2-4 concise clickable options.\n"
         "4. When enough information is collected (or if turn >= max_turns and at least 1 real table matches), set state='READY_FOR_REVIEW' and list any default assumptions explicitly in business_intent.assumptions.\n"
-        "5. If the question cannot be mapped to ANY table in AllowedCatalog, OR if the user asks for a specific entity value (such as a warehouse name, status, or category) that clearly does NOT exist in TenantAllowedDimensionValues for that table, set state='BLOCKED_UNMAPPABLE' and explain in blocking_reason (listing the real values available in this tenant account).\n\n"
+        "5. Only set state='BLOCKED_UNMAPPABLE' when the question cannot be mapped to ANY table in AllowedCatalog. "
+        "Treat TenantSampleDimensionValues STRICTLY as formatting/casing hints (e.g., knowing status uses 'Completed' instead of 'completed') — "
+        "NEVER reject a question solely because a specific filter value is missing from TenantSampleDimensionValues; let the database query be the final judge of whether matching rows exist.\n\n"
         f"OriginalQuestion: {clean_q}\n"
         f"ConversationHistory: {json.dumps(history_payload, ensure_ascii=False)}\n"
         f"CurrentIntent: {json.dumps(intent_payload, ensure_ascii=False)}\n"
         f"BusinessGlossary: {json.dumps(glossary_slice, ensure_ascii=False)}\n"
-        f"TenantAllowedDimensionValues: {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
+        f"TenantSampleDimensionValues: {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
         f"CertifiedMetrics: {json.dumps(metrics_slice, ensure_ascii=False)}\n"
         f"AllowedCatalog: {json.dumps(catalog_slice, ensure_ascii=False)}\n"
     )

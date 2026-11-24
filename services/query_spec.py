@@ -22,7 +22,21 @@ QueryPurpose = Literal["ad_hoc", "long_term"]
 QueryDialect = Literal["duckdb", "postgres"]
 ValidationStatus = Literal["pending", "valid", "invalid", "blocked"]
 AggFunc = Literal["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "MIN", "MAX"]
-FilterOp = Literal["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN", "LIKE", "IS NULL", "IS NOT NULL"]
+FilterOp = Literal[
+    "=",
+    "!=",
+    ">",
+    ">=",
+    "<",
+    "<=",
+    "IN",
+    "NOT IN",
+    "LIKE",
+    "IS NULL",
+    "IS NOT NULL",
+    "LAST_N_DAYS",
+    "LAST_N_MONTHS",
+]
 JoinType = Literal["INNER", "LEFT", "RIGHT"]
 
 
@@ -221,7 +235,29 @@ class QuerySpec(BaseModel):
             for f in self.filters:
                 if f.op in ("IS NULL", "IS NOT NULL"):
                     where_clauses.append(f"{_q(f.field)} {f.op}")
+                elif f.op in ("LAST_N_DAYS", "LAST_N_MONTHS"):
+                    try:
+                        n = int(f.value)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"Filter op '{f.op}' requires a positive integer value, got {f.value!r}."
+                        ) from exc
+                    if n < 1 or n > 3650:
+                        raise ValueError(
+                            f"Filter op '{f.op}' value must be between 1 and 3650, got {n}."
+                        )
+                    unit = "days" if f.op == "LAST_N_DAYS" else "months"
+                    where_clauses.append(
+                        f"{_q(f.field)} >= CURRENT_DATE - INTERVAL '{n} {unit}'"
+                    )
                 else:
+                    if isinstance(f.value, str):
+                        val_up = f.value.upper()
+                        if any(tok in val_up for tok in ("NOW(", "CURRENT_DATE", "INTERVAL ")):
+                            raise ValueError(
+                                f"Raw SQL date expression {f.value!r} cannot be passed as a literal filter value; "
+                                "use structured op 'LAST_N_DAYS' or 'LAST_N_MONTHS' with an integer value instead."
+                            )
                     where_clauses.append(f"{_q(f.field)} {f.op} {_fmt_val(f.value)}")
             lines.append("WHERE " + " AND ".join(where_clauses))
 
