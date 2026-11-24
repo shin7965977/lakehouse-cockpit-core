@@ -79,6 +79,7 @@ def test_showcase_mode_b_storybook_catalog() -> None:
         "on_demand_panel",
         "text_to_chart",
         "sql_workbench",
+        "query_review",
         "schema_designer",
         "data_center",
         "databot",

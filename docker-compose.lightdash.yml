@@ -1,0 +1,42 @@
+# Optional isolated local Staging PostgreSQL + Lightdash stack for Day 3-4 BI preview.
+# Never connects to production Supabase; uses strictly isolated local staging credentials.
+services:
+  staging-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ae_staging
+      POSTGRES_PASSWORD: ae_staging_local_only
+      POSTGRES_DB: ae_analytics_staging
+    ports:
+      - "5439:5432"
+    volumes:
+      - ae_staging_pgdata:/var/lib/postgresql/data
+
+  lightdash-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lightdash
+      POSTGRES_PASSWORD: lightdash_local_only
+      POSTGRES_DB: lightdash
+    volumes:
+      - ae_lightdash_pgdata:/var/lib/postgresql/data
+
+  lightdash:
+    image: lightdash/lightdash:latest
+    depends_on:
+      - lightdash-db
+      - staging-postgres
+    environment:
+      PGHOST: lightdash-db
+      PGPORT: 5432
+      PGUSER: lightdash
+      PGPASSWORD: lightdash_local_only
+      PGDATABASE: lightdash
+      LIGHTDASH_SECRET: local-dev-lightdash-secret-change-me
+      SITE_URL: http://localhost:8088
+    ports:
+      - "8088:8080"
+
+volumes:
+  ae_staging_pgdata:
+  ae_lightdash_pgdata:

@@ -721,7 +721,7 @@ except ImportError:
         )
 
         try:
-            raw = generate_gemini_text(prompt, api_key=api_key).strip()
+            raw = generate_gemini_text(api_key=api_key, prompt=prompt).strip()
         except Exception as exc:
             return _rejected(
                 reason=f"Gemini API synthesis failed: {exc}",
