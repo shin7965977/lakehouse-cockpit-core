@@ -58,3 +58,51 @@ def test_exploratory_drafting_fails_loud_on_invalid_llm_json() -> None:
             "計算每月的 order_volume", cat, llm_callable=lambda _p: "not valid json"
         )
     assert exc_info.value.code == "LLM_INVALID_JSON"
+
+
+def test_exploratory_drafting_fails_loud_when_catalog_columns_missing() -> None:
+    from services.dbt_catalog import DbtMetadataCatalog
+
+    empty_cols_cat = DbtMetadataCatalog.from_payloads(
+        manifest={
+            "nodes": {
+                "model.demo.mart_no_cols": {
+                    "resource_type": "model",
+                    "name": "mart_no_cols",
+                    "schema": "gold",
+                    "columns": {},
+                }
+            }
+        }
+    )
+    with pytest.raises(RequirementDraftError) as exc_info:
+        draft_and_classify_query_spec(
+            "分析 mart_no_cols 銷售額",
+            empty_cols_cat,
+            llm_callable=lambda _p: '{"relation":"mart_no_cols","projection":["x"]}',
+        )
+    assert exc_info.value.code == "INCOMPLETE_CATALOG_METADATA"
+
+
+def test_exploratory_drafting_fails_loud_on_hallucinated_column() -> None:
+    cat = _build_synthetic_catalog()
+
+    def _hallucinating_llm(_prompt: str) -> str:
+        return json.dumps(
+            {
+                "relation": "fct_monthly_ledger",
+                "projection": ["year_month"],
+                "aggregations": [{"field": "sales_amount", "func": "SUM", "alias": "total_sales"}],
+                "group_by": ["year_month"],
+                "filters": [],
+                "assumptions": [],
+            }
+        )
+
+    with pytest.raises(RequirementDraftError) as exc_info:
+        draft_and_classify_query_spec(
+            "計算每月的 order_volume", cat, llm_callable=_hallucinating_llm
+        )
+    assert exc_info.value.code == "HALLUCINATED_COLUMN"
+    assert "sales_amount" in exc_info.value.message
+
