@@ -248,7 +248,7 @@ class QuerySpec(BaseModel):
                         )
                     unit = "days" if f.op == "LAST_N_DAYS" else "months"
                     where_clauses.append(
-                        f"{_q(f.field)} >= CURRENT_DATE - INTERVAL '{n} {unit}'"
+                        f"CAST({_q(f.field)} AS DATE) >= CAST(CURRENT_DATE - INTERVAL '{n} {unit}' AS DATE)"
                     )
                 else:
                     if isinstance(f.value, str):

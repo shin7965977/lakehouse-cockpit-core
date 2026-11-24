@@ -114,7 +114,7 @@ def test_ticket02_consultant_propose_sliding_window_column_whitelist_and_answer_
     body = r.json()
     assert body["needs_data"] is True
     assert len(body["proposed_queries"]) == 1
-    assert "CURRENT_DATE - INTERVAL '30 days'" in body["proposed_queries"][0]["compiled_sql"]
+    assert "CAST(CURRENT_DATE - INTERVAL '30 days' AS DATE)" in body["proposed_queries"][0]["compiled_sql"]
     assert "turn_0" not in prompts[-1]
     assert "turn_19" in prompts[-1]
 

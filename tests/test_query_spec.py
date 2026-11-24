@@ -120,8 +120,8 @@ def test_compile_sql_supports_relative_date_ops_and_rejects_raw_sql_date_literal
         ],
     )
     sql = spec.compile_sql()
-    assert "\"order_date\" >= CURRENT_DATE - INTERVAL '30 days'" in sql
-    assert "\"created_at\" >= CURRENT_DATE - INTERVAL '3 months'" in sql
+    assert "CAST(\"order_date\" AS DATE) >= CAST(CURRENT_DATE - INTERVAL '30 days' AS DATE)" in sql
+    assert "CAST(\"created_at\" AS DATE) >= CAST(CURRENT_DATE - INTERVAL '3 months' AS DATE)" in sql
 
     bad_spec = QuerySpec(
         spec_id="qs_bad_raw_date",
