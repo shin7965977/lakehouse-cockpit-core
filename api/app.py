@@ -25,6 +25,16 @@ from pydantic import BaseModel, Field
 try:
     from ..integrations.langfuse_adapter import ObservabilityTracker
     from ..integrations.lightdash_adapter import LightdashAdapter
+    from ..services.consultant_service import (
+        ConsultantAnswer,
+        ConsultantError,
+        ConsultantIntentSummary,
+        ConsultantProposal,
+        ConsultantQueryOutcome,
+        answer_consultant_turn,
+        propose_consultant_turn,
+        summarize_consultation_intent,
+    )
     from ..services.dbt_asset_builder import (
         DbtAndLightdashBundle,
         build_dbt_and_lightdash_bundle,
@@ -77,6 +87,16 @@ try:
 except (ImportError, ValueError):
     from integrations.langfuse_adapter import ObservabilityTracker
     from integrations.lightdash_adapter import LightdashAdapter
+    from services.consultant_service import (
+        ConsultantAnswer,
+        ConsultantError,
+        ConsultantIntentSummary,
+        ConsultantProposal,
+        ConsultantQueryOutcome,
+        answer_consultant_turn,
+        propose_consultant_turn,
+        summarize_consultation_intent,
+    )
     from services.dbt_asset_builder import (
         DbtAndLightdashBundle,
         build_dbt_and_lightdash_bundle,
@@ -234,6 +254,37 @@ class DiagnosticSynthesizeRequest(BaseModel):
     tenant_id: str | int | None = None
 
 
+class ConsultantProposeRequest(BaseModel):
+    message: str
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    live_catalog: list[dict[str, Any]] | None = None
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    dialect: QueryDialect = "postgres"
+    timezone: str | None = None
+    gemini_api_key: str = ""
+    tenant_id: str | int | None = None
+
+
+class ConsultantAnswerRequest(BaseModel):
+    message: str
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    query_outcomes: list[ConsultantQueryOutcome] = Field(default_factory=list)
+    timezone: str | None = None
+    gemini_api_key: str = ""
+    tenant_id: str | int | None = None
+
+
+class ConsultantSummarizeRequest(BaseModel):
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    live_catalog: list[dict[str, Any]] | None = None
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    timezone: str | None = None
+    gemini_api_key: str = ""
+    tenant_id: str | int | None = None
+
+
 def _tenant_scoped_tables_from_catalog(catalog: DbtMetadataCatalog) -> set[str]:
     scoped: set[str] = set()
     for rel in catalog.relations:
@@ -312,6 +363,134 @@ def create_app(
             "warehouse": active_adapter.capabilities(),
             "langfuse_enabled": active_tracker.langfuse_enabled,
         }
+
+    @app.post(
+        "/v1/consultant/propose",
+        response_model=ConsultantProposal,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def consultant_propose_endpoint(
+        req: ConsultantProposeRequest,
+        x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
+    ) -> ConsultantProposal:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        tz = req.timezone or x_user_timezone
+        try:
+            res = propose_consultant_turn(
+                message=req.message,
+                catalog=cat,
+                history=req.history,
+                glossary=req.glossary,
+                tenant_value_samples=req.tenant_value_samples,
+                dialect=req.dialect,
+                user_timezone=tz,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "consultant_propose",
+                {
+                    "needs_data": res.needs_data,
+                    "query_count": len(res.proposed_queries),
+                    "timezone": res.resolved_timezone,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except ConsultantError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("EMPTY_MESSAGE", "API_KEY_MISSING")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/consultant/answer",
+        response_model=ConsultantAnswer,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def consultant_answer_endpoint(
+        req: ConsultantAnswerRequest,
+        x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
+    ) -> ConsultantAnswer:
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        tz = req.timezone or x_user_timezone
+        try:
+            res = answer_consultant_turn(
+                message=req.message,
+                query_outcomes=req.query_outcomes,
+                history=req.history,
+                user_timezone=tz,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "consultant_answer",
+                {
+                    "outcome_count": len(req.query_outcomes),
+                    "timezone": res.resolved_timezone,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except ConsultantError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code == "API_KEY_MISSING"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/consultant/summarize-intent",
+        response_model=ConsultantIntentSummary,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def consultant_summarize_endpoint(
+        req: ConsultantSummarizeRequest,
+        x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
+    ) -> ConsultantIntentSummary:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        tz = req.timezone or x_user_timezone
+        try:
+            res = summarize_consultation_intent(
+                history=req.history,
+                catalog=cat,
+                glossary=req.glossary,
+                tenant_value_samples=req.tenant_value_samples,
+                user_timezone=tz,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "consultant_summarize_intent",
+                {
+                    "classification": res.gap.classification.value,
+                    "intent_type": res.business_intent.intent_type,
+                    "timezone": res.resolved_timezone,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except ConsultantError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("EMPTY_HISTORY", "API_KEY_MISSING")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
 
     @app.post(
         "/v1/intent/clarify",
