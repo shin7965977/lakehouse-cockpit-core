@@ -174,6 +174,7 @@ def build_diagnostic_plan(
     business_intent: BusinessIntentSpec,
     catalog: DbtMetadataCatalog,
     dialect: QueryDialect = "postgres",
+    tenant_value_samples: dict[str, list[str]] | None = None,
     api_key: str = "",
     max_steps: int = 4,
     structured_llm_fn: Callable[[str, type[Any]], Any] | None = None,
@@ -215,6 +216,7 @@ def build_diagnostic_plan(
         "Step 2: Order Count & AVG/SUM decomposition; Step 3: breakdown by available dimension).\n"
         "4. Each step must be a single-table aggregation query with explicit dimensions and aggregations.\n\n"
         f"ConfirmedBusinessIntent: {json.dumps(business_intent.model_dump(), ensure_ascii=False)}\n"
+        f"TenantAllowedDimensionValues: {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
         f"AvailableTables: {json.dumps(schema_ctx, ensure_ascii=False)}\n"
     )
 

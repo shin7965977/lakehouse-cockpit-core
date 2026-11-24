@@ -211,6 +211,7 @@ class IntentClarifyRequest(BaseModel):
     current_intent: BusinessIntentSpec | None = None
     live_catalog: list[dict[str, Any]] | None = None
     glossary: list[GlossaryEntry] = Field(default_factory=list)
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
     gemini_api_key: str = ""
     max_turns: int = 3
     tenant_id: str | int | None = None
@@ -220,6 +221,7 @@ class DiagnosticPlanRequest(BaseModel):
     business_intent: BusinessIntentSpec
     dialect: QueryDialect = "postgres"
     live_catalog: list[dict[str, Any]] | None = None
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
     gemini_api_key: str = ""
     max_steps: int = 4
     tenant_id: str | int | None = None
@@ -326,6 +328,7 @@ def create_app(
                 history=req.history,
                 current_intent=req.current_intent,
                 glossary=req.glossary,
+                tenant_value_samples=req.tenant_value_samples,
                 api_key=effective_key,
                 max_turns=req.max_turns,
                 structured_llm_fn=structured_llm_fn,
@@ -364,6 +367,7 @@ def create_app(
                 business_intent=req.business_intent,
                 catalog=cat,
                 dialect=req.dialect,
+                tenant_value_samples=req.tenant_value_samples,
                 api_key=effective_key,
                 max_steps=req.max_steps,
                 structured_llm_fn=structured_llm_fn,

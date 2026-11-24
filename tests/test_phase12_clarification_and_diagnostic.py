@@ -392,3 +392,39 @@ def test_diagnostic_synthesize_strips_pii_and_records_failed_step_gaps():
     assert captured_prompts
     assert "secret@corp.com" not in captured_prompts[0]
     assert "boss@corp.com" not in captured_prompts[0]
+
+
+def test_clarify_forwards_tenant_value_samples_to_structured_llm():
+    captured_prompts: list[str] = []
+
+    def _capture_llm(prompt: str, response_model: Any) -> Any:
+        captured_prompts.append(prompt)
+        return response_model.model_validate(
+            {
+                "state": "BLOCKED_UNMAPPABLE",
+                "assistant_message": "此帳戶沒有火星基地倉庫。",
+                "blocking_reason": "目前帳戶的倉庫僅有：台北總倉、桃園倉，不包含火星基地。",
+                "business_intent": {"original_question": "火星基地庫存", "target_relations": []},
+            }
+        )
+
+    app = create_app(internal_token="secret-token", structured_llm_fn=_capture_llm)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/intent/clarify",
+        headers={"X-Internal-Token": "secret-token"},
+        json={
+            "question": "幫我查火星基地上個月的火箭燃料庫存量",
+            "live_catalog": _SAMPLE_LIVE_CATALOG,
+            "tenant_value_samples": {
+                "warehouses.name": ["台北總倉", "桃園倉"],
+                "sales_orders.status": ["Completed", "Confirmed", "Draft"],
+            },
+            "gemini_api_key": "test-key",
+            "tenant_id": 1,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "BLOCKED_UNMAPPABLE"
+    assert captured_prompts and "台北總倉" in captured_prompts[0]

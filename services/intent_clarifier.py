@@ -223,6 +223,7 @@ def clarify_business_intent(
     history: list[ClarificationTurn] | None = None,
     current_intent: BusinessIntentSpec | None = None,
     glossary: list[GlossaryEntry] | None = None,
+    tenant_value_samples: dict[str, list[str]] | None = None,
     api_key: str = "",
     max_turns: int = 3,
     structured_llm_fn: Callable[[str, type[Any]], Any] | None = None,
@@ -278,11 +279,12 @@ def clarify_business_intent(
         "2. If the user asks a 'why' / root-cause / decline / growth diagnosis question, set intent_type='DIAGNOSTIC_ANALYSIS'; otherwise 'SINGLE_QUERY'.\n"
         "3. Ask AT MOST ONE highest-priority missing question per turn (priority: Metric basis -> Timeframe/Comparison -> Grain/Breakdown/Filters) with 2-4 concise clickable options.\n"
         "4. When enough information is collected (or if turn >= max_turns and at least 1 real table matches), set state='READY_FOR_REVIEW' and list any default assumptions explicitly in business_intent.assumptions.\n"
-        "5. If the question cannot be mapped to ANY table in AllowedCatalog, set state='BLOCKED_UNMAPPABLE' and explain in blocking_reason.\n\n"
+        "5. If the question cannot be mapped to ANY table in AllowedCatalog, OR if the user asks for a specific entity value (such as a warehouse name, status, or category) that clearly does NOT exist in TenantAllowedDimensionValues for that table, set state='BLOCKED_UNMAPPABLE' and explain in blocking_reason (listing the real values available in this tenant account).\n\n"
         f"OriginalQuestion: {clean_q}\n"
         f"ConversationHistory: {json.dumps(history_payload, ensure_ascii=False)}\n"
         f"CurrentIntent: {json.dumps(intent_payload, ensure_ascii=False)}\n"
         f"BusinessGlossary: {json.dumps(glossary_slice, ensure_ascii=False)}\n"
+        f"TenantAllowedDimensionValues: {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
         f"CertifiedMetrics: {json.dumps(metrics_slice, ensure_ascii=False)}\n"
         f"AllowedCatalog: {json.dumps(catalog_slice, ensure_ascii=False)}\n"
     )
