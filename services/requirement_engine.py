@@ -179,24 +179,31 @@ def draft_and_classify_query_spec(
     candidate_rels = [
         catalog.get_relation(r) for r in gap.candidate_relations if catalog.get_relation(r) is not None
     ]
+    rels_with_cols = [r for r in candidate_rels if r is not None and len(r.columns) > 0]
+    if not rels_with_cols:
+        raise RequirementDraftError(
+            "INCOMPLETE_CATALOG_METADATA",
+            f"Candidate relation(s) {gap.candidate_relations} have no documented columns in the dbt catalog; "
+            "refusing to let the LLM guess column names.",
+        )
+
     schema_lines = [
         f"- {r.name} ({r.layer}): columns={[c.name for c in r.columns]}"
-        for r in candidate_rels
-        if r is not None
+        for r in rels_with_cols
     ]
     prompt = (
         "You are an Analytics Engineer drafting a structured QuerySpec JSON.\n"
         f"Dialect: {dialect}\n"
         f"Question: {q}\n"
         f"Gap Classification: {gap.classification.value}\n"
-        "Authorized Candidate Relations:\n"
+        "Authorized Candidate Relations (you MUST use ONLY the exact column names listed below):\n"
         + "\n".join(schema_lines)
         + "\n\nReturn ONLY a JSON object with keys:\n"
         '- "relation": exact relation name from above\n'
-        '- "projection": list of dimension columns\n'
-        '- "aggregations": list of {"field": "<col>", "func": "SUM|AVG|COUNT|MIN|MAX", "alias": "<name>"}\n'
-        '- "group_by": list of group-by columns\n'
-        '- "filters": list of {"field": "<col>", "op": "=|!=|>|>=|<|<=", "value": <val>}\n'
+        '- "projection": list of exact dimension column names from above\n'
+        '- "aggregations": list of {"field": "<exact_col>", "func": "SUM|AVG|COUNT|MIN|MAX", "alias": "<name>"}\n'
+        '- "group_by": list of exact group-by column names from above\n'
+        '- "filters": list of {"field": "<exact_col>", "op": "=|!=|>|>=|<|<=", "value": <val>}\n'
         '- "assumptions": list of explicit business assumptions\n'
     )
 
@@ -218,10 +225,17 @@ def draft_and_classify_query_spec(
         raise RequirementDraftError("LLM_INVALID_JSON", f"Failed to decode QuerySpec JSON: {exc}") from exc
 
     rel_name = str(parsed.get("relation", "")).strip()
-    if not rel_name or catalog.get_relation(rel_name) is None:
+    target_rel = catalog.get_relation(rel_name) if rel_name else None
+    if not rel_name or target_rel is None:
         raise RequirementDraftError(
             "UNKNOWN_RELATION",
             f"Drafted relation '{rel_name}' does not exist in the authorized dbt catalog.",
+        )
+
+    if not target_rel.columns:
+        raise RequirementDraftError(
+            "INCOMPLETE_CATALOG_METADATA",
+            f"Target relation '{rel_name}' has no documented columns in the dbt catalog.",
         )
 
     aggs = [
@@ -239,15 +253,40 @@ def draft_and_classify_query_spec(
         for j in (parsed.get("joins") or [])
         if isinstance(j, dict) and j.get("right_relation")
     ]
+    projection = [str(c) for c in (parsed.get("projection") or [])]
+    group_by = [str(c) for c in (parsed.get("group_by") or [])]
+
+    # Strict column whitelist check to block LLM schema hallucinations
+    allowed_cols_low = {c.name.lower() for c in target_rel.columns}
+    referenced_cols = (
+        projection
+        + group_by
+        + [a.field for a in aggs if a.field != "*"]
+        + [f.field for f in filters]
+    )
+    hallucinated = sorted(
+        {
+            col
+            for col in referenced_cols
+            if col.split(".")[-1].strip().lower() not in allowed_cols_low
+        }
+    )
+    if hallucinated:
+        real_cols = [c.name for c in target_rel.columns]
+        raise RequirementDraftError(
+            "HALLUCINATED_COLUMN",
+            f"Drafted column(s) {hallucinated} do not exist in '{rel_name}'. "
+            f"Authorized columns: {real_cols}.",
+        )
 
     spec = QuerySpec(
         spec_id=_spec_id_for(q),
         purpose="ad_hoc",
         question=q,
         data_sources=[DataSourceRef(relation=rel_name, catalog_ref=f"dbt://model/{rel_name}")],
-        projection=[str(c) for c in (parsed.get("projection") or [])],
+        projection=projection,
         aggregations=aggs,
-        group_by=[str(c) for c in (parsed.get("group_by") or [])],
+        group_by=group_by,
         filters=filters,
         joins=joins,
         assumptions=[str(a) for a in (parsed.get("assumptions") or [])],

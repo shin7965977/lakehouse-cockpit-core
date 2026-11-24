@@ -31,8 +31,25 @@ try:
     )
     from ..services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
     from ..services.dbt_validator import (
+        AssetValidationCheck,
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
+    )
+    from ..services.diagnostic_planner import (
+        DiagnosticPlan,
+        DiagnosticPlanningError,
+        DiagnosticSynthesis,
+        StepExecutionOutcome,
+        build_diagnostic_plan,
+        synthesize_diagnostic_findings,
+    )
+    from ..services.intent_clarifier import (
+        BusinessIntentSpec,
+        ClarificationResult,
+        ClarificationTurn,
+        GlossaryEntry,
+        IntentClarificationError,
+        clarify_business_intent,
     )
     from ..services.query_spec import QueryDialect, QuerySpec
     from ..services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
@@ -66,8 +83,25 @@ except (ImportError, ValueError):
     )
     from services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
     from services.dbt_validator import (
+        AssetValidationCheck,
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
+    )
+    from services.diagnostic_planner import (
+        DiagnosticPlan,
+        DiagnosticPlanningError,
+        DiagnosticSynthesis,
+        StepExecutionOutcome,
+        build_diagnostic_plan,
+        synthesize_diagnostic_findings,
+    )
+    from services.intent_clarifier import (
+        BusinessIntentSpec,
+        ClarificationResult,
+        ClarificationTurn,
+        GlossaryEntry,
+        IntentClarificationError,
+        clarify_business_intent,
     )
     from services.query_spec import QueryDialect, QuerySpec
     from services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
@@ -97,6 +131,7 @@ except (ImportError, ValueError):
 class CatalogSearchRequest(BaseModel):
     query: str = ""
     limit: int = Field(default=10, ge=1, le=50)
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class DraftAndClassifyRequest(BaseModel):
@@ -106,6 +141,7 @@ class DraftAndClassifyRequest(BaseModel):
     tenant_id: int | str | None = None
     allowed_relations: list[str] | None = None
     gemini_api_key: str = ""
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class SqlValidateRequest(BaseModel):
@@ -113,6 +149,7 @@ class SqlValidateRequest(BaseModel):
     base_spec: QuerySpec | None = None
     dialect: QueryDialect = "duckdb"
     tenant_id: int | str | None = None
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class SqlRepairRequest(BaseModel):
@@ -123,6 +160,7 @@ class SqlRepairRequest(BaseModel):
     tenant_id: int | str | None = None
     gemini_api_key: str = ""
     max_attempts: int = Field(default=2, ge=1, le=2)
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class QuerySpecExecuteRequest(BaseModel):
@@ -137,12 +175,14 @@ class AssetBuildRequest(BaseModel):
     business_owner: str = "analytics-engineering@company.com"
     golden_sql: str | None = None
     reconcile_column: str | None = None
+    skip_local_validation: bool = False
 
 
 class AssetBuildResponse(BaseModel):
     bundle: DbtAndLightdashBundle
     validation: IsolatedValidationResult
     lightdash: dict[str, Any]
+    compiled_sql: str = ""
 
 
 class SourceIngestionRequest(BaseModel):
@@ -165,6 +205,35 @@ class DraftPRRequest(BaseModel):
     lightdash_status: str = "STAGING_LOCAL_ONLY"
 
 
+class IntentClarifyRequest(BaseModel):
+    question: str
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    current_intent: BusinessIntentSpec | None = None
+    live_catalog: list[dict[str, Any]] | None = None
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    gemini_api_key: str = ""
+    max_turns: int = 3
+    tenant_id: str | int | None = None
+
+
+class DiagnosticPlanRequest(BaseModel):
+    business_intent: BusinessIntentSpec
+    dialect: QueryDialect = "postgres"
+    live_catalog: list[dict[str, Any]] | None = None
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    gemini_api_key: str = ""
+    max_steps: int = 4
+    tenant_id: str | int | None = None
+
+
+class DiagnosticSynthesizeRequest(BaseModel):
+    business_intent: BusinessIntentSpec
+    step_results: list[StepExecutionOutcome] = Field(default_factory=list)
+    gemini_api_key: str = ""
+    tenant_id: str | int | None = None
+
+
 def _tenant_scoped_tables_from_catalog(catalog: DbtMetadataCatalog) -> set[str]:
     scoped: set[str] = set()
     for rel in catalog.relations:
@@ -178,6 +247,7 @@ def create_app(
     internal_token: str | None = None,
     warehouse_adapter: WarehouseAdapter | None = None,
     tracker: ObservabilityTracker | None = None,
+    structured_llm_fn: Any | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI control-plane application."""
     app = FastAPI(
@@ -203,6 +273,16 @@ def create_app(
 
     allowed_relation_names = {r.name for r in active_catalog.relations}
     tenant_scoped_relations = _tenant_scoped_tables_from_catalog(active_catalog)
+
+    def _resolve_catalog(live_catalog: list[dict[str, Any]] | None) -> tuple[DbtMetadataCatalog, set[str], set[str]]:
+        if live_catalog:
+            dyn_cat = DbtMetadataCatalog.from_live_schema(live_catalog)
+            return (
+                dyn_cat,
+                {r.name for r in dyn_cat.relations},
+                _tenant_scoped_tables_from_catalog(dyn_cat),
+            )
+        return active_catalog, allowed_relation_names, tenant_scoped_relations
 
     def _expected_token() -> str:
         if internal_token is not None:
@@ -234,12 +314,126 @@ def create_app(
         }
 
     @app.post(
+        "/v1/intent/clarify",
+        response_model=ClarificationResult,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def clarify_intent_endpoint(req: IntentClarifyRequest) -> ClarificationResult:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            res = clarify_business_intent(
+                question=req.question,
+                catalog=cat,
+                history=req.history,
+                current_intent=req.current_intent,
+                glossary=req.glossary,
+                tenant_value_samples=req.tenant_value_samples,
+                api_key=effective_key,
+                max_turns=req.max_turns,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "intent_clarify",
+                {
+                    "state": res.state,
+                    "turn_number": res.turn_number,
+                    "intent_type": res.business_intent.intent_type,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except IntentClarificationError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("EMPTY_QUESTION", "API_KEY_MISSING")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/diagnostic/plan",
+        response_model=DiagnosticPlan,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def diagnostic_plan_endpoint(req: DiagnosticPlanRequest) -> DiagnosticPlan:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            plan = build_diagnostic_plan(
+                business_intent=req.business_intent,
+                catalog=cat,
+                dialect=req.dialect,
+                tenant_value_samples=req.tenant_value_samples,
+                api_key=effective_key,
+                max_steps=req.max_steps,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "diagnostic_plan",
+                {
+                    "plan_hash": plan.plan_hash,
+                    "step_count": len(plan.steps),
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return plan
+        except DiagnosticPlanningError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("API_KEY_MISSING", "EMPTY_CATALOG")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/diagnostic/synthesize",
+        response_model=DiagnosticSynthesis,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def diagnostic_synthesize_endpoint(req: DiagnosticSynthesizeRequest) -> DiagnosticSynthesis:
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            synth = synthesize_diagnostic_findings(
+                business_intent=req.business_intent,
+                step_results=req.step_results,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "diagnostic_synthesize",
+                {
+                    "findings_count": len(synth.key_findings),
+                    "gaps_count": len(synth.data_gaps),
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return synth
+        except DiagnosticPlanningError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code == "API_KEY_MISSING"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
         "/v1/catalog/search",
         response_model=CatalogSearchResult,
         dependencies=[Depends(_require_internal_token)],
     )
     def search_catalog(req: CatalogSearchRequest) -> CatalogSearchResult:
-        return active_catalog.search(req.query, limit=req.limit)
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        return cat.search(req.query, limit=req.limit)
 
     @app.post(
         "/v1/query-spec/draft-and-classify",
@@ -250,11 +444,12 @@ def create_app(
         req: DraftAndClassifyRequest, request: Request
     ) -> DraftAndClassifyResponse:
         req_id = getattr(request.state, "request_id", None)
+        cat, _, _ = _resolve_catalog(req.live_catalog)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
             resp = draft_and_classify_query_spec(
                 req.question,
-                active_catalog,
+                cat,
                 dialect=req.dialect,
                 api_key=effective_key,
                 is_authorized=req.is_authorized,
@@ -294,13 +489,14 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def validate_sql_endpoint(req: SqlValidateRequest) -> SqlValidationResult:
+        _, allowed_rels, scoped_rels = _resolve_catalog(req.live_catalog)
         base_spec = req.base_spec or QuerySpec(dialect=req.dialect)
         result = validate_and_reconcile_sql(
             req.sql,
             base_spec,
-            allowed_relations=allowed_relation_names,
+            allowed_relations=allowed_rels,
             server_tenant_id=req.tenant_id,
-            tenant_scoped_relations=tenant_scoped_relations,
+            tenant_scoped_relations=scoped_rels,
         )
         active_tracker.record_span(
             "sql_validate_and_reconcile",
@@ -318,6 +514,7 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def repair_sql_endpoint(req: SqlRepairRequest) -> SqlRepairResult:
+        _, allowed_rels, scoped_rels = _resolve_catalog(req.live_catalog)
         base_spec = req.base_spec or QuerySpec(dialect=req.dialect)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
@@ -325,10 +522,10 @@ def create_app(
                 req.sql,
                 req.error_message,
                 base_spec=base_spec,
-                allowed_relations=allowed_relation_names,
+                allowed_relations=allowed_rels,
                 adapter=active_adapter,
                 server_tenant_id=req.tenant_id,
-                tenant_scoped_relations=tenant_scoped_relations,
+                tenant_scoped_relations=scoped_rels,
                 api_key=effective_key,
                 max_attempts=req.max_attempts,
             )
@@ -411,23 +608,40 @@ def create_app(
             business_owner=req.business_owner,
         )
         candidate_sql = req.query_spec.compile_sql()
-        source_dfs = getattr(active_adapter, "dataframes", None)
-        source_db = getattr(active_adapter, "db_path", None)
-        validation = validate_isolated_dbt_asset(
-            model_name=bundle.contract.model_name,
-            candidate_sql=candidate_sql,
-            source_dataframes=source_dfs,
-            source_duckdb_path=source_db,
-            grain=req.grain,
-            not_null_columns=req.grain,
-            golden_sql=req.golden_sql,
-            reconcile_column=req.reconcile_column,
-        )
+        if req.skip_local_validation:
+            validation = IsolatedValidationResult(
+                model_name=bundle.contract.model_name,
+                passed=False,
+                materialized_rows=0,
+                columns=[],
+                checks=[
+                    AssetValidationCheck(
+                        name="delegated_to_data_plane",
+                        passed=False,
+                        detail="Local DuckDB validation skipped; caller Data Plane must execute isolated read-only validation.",
+                    )
+                ],
+                preview_rows=[],
+            )
+        else:
+            source_dfs = getattr(active_adapter, "dataframes", None)
+            source_db = getattr(active_adapter, "db_path", None)
+            validation = validate_isolated_dbt_asset(
+                model_name=bundle.contract.model_name,
+                candidate_sql=candidate_sql,
+                source_dataframes=source_dfs,
+                source_duckdb_path=source_db,
+                grain=req.grain,
+                not_null_columns=req.grain,
+                golden_sql=req.golden_sql,
+                reconcile_column=req.reconcile_column,
+            )
         ld_status = LightdashAdapter().check_status()
         return AssetBuildResponse(
             bundle=bundle,
             validation=validation,
             lightdash=ld_status,
+            compiled_sql=candidate_sql,
         )
 
     @app.post(

@@ -11,6 +11,14 @@
       "name": "raw_order_events",
       "schema": "main_bronze",
       "description": "Append-only raw webhook ingestion stream from Shopify order events.",
+      "columns": {
+        "order_id": {"name": "order_id", "data_type": "VARCHAR", "description": "Raw order identifier"},
+        "event_date": {"name": "event_date", "data_type": "DATE", "description": "Order event date"},
+        "category": {"name": "category", "data_type": "VARCHAR", "description": "Product category"},
+        "gross_amount": {"name": "gross_amount", "data_type": "DOUBLE", "description": "Raw order gross amount"},
+        "ingested_at": {"name": "ingested_at", "data_type": "TIMESTAMP", "description": "Webhook ingestion timestamp"},
+        "source_system": {"name": "source_system", "data_type": "VARCHAR", "description": "Upstream webhook source"}
+      },
       "depends_on": {
         "nodes": ["source.shopify.orders_webhook"]
       },
@@ -22,6 +30,15 @@
       "name": "fact_orders",
       "schema": "main_silver",
       "description": "Kimball Conformed Fact Table at Order grain (1 row per order_id) with deduplication and return flags.",
+      "columns": {
+        "order_id": {"name": "order_id", "data_type": "VARCHAR", "description": "Unique order identifier"},
+        "event_date": {"name": "event_date", "data_type": "DATE", "description": "Order date"},
+        "category": {"name": "category", "data_type": "VARCHAR", "description": "Product category"},
+        "region": {"name": "region", "data_type": "VARCHAR", "description": "Sales region"},
+        "gross_amount": {"name": "gross_amount", "data_type": "DOUBLE", "description": "Order gross sales amount"},
+        "units": {"name": "units", "data_type": "BIGINT", "description": "Order unit quantity"},
+        "is_returned": {"name": "is_returned", "data_type": "BIGINT", "description": "Return flag (1=returned, 0=kept)"}
+      },
       "depends_on": {
         "nodes": ["model.showcase_retail_lakehouse.raw_order_events"]
       },
@@ -31,12 +48,45 @@
       "unique_id": "model.showcase_retail_lakehouse.mart_product_performance",
       "resource_type": "model",
       "name": "mart_product_performance",
-      "schema": "main_silver",
+      "schema": "main_gold",
       "description": "Category-level aggregated performance mart computing GMV, Order Count, AOV, and Return Rate (%).",
+      "columns": {
+        "category": {"name": "category", "data_type": "VARCHAR", "description": "Product category"},
+        "total_gmv": {"name": "total_gmv", "data_type": "DOUBLE", "description": "Total Gross Merchandise Value (GMV)"},
+        "order_count": {"name": "order_count", "data_type": "BIGINT", "description": "Distinct order count"},
+        "returned_orders": {"name": "returned_orders", "data_type": "BIGINT", "description": "Returned order count"},
+        "avg_order_value": {"name": "avg_order_value", "data_type": "DOUBLE", "description": "Average Order Value (AOV)"},
+        "return_rate_pct": {"name": "return_rate_pct", "data_type": "DOUBLE", "description": "Return rate percentage (%)"}
+      },
       "depends_on": {
         "nodes": ["model.showcase_retail_lakehouse.fact_orders"]
       },
-      "compiled_code": "-- Silver/Mart Layer: Category Performance Aggregation\nSELECT\n    category,\n    SUM(gross_amount) AS total_gmv,\n    COUNT(DISTINCT order_id) AS order_count,\n    SUM(is_returned) AS returned_orders,\n    ROUND(SAFE_DIVIDE(SUM(gross_amount), COUNT(DISTINCT order_id)), 2) AS avg_order_value,\n    ROUND(SAFE_DIVIDE(SUM(is_returned), COUNT(DISTINCT order_id)) * 100, 2) AS return_rate_pct\nFROM `showcase-retail-lakehouse.main_silver.fact_orders`\nGROUP BY category\nORDER BY total_gmv DESC;"
+      "compiled_code": "-- Gold Mart Layer: Category Performance Aggregation\nSELECT\n    category,\n    SUM(gross_amount) AS total_gmv,\n    COUNT(DISTINCT order_id) AS order_count,\n    SUM(is_returned) AS returned_orders,\n    ROUND(SAFE_DIVIDE(SUM(gross_amount), COUNT(DISTINCT order_id)), 2) AS avg_order_value,\n    ROUND(SAFE_DIVIDE(SUM(is_returned), COUNT(DISTINCT order_id)) * 100, 2) AS return_rate_pct\nFROM `showcase-retail-lakehouse.main_silver.fact_orders`\nGROUP BY category\nORDER BY total_gmv DESC;"
+    }
+  },
+  "semantic_models": {
+    "semantic_model.showcase_retail_lakehouse.product_performance": {
+      "name": "product_performance",
+      "node_relation": {"alias": "mart_product_performance"},
+      "entities": [{"name": "category"}],
+      "dimensions": [{"name": "category"}],
+      "measures": [{"name": "gmv_measure"}, {"name": "orders_measure"}]
+    }
+  },
+  "metrics": {
+    "metric.showcase_retail_lakehouse.total_gmv": {
+      "name": "total_gmv",
+      "label": "Total GMV (總銷售額)",
+      "description": "Certified Gross Merchandise Value by product category.",
+      "type": "simple",
+      "type_params": {"measure": {"name": "gmv_measure"}}
+    },
+    "metric.showcase_retail_lakehouse.order_count": {
+      "name": "order_count",
+      "label": "Order Count (總訂單數)",
+      "description": "Certified distinct order count by product category.",
+      "type": "simple",
+      "type_params": {"measure": {"name": "orders_measure"}}
     }
   }
 }
