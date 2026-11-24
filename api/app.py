@@ -213,7 +213,7 @@ class IntentClarifyRequest(BaseModel):
     glossary: list[GlossaryEntry] = Field(default_factory=list)
     gemini_api_key: str = ""
     max_turns: int = 3
-    tenant_id: str | None = None
+    tenant_id: str | int | None = None
 
 
 class DiagnosticPlanRequest(BaseModel):
@@ -222,14 +222,14 @@ class DiagnosticPlanRequest(BaseModel):
     live_catalog: list[dict[str, Any]] | None = None
     gemini_api_key: str = ""
     max_steps: int = 4
-    tenant_id: str | None = None
+    tenant_id: str | int | None = None
 
 
 class DiagnosticSynthesizeRequest(BaseModel):
     business_intent: BusinessIntentSpec
     step_results: list[StepExecutionOutcome] = Field(default_factory=list)
     gemini_api_key: str = ""
-    tenant_id: str | None = None
+    tenant_id: str | int | None = None
 
 
 def _tenant_scoped_tables_from_catalog(catalog: DbtMetadataCatalog) -> set[str]:

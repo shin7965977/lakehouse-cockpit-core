@@ -75,6 +75,7 @@ def test_clarify_fast_path_skips_chat_for_precise_table_query():
             "question": "查詢 sales_orders 各狀態的訂單筆數",
             "live_catalog": _SAMPLE_LIVE_CATALOG,
             "glossary": _SAMPLE_GLOSSARY,
+            "tenant_id": 1,
         },
     )
     assert resp.status_code == 200
