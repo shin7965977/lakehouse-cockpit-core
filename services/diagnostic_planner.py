@@ -7,6 +7,7 @@ evidence-grounded Chinese diagnostic summaries from verified step execution resu
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any, Callable, Literal
@@ -86,7 +87,9 @@ class _LlmAggDraft(BaseModel):
 
 class _LlmFilterDraft(BaseModel):
     column: str
-    op: Literal["=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN", "LIKE"] = "="
+    op: Literal[
+        "=", "!=", ">", ">=", "<", "<=", "IN", "NOT IN", "LIKE", "LAST_N_DAYS", "LAST_N_MONTHS"
+    ] = "="
     value: str | int | float | bool | list[str | int | float]
 
 
@@ -206,15 +209,20 @@ def build_diagnostic_plan(
         if t in rel_map
     ]
 
+    today_taipei = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     prompt = (
         "You are an expert Analytics Engineer designing a bounded Diagnostic Analysis Plan "
         f"(between 2 and {max_steps} read-only SQL steps) in Traditional Chinese (繁體中文).\n"
+        f"CurrentDate (Asia/Taipei): {today_taipei}\n"
         "CRITICAL RULES:\n"
         "1. Every step MUST use ONLY real table names and EXACT real column names from AvailableTables.\n"
         "2. NEVER invent columns (no made-up revenue/date/category columns if not listed).\n"
         "3. Decompose the business question logically (e.g., Step 1: overall trend or status distribution; "
         "Step 2: Order Count & AVG/SUM decomposition; Step 3: breakdown by available dimension).\n"
-        "4. Each step must be a single-table aggregation query with explicit dimensions and aggregations.\n\n"
+        "4. Each step must be a single-table aggregation query with explicit dimensions and aggregations.\n"
+        "5. For relative date windows (e.g., last 30 days, last 3 months), ALWAYS use structured filter op "
+        "'LAST_N_DAYS' or 'LAST_N_MONTHS' with a positive integer value (e.g., op='LAST_N_DAYS', value=30). "
+        "NEVER put SQL expressions like NOW() or INTERVAL inside a string value.\n\n"
         f"ConfirmedBusinessIntent: {json.dumps(business_intent.model_dump(), ensure_ascii=False)}\n"
         f"TenantSampleDimensionValues (formatting/casing hints only): {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
         f"AvailableTables: {json.dumps(schema_ctx, ensure_ascii=False)}\n"

@@ -9,6 +9,7 @@ and strictly enforces the Mandatory Fail-Loud Policy.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Any, Callable, Literal
@@ -270,9 +271,11 @@ def clarify_business_intent(
     history_payload = [t.model_dump() for t in turns]
     intent_payload = current_intent.model_dump() if current_intent else {}
 
+    today_taipei = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     prompt = (
         "You are an expert Analytics Engineer conducting a concise Traditional Chinese (繁體中文) "
         "business intent clarification before generating SQL.\n"
+        f"CurrentDate (Asia/Taipei): {today_taipei}\n"
         f"Current turn: {turn_number} of {max_turns}.\n"
         "Rules:\n"
         "1. Map Chinese business concepts strictly to REAL tables in AllowedCatalog or Glossary. NEVER invent table names.\n"

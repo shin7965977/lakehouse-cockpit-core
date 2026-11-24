@@ -7,6 +7,7 @@ silently swallowed or replaced by offline keyword guesses.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -191,8 +192,10 @@ def draft_and_classify_query_spec(
         f"- {r.name} ({r.layer}): columns={[c.name for c in r.columns]}"
         for r in rels_with_cols
     ]
+    today_taipei = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     prompt = (
         "You are an Analytics Engineer drafting a structured QuerySpec JSON.\n"
+        f"CurrentDate (Asia/Taipei): {today_taipei}\n"
         f"Dialect: {dialect}\n"
         f"Question: {q}\n"
         f"Gap Classification: {gap.classification.value}\n"
@@ -203,7 +206,8 @@ def draft_and_classify_query_spec(
         '- "projection": list of exact dimension column names from above\n'
         '- "aggregations": list of {"field": "<exact_col>", "func": "SUM|AVG|COUNT|MIN|MAX", "alias": "<name>"}\n'
         '- "group_by": list of exact group-by column names from above\n'
-        '- "filters": list of {"field": "<exact_col>", "op": "=|!=|>|>=|<|<=", "value": <val>}\n'
+        '- "filters": list of {"field": "<exact_col>", "op": "=|!=|>|>=|<|<=|LAST_N_DAYS|LAST_N_MONTHS", "value": <val>} '
+        '(For relative date windows like last 30 days / last 3 months, use op="LAST_N_DAYS" or "LAST_N_MONTHS" with an integer value; never put NOW()/INTERVAL in a string value.)\n'
         '- "assumptions": list of explicit business assumptions\n'
     )
 

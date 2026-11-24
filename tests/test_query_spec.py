@@ -107,3 +107,32 @@ def test_analytics_asset_contract_serialization() -> None:
     restored = AnalyticsAssetContract.model_validate_json(raw_json)
     assert restored.model_name == "mart_category_gmv"
     assert restored.query_spec.compute_spec_hash() == spec.compute_spec_hash()
+
+
+def test_compile_sql_supports_relative_date_ops_and_rejects_raw_sql_date_literals():
+    spec = QuerySpec(
+        spec_id="qs_rel_date",
+        data_sources=[DataSourceRef(relation="sales_orders")],
+        aggregations=[AggregationSpec(field="total_amount", func="SUM", alias="total_sales")],
+        filters=[
+            FilterCondition(field="order_date", op="LAST_N_DAYS", value=30),
+            FilterCondition(field="created_at", op="LAST_N_MONTHS", value=3),
+        ],
+    )
+    sql = spec.compile_sql()
+    assert "\"order_date\" >= CURRENT_DATE - INTERVAL '30 days'" in sql
+    assert "\"created_at\" >= CURRENT_DATE - INTERVAL '3 months'" in sql
+
+    bad_spec = QuerySpec(
+        spec_id="qs_bad_raw_date",
+        data_sources=[DataSourceRef(relation="sales_orders")],
+        aggregations=[AggregationSpec(field="total_amount", func="SUM", alias="total_sales")],
+        filters=[
+            FilterCondition(field="order_date", op=">=", value="NOW() - INTERVAL '120 days'"),
+        ],
+    )
+    try:
+        bad_spec.compile_sql()
+        raise AssertionError("Expected ValueError for raw SQL date expression in literal filter value")
+    except ValueError as exc:
+        assert "LAST_N_DAYS" in str(exc)
