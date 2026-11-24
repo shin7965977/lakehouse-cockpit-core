@@ -166,3 +166,68 @@ def generate_gemini_text(
             raise
     assert last_exc is not None
     raise last_exc
+
+
+def generate_gemini_structured(
+    api_key: str,
+    prompt: str,
+    response_model: type[Any],
+    model: str = "gemini-3.5-flash-lite",
+    max_retries: int = 2,
+    retry_base_delay_s: float = 1.0,
+) -> Any:
+    """Call Google Gemini with native Pydantic Structured Output (response_schema).
+
+    Uses ``google-genai`` SDK ``GenerateContentConfig(response_mime_type="application/json",
+    response_schema=response_model)`` when available, falling back to JSON extraction +
+    Pydantic validation via REST. Strictly Fail-Loud if all attempts fail.
+    """
+    clean_key = (api_key or "").strip()
+    if not clean_key:
+        raise ValueError("Gemini API Key is empty.")
+
+    def _invoke_once() -> Any:
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=clean_key)
+            resp = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=response_model,
+                ),
+            )
+            parsed = getattr(resp, "parsed", None)
+            if parsed is not None:
+                return response_model.model_validate(parsed)
+            raw_text = (resp.text or "").strip()
+            if not raw_text:
+                raise RuntimeError("Gemini returned empty structured response.")
+            return response_model.model_validate_json(raw_text)
+        except ImportError:
+            schema_hint = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
+            raw = generate_gemini_text(
+                api_key=clean_key,
+                prompt=f"{prompt}\n\nReturn ONLY valid JSON matching this schema:\n{schema_hint}",
+                model=model,
+                max_retries=0,
+            )
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
+            return response_model.model_validate_json(cleaned)
+
+    attempts = max(1, int(max_retries) + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _invoke_once()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1 and _is_transient_gemini_error(exc):
+                time.sleep(retry_base_delay_s * (2 ** attempt))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc

@@ -35,6 +35,22 @@ try:
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
     )
+    from ..services.diagnostic_planner import (
+        DiagnosticPlan,
+        DiagnosticPlanningError,
+        DiagnosticSynthesis,
+        StepExecutionOutcome,
+        build_diagnostic_plan,
+        synthesize_diagnostic_findings,
+    )
+    from ..services.intent_clarifier import (
+        BusinessIntentSpec,
+        ClarificationResult,
+        ClarificationTurn,
+        GlossaryEntry,
+        IntentClarificationError,
+        clarify_business_intent,
+    )
     from ..services.query_spec import QueryDialect, QuerySpec
     from ..services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
     from ..services.requirement_engine import (
@@ -70,6 +86,22 @@ except (ImportError, ValueError):
         AssetValidationCheck,
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
+    )
+    from services.diagnostic_planner import (
+        DiagnosticPlan,
+        DiagnosticPlanningError,
+        DiagnosticSynthesis,
+        StepExecutionOutcome,
+        build_diagnostic_plan,
+        synthesize_diagnostic_findings,
+    )
+    from services.intent_clarifier import (
+        BusinessIntentSpec,
+        ClarificationResult,
+        ClarificationTurn,
+        GlossaryEntry,
+        IntentClarificationError,
+        clarify_business_intent,
     )
     from services.query_spec import QueryDialect, QuerySpec
     from services.release_orchestrator import DraftPRResult, orchestrate_draft_pr
@@ -173,6 +205,33 @@ class DraftPRRequest(BaseModel):
     lightdash_status: str = "STAGING_LOCAL_ONLY"
 
 
+class IntentClarifyRequest(BaseModel):
+    question: str
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    current_intent: BusinessIntentSpec | None = None
+    live_catalog: list[dict[str, Any]] | None = None
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    gemini_api_key: str = ""
+    max_turns: int = 3
+    tenant_id: str | None = None
+
+
+class DiagnosticPlanRequest(BaseModel):
+    business_intent: BusinessIntentSpec
+    dialect: QueryDialect = "postgres"
+    live_catalog: list[dict[str, Any]] | None = None
+    gemini_api_key: str = ""
+    max_steps: int = 4
+    tenant_id: str | None = None
+
+
+class DiagnosticSynthesizeRequest(BaseModel):
+    business_intent: BusinessIntentSpec
+    step_results: list[StepExecutionOutcome] = Field(default_factory=list)
+    gemini_api_key: str = ""
+    tenant_id: str | None = None
+
+
 def _tenant_scoped_tables_from_catalog(catalog: DbtMetadataCatalog) -> set[str]:
     scoped: set[str] = set()
     for rel in catalog.relations:
@@ -186,6 +245,7 @@ def create_app(
     internal_token: str | None = None,
     warehouse_adapter: WarehouseAdapter | None = None,
     tracker: ObservabilityTracker | None = None,
+    structured_llm_fn: Any | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI control-plane application."""
     app = FastAPI(
@@ -250,6 +310,117 @@ def create_app(
             "warehouse": active_adapter.capabilities(),
             "langfuse_enabled": active_tracker.langfuse_enabled,
         }
+
+    @app.post(
+        "/v1/intent/clarify",
+        response_model=ClarificationResult,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def clarify_intent_endpoint(req: IntentClarifyRequest) -> ClarificationResult:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            res = clarify_business_intent(
+                question=req.question,
+                catalog=cat,
+                history=req.history,
+                current_intent=req.current_intent,
+                glossary=req.glossary,
+                api_key=effective_key,
+                max_turns=req.max_turns,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "intent_clarify",
+                {
+                    "state": res.state,
+                    "turn_number": res.turn_number,
+                    "intent_type": res.business_intent.intent_type,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except IntentClarificationError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("EMPTY_QUESTION", "API_KEY_MISSING")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/diagnostic/plan",
+        response_model=DiagnosticPlan,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def diagnostic_plan_endpoint(req: DiagnosticPlanRequest) -> DiagnosticPlan:
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            plan = build_diagnostic_plan(
+                business_intent=req.business_intent,
+                catalog=cat,
+                dialect=req.dialect,
+                api_key=effective_key,
+                max_steps=req.max_steps,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "diagnostic_plan",
+                {
+                    "plan_hash": plan.plan_hash,
+                    "step_count": len(plan.steps),
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return plan
+        except DiagnosticPlanningError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("API_KEY_MISSING", "EMPTY_CATALOG")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/diagnostic/synthesize",
+        response_model=DiagnosticSynthesis,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def diagnostic_synthesize_endpoint(req: DiagnosticSynthesizeRequest) -> DiagnosticSynthesis:
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        try:
+            synth = synthesize_diagnostic_findings(
+                business_intent=req.business_intent,
+                step_results=req.step_results,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "diagnostic_synthesize",
+                {
+                    "findings_count": len(synth.key_findings),
+                    "gaps_count": len(synth.data_gaps),
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return synth
+        except DiagnosticPlanningError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code == "API_KEY_MISSING"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
 
     @app.post(
         "/v1/catalog/search",
