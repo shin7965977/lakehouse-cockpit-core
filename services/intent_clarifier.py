@@ -161,22 +161,34 @@ def _select_relevant_catalog_slice(
     glossary: list[GlossaryEntry],
     max_tables: int = 25,
 ) -> list[dict[str, Any]]:
-    """Keep prompt compact for 100+ live tables by prioritizing glossary + keyword hits."""
-    combined = " ".join([question] + [t.content for t in history]).lower()
+    """Keep prompt compact for 100+ live tables; ALWAYS prioritize LatestUserMessage matches first."""
+    latest_low = (question or "").lower()
+    history_low = " ".join(t.content for t in history).lower()
     prioritized: list[str] = []
 
+    # 1. Highest priority: tables matched by LatestUserMessage (glossary + direct table names)
     for g in glossary:
         terms = [g.business_term, *g.synonyms]
-        if any(term.lower() in combined for term in terms if term):
+        if any(term.lower() in latest_low for term in terms if term):
             for tbl in g.tables:
                 if tbl not in prioritized:
                     prioritized.append(tbl)
-
     for rel in catalog.relations:
-        if rel.name.lower() in combined and rel.name not in prioritized:
+        if rel.name.lower() in latest_low and rel.name not in prioritized:
             prioritized.append(rel.name)
 
-    # Include core glossary tables even if not directly mentioned yet
+    # 2. Secondary priority: tables mentioned in recent history
+    for g in glossary:
+        terms = [g.business_term, *g.synonyms]
+        if any(term.lower() in history_low for term in terms if term):
+            for tbl in g.tables:
+                if tbl not in prioritized:
+                    prioritized.append(tbl)
+    for rel in catalog.relations:
+        if rel.name.lower() in history_low and rel.name not in prioritized:
+            prioritized.append(rel.name)
+
+    # 3. Backfill remaining core glossary tables
     for g in glossary:
         for tbl in g.tables:
             if tbl not in prioritized:
