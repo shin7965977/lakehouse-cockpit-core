@@ -102,7 +102,7 @@ class DatabaseReflectionService:
 def generate_gemini_text(
     api_key: str,
     prompt: str,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3.5-flash-lite",
 ) -> str:
     """Call Google Gemini using google-genai SDK or direct REST API if SDK is not installed in environment."""
     clean_key = (api_key or "").strip()

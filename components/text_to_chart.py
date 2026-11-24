@@ -541,7 +541,7 @@ def _discover_gemini_flash_models(client) -> list[str]:
     except Exception:  # noqa: BLE001
         pass
 
-    fallbacks = ["gemini-2.5-flash", "gemini-2.0-flash"]
+    fallbacks = ["gemini-3.5-flash-lite"]
     candidates = discovered if discovered else list(fallbacks)
     for fb in fallbacks:
         if fb not in candidates:
@@ -1221,7 +1221,7 @@ def refine_ai_chart_config(
             raw_txt = generate_gemini_text(
                 api_key=clean_key,
                 prompt=full_prompt,
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash-lite",
             )
             m_json = re.search(r"\{.*\}", raw_txt, re.DOTALL)
             if not m_json:
@@ -1269,7 +1269,7 @@ def refine_ai_chart_config(
                     updated["title"] = str(new_cfg["title"])
                 if new_cfg.get("takeaway"):
                     updated["takeaway"] = str(new_cfg["takeaway"])
-                updated["generated_by"] = "gemini:gemini-2.5-flash"
+                updated["generated_by"] = "gemini:gemini-3.5-flash-lite"
             return updated, reply or (
                 "Updated chart specification above."
                 if is_en
@@ -1378,7 +1378,7 @@ def _audit_chart_logic_with_gemini(
         "- If ANY issue is found: start with '⚠️', clearly list which logic check(s) failed, ask a brief clarifying question if user intent is ambiguous, and give concrete parameter fix recommendations.\n"
         f"Respond concisely in {'English' if is_en else 'Traditional Chinese (繁體中文)'}."
     )
-    return generate_gemini_text(api_key=api_key, prompt=prompt, model="gemini-2.5-flash")
+    return generate_gemini_text(api_key=api_key, prompt=prompt, model="gemini-3.5-flash-lite")
 
 
 def _render_nl2chart_studio_body(

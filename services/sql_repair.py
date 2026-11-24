@@ -112,7 +112,7 @@ def repair_sql_bounded(
             raw_reply = (
                 llm_callable(prompt)
                 if llm_callable is not None
-                else generate_gemini_text(prompt, api_key=api_key)
+                else generate_gemini_text(api_key=api_key, prompt=prompt)
             )
         except Exception as exc:
             raise RepairError("LLM_CALL_FAILED", f"Gemini SQL repair call failed: {exc}") from exc

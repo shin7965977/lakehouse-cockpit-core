@@ -201,7 +201,7 @@ def draft_and_classify_query_spec(
     )
 
     try:
-        raw = llm_callable(prompt) if llm_callable is not None else generate_gemini_text(prompt, api_key=api_key)
+        raw = llm_callable(prompt) if llm_callable is not None else generate_gemini_text(api_key=api_key, prompt=prompt)
     except Exception as exc:
         raise RequirementDraftError("LLM_CALL_FAILED", f"Gemini API drafting failed: {exc}") from exc
 

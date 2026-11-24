@@ -464,7 +464,7 @@ class ShowcaseRetailAdapter(BaseCockpitAdapter):
                 live_reply = generate_gemini_text(
                     api_key=clean_key,
                     prompt=full_prompt,
-                    model="gemini-2.5-flash",
+                    model="gemini-3.5-flash-lite",
                 )
                 return {"reply": live_reply, "spec_contract": None}
             except Exception as exc:
