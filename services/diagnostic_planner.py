@@ -216,7 +216,7 @@ def build_diagnostic_plan(
         "Step 2: Order Count & AVG/SUM decomposition; Step 3: breakdown by available dimension).\n"
         "4. Each step must be a single-table aggregation query with explicit dimensions and aggregations.\n\n"
         f"ConfirmedBusinessIntent: {json.dumps(business_intent.model_dump(), ensure_ascii=False)}\n"
-        f"TenantAllowedDimensionValues: {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
+        f"TenantSampleDimensionValues (formatting/casing hints only): {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
         f"AvailableTables: {json.dumps(schema_ctx, ensure_ascii=False)}\n"
     )
 

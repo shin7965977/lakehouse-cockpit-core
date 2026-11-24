@@ -394,17 +394,22 @@ def test_diagnostic_synthesize_strips_pii_and_records_failed_step_gaps():
     assert "boss@corp.com" not in captured_prompts[0]
 
 
-def test_clarify_forwards_tenant_value_samples_to_structured_llm():
+def test_clarify_forwards_tenant_value_samples_as_formatting_hints_without_blocking():
     captured_prompts: list[str] = []
 
     def _capture_llm(prompt: str, response_model: Any) -> Any:
         captured_prompts.append(prompt)
         return response_model.model_validate(
             {
-                "state": "BLOCKED_UNMAPPABLE",
-                "assistant_message": "此帳戶沒有火星基地倉庫。",
-                "blocking_reason": "目前帳戶的倉庫僅有：台北總倉、桃園倉，不包含火星基地。",
-                "business_intent": {"original_question": "火星基地庫存", "target_relations": []},
+                "state": "READY_FOR_REVIEW",
+                "assistant_message": "已對齊狀態格式為 Completed，請確認以下規格。",
+                "business_intent": {
+                    "original_question": "查詢已完成訂單數量",
+                    "intent_type": "SINGLE_QUERY",
+                    "metric": "訂單筆數",
+                    "filters": ["status = 'Completed'"],
+                    "target_relations": ["sales_orders"],
+                },
             }
         )
 
@@ -415,7 +420,7 @@ def test_clarify_forwards_tenant_value_samples_to_structured_llm():
         "/v1/intent/clarify",
         headers={"X-Internal-Token": "secret-token"},
         json={
-            "question": "幫我查火星基地上個月的火箭燃料庫存量",
+            "question": "查詢已完成訂單數量",
             "live_catalog": _SAMPLE_LIVE_CATALOG,
             "tenant_value_samples": {
                 "warehouses.name": ["台北總倉", "桃園倉"],
@@ -426,5 +431,8 @@ def test_clarify_forwards_tenant_value_samples_to_structured_llm():
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["state"] == "BLOCKED_UNMAPPABLE"
-    assert captured_prompts and "台北總倉" in captured_prompts[0]
+    assert resp.json()["state"] == "READY_FOR_REVIEW"
+    assert captured_prompts
+    assert "TenantSampleDimensionValues" in captured_prompts[0]
+    assert "NEVER reject a question solely because a specific filter value is missing" in captured_prompts[0]
+    assert "Completed" in captured_prompts[0]
