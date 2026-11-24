@@ -97,6 +97,7 @@ except (ImportError, ValueError):
 class CatalogSearchRequest(BaseModel):
     query: str = ""
     limit: int = Field(default=10, ge=1, le=50)
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class DraftAndClassifyRequest(BaseModel):
@@ -106,6 +107,7 @@ class DraftAndClassifyRequest(BaseModel):
     tenant_id: int | str | None = None
     allowed_relations: list[str] | None = None
     gemini_api_key: str = ""
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class SqlValidateRequest(BaseModel):
@@ -113,6 +115,7 @@ class SqlValidateRequest(BaseModel):
     base_spec: QuerySpec | None = None
     dialect: QueryDialect = "duckdb"
     tenant_id: int | str | None = None
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class SqlRepairRequest(BaseModel):
@@ -123,6 +126,7 @@ class SqlRepairRequest(BaseModel):
     tenant_id: int | str | None = None
     gemini_api_key: str = ""
     max_attempts: int = Field(default=2, ge=1, le=2)
+    live_catalog: list[dict[str, Any]] | None = None
 
 
 class QuerySpecExecuteRequest(BaseModel):
@@ -204,6 +208,16 @@ def create_app(
     allowed_relation_names = {r.name for r in active_catalog.relations}
     tenant_scoped_relations = _tenant_scoped_tables_from_catalog(active_catalog)
 
+    def _resolve_catalog(live_catalog: list[dict[str, Any]] | None) -> tuple[DbtMetadataCatalog, set[str], set[str]]:
+        if live_catalog:
+            dyn_cat = DbtMetadataCatalog.from_live_schema(live_catalog)
+            return (
+                dyn_cat,
+                {r.name for r in dyn_cat.relations},
+                _tenant_scoped_tables_from_catalog(dyn_cat),
+            )
+        return active_catalog, allowed_relation_names, tenant_scoped_relations
+
     def _expected_token() -> str:
         if internal_token is not None:
             return internal_token
@@ -239,7 +253,8 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def search_catalog(req: CatalogSearchRequest) -> CatalogSearchResult:
-        return active_catalog.search(req.query, limit=req.limit)
+        cat, _, _ = _resolve_catalog(req.live_catalog)
+        return cat.search(req.query, limit=req.limit)
 
     @app.post(
         "/v1/query-spec/draft-and-classify",
@@ -250,11 +265,12 @@ def create_app(
         req: DraftAndClassifyRequest, request: Request
     ) -> DraftAndClassifyResponse:
         req_id = getattr(request.state, "request_id", None)
+        cat, _, _ = _resolve_catalog(req.live_catalog)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
             resp = draft_and_classify_query_spec(
                 req.question,
-                active_catalog,
+                cat,
                 dialect=req.dialect,
                 api_key=effective_key,
                 is_authorized=req.is_authorized,
@@ -294,13 +310,14 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def validate_sql_endpoint(req: SqlValidateRequest) -> SqlValidationResult:
+        _, allowed_rels, scoped_rels = _resolve_catalog(req.live_catalog)
         base_spec = req.base_spec or QuerySpec(dialect=req.dialect)
         result = validate_and_reconcile_sql(
             req.sql,
             base_spec,
-            allowed_relations=allowed_relation_names,
+            allowed_relations=allowed_rels,
             server_tenant_id=req.tenant_id,
-            tenant_scoped_relations=tenant_scoped_relations,
+            tenant_scoped_relations=scoped_rels,
         )
         active_tracker.record_span(
             "sql_validate_and_reconcile",
@@ -318,6 +335,7 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def repair_sql_endpoint(req: SqlRepairRequest) -> SqlRepairResult:
+        _, allowed_rels, scoped_rels = _resolve_catalog(req.live_catalog)
         base_spec = req.base_spec or QuerySpec(dialect=req.dialect)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
@@ -325,10 +343,10 @@ def create_app(
                 req.sql,
                 req.error_message,
                 base_spec=base_spec,
-                allowed_relations=allowed_relation_names,
+                allowed_relations=allowed_rels,
                 adapter=active_adapter,
                 server_tenant_id=req.tenant_id,
-                tenant_scoped_relations=tenant_scoped_relations,
+                tenant_scoped_relations=scoped_rels,
                 api_key=effective_key,
                 max_attempts=req.max_attempts,
             )

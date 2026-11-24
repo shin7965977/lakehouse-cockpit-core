@@ -314,6 +314,45 @@ class DbtMetadataCatalog:
             generated_at=generated_at,
         )
 
+    @classmethod
+    def from_live_schema(
+        cls,
+        tables: list[dict[str, Any]],
+        source_label: str = "live_erp_postgres",
+    ) -> DbtMetadataCatalog:
+        """Build a normalized catalog directly from live database information_schema reflection."""
+        relations: list[CatalogRelation] = []
+        for tbl in tables:
+            if not isinstance(tbl, dict):
+                continue
+            name = str(tbl.get("name", "")).strip()
+            if not name:
+                continue
+            schema_name = str(tbl.get("schema", "public")).strip() or "public"
+            raw_cols = tbl.get("columns") or []
+            cols = [
+                CatalogColumn(
+                    name=str(c.get("name", "")).strip(),
+                    data_type=str(c.get("data_type", "")).strip(),
+                    description=str(c.get("description", "")).strip(),
+                )
+                for c in raw_cols
+                if isinstance(c, dict) and str(c.get("name", "")).strip()
+            ]
+            relations.append(
+                CatalogRelation(
+                    unique_id=f"live.{schema_name}.{name}",
+                    name=name,
+                    schema_name=schema_name,
+                    layer="gold",
+                    resource_type="table",
+                    description=f"Live ERP PostgreSQL table ({schema_name}.{name})",
+                    columns=cols,
+                    last_run_status="live",
+                )
+            )
+        return cls(relations=relations, metrics=[], source_dir=source_label)
+
     def get_relation(self, name: str) -> CatalogRelation | None:
         return self._relations_by_name.get(name.strip().lower())
 
