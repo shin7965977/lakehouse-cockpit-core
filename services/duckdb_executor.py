@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -99,42 +100,69 @@ class DatabaseReflectionService:
         ]
 
 
+def _is_transient_gemini_error(exc: Exception) -> bool:
+    """Return True only for temporary Gemini overload/rate-limit errors worth a short retry."""
+    msg = str(exc).upper()
+    return any(tok in msg for tok in ("503", "UNAVAILABLE", "HIGH DEMAND", "429", "RESOURCE_EXHAUSTED"))
+
+
 def generate_gemini_text(
     api_key: str,
     prompt: str,
     model: str = "gemini-3.5-flash-lite",
+    max_retries: int = 2,
+    retry_base_delay_s: float = 1.0,
 ) -> str:
-    """Call Google Gemini using google-genai SDK or direct REST API if SDK is not installed in environment."""
+    """Call Google Gemini using google-genai SDK or direct REST API if SDK is not installed in environment.
+
+    Retries up to ``max_retries`` times with short exponential backoff ONLY on transient
+    503/429 overload responses, and remains strictly Fail-Loud if all attempts fail.
+    """
     clean_key = (api_key or "").strip()
     if not clean_key:
         raise ValueError("Gemini API Key is empty.")
 
-    try:
-        from google import genai
-
-        client = genai.Client(api_key=clean_key)
-        resp = client.models.generate_content(model=model, contents=prompt)
-        return (resp.text or "").strip()
-    except ImportError:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
-        payload = json.dumps(
-            {"contents": [{"parts": [{"text": prompt}]}]}
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+    def _invoke_once() -> str:
         try:
-            with urllib.request.urlopen(req, timeout=25) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as http_err:
-            err_detail = http_err.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Gemini REST HTTP {http_err.code}: {err_detail}") from http_err
+            from google import genai
 
-        candidates = body.get("candidates") or []
-        if not candidates:
-            raise RuntimeError(f"Gemini returned no candidates: {body}")
-        parts = candidates[0].get("content", {}).get("parts") or []
-        return "".join(str(p.get("text", "")) for p in parts).strip()
+            client = genai.Client(api_key=clean_key)
+            resp = client.models.generate_content(model=model, contents=prompt)
+            return (resp.text or "").strip()
+        except ImportError:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
+            payload = json.dumps(
+                {"contents": [{"parts": [{"text": prompt}]}]}
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=25) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as http_err:
+                err_detail = http_err.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"Gemini REST HTTP {http_err.code}: {err_detail}") from http_err
+
+            candidates = body.get("candidates") or []
+            if not candidates:
+                raise RuntimeError(f"Gemini returned no candidates: {body}")
+            parts = candidates[0].get("content", {}).get("parts") or []
+            return "".join(str(p.get("text", "")) for p in parts).strip()
+
+    attempts = max(1, int(max_retries) + 1)
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _invoke_once()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1 and _is_transient_gemini_error(exc):
+                time.sleep(retry_base_delay_s * (2 ** attempt))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc

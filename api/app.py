@@ -31,6 +31,7 @@ try:
     )
     from ..services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
     from ..services.dbt_validator import (
+        AssetValidationCheck,
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
     )
@@ -66,6 +67,7 @@ except (ImportError, ValueError):
     )
     from services.dbt_catalog import CatalogSearchResult, DbtMetadataCatalog
     from services.dbt_validator import (
+        AssetValidationCheck,
         IsolatedValidationResult,
         validate_isolated_dbt_asset,
     )
@@ -141,12 +143,14 @@ class AssetBuildRequest(BaseModel):
     business_owner: str = "analytics-engineering@company.com"
     golden_sql: str | None = None
     reconcile_column: str | None = None
+    skip_local_validation: bool = False
 
 
 class AssetBuildResponse(BaseModel):
     bundle: DbtAndLightdashBundle
     validation: IsolatedValidationResult
     lightdash: dict[str, Any]
+    compiled_sql: str = ""
 
 
 class SourceIngestionRequest(BaseModel):
@@ -429,23 +433,40 @@ def create_app(
             business_owner=req.business_owner,
         )
         candidate_sql = req.query_spec.compile_sql()
-        source_dfs = getattr(active_adapter, "dataframes", None)
-        source_db = getattr(active_adapter, "db_path", None)
-        validation = validate_isolated_dbt_asset(
-            model_name=bundle.contract.model_name,
-            candidate_sql=candidate_sql,
-            source_dataframes=source_dfs,
-            source_duckdb_path=source_db,
-            grain=req.grain,
-            not_null_columns=req.grain,
-            golden_sql=req.golden_sql,
-            reconcile_column=req.reconcile_column,
-        )
+        if req.skip_local_validation:
+            validation = IsolatedValidationResult(
+                model_name=bundle.contract.model_name,
+                passed=False,
+                materialized_rows=0,
+                columns=[],
+                checks=[
+                    AssetValidationCheck(
+                        name="delegated_to_data_plane",
+                        passed=False,
+                        detail="Local DuckDB validation skipped; caller Data Plane must execute isolated read-only validation.",
+                    )
+                ],
+                preview_rows=[],
+            )
+        else:
+            source_dfs = getattr(active_adapter, "dataframes", None)
+            source_db = getattr(active_adapter, "db_path", None)
+            validation = validate_isolated_dbt_asset(
+                model_name=bundle.contract.model_name,
+                candidate_sql=candidate_sql,
+                source_dataframes=source_dfs,
+                source_duckdb_path=source_db,
+                grain=req.grain,
+                not_null_columns=req.grain,
+                golden_sql=req.golden_sql,
+                reconcile_column=req.reconcile_column,
+            )
         ld_status = LightdashAdapter().check_status()
         return AssetBuildResponse(
             bundle=bundle,
             validation=validation,
             lightdash=ld_status,
+            compiled_sql=candidate_sql,
         )
 
     @app.post(
