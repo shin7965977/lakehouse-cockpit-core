@@ -137,3 +137,21 @@ def test_reconciles_supported_select_and_flags_cte_window_as_requires_ae_review(
     assert r_cte.reconciled_spec.raw_sql_override == cte_sql
     assert r_cte.reconciled_spec.is_confirmation_valid() is False
 
+
+
+def test_auto_tenant_scoping_qualifies_table_name_on_multi_table_join():
+    sql = (
+        'SELECT "customers"."id", COUNT("sales_orders"."id") AS "order_count" '
+        'FROM "customers" '
+        'LEFT JOIN "sales_orders" ON "customers"."id" = "sales_orders"."customer_id" '
+        'GROUP BY "customers"."id"'
+    )
+    res = validate_and_reconcile_sql(
+        sql,
+        QuerySpec(dialect="postgres"),
+        allowed_relations={"customers", "sales_orders"},
+        server_tenant_id=1,
+        tenant_scoped_relations={"customers", "sales_orders"},
+    )
+    assert res.status != "BLOCKED"
+    assert '"customers"."tenant_id" = 1' in res.executable_sql

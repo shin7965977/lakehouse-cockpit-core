@@ -151,7 +151,25 @@ def _check_tenant_isolation(
                 else exp.Literal.string(str(server_tenant_id))
             )
             scoped_tree = tree.copy()
-            scoped_tree.where(exp.EQ(this=exp.column("tenant_id"), expression=tenant_expr), copy=False)
+            # When joining multiple tables, qualify tenant_id with the primary scoped table to avoid
+            # PostgreSQL "column reference 'tenant_id' is ambiguous" errors.
+            table_qualifier: str | None = None
+            if len(referenced_tables) > 1:
+                from_clause = scoped_tree.args.get("from_") or scoped_tree.args.get("from")
+                if from_clause and isinstance(from_clause.this, exp.Table):
+                    if from_clause.this.name.lower() in scoped_low:
+                        table_qualifier = from_clause.this.alias_or_name
+                if not table_qualifier:
+                    for t_node in scoped_tree.find_all(exp.Table):
+                        if t_node.name.lower() in scoped_low:
+                            table_qualifier = t_node.alias_or_name
+                            break
+            tenant_col = (
+                exp.column("tenant_id", table=table_qualifier, quoted=True)
+                if table_qualifier
+                else exp.column("tenant_id")
+            )
+            scoped_tree.where(exp.EQ(this=tenant_col, expression=tenant_expr), copy=False)
             return True, "", scoped_tree
 
     return True, "", tree

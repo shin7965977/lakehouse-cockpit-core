@@ -161,16 +161,41 @@ def classify_semantic_gap(
     tokens = _extract_tokens(q)
     matched_cols: list[dict[str, str]] = []
     layers_hit: dict[str, set[str]] = {"gold": set(), "silver": set(), "bronze": set(), "other": set()}
+    explicit_layers_hit: dict[str, set[str]] = {"gold": set(), "silver": set(), "bronze": set(), "other": set()}
+
+    # Statistical document-frequency filter (zero hardcoded column blacklists):
+    # columns appearing in >30% of visible tables (when >=5 tables) lack table-level discriminating power.
+    col_doc_freq: dict[str, int] = {}
+    for rel in visible_relations:
+        for c_name in {c.name.lower() for c in rel.columns}:
+            col_doc_freq[c_name] = col_doc_freq.get(c_name, 0) + 1
+    total_rels = len(visible_relations)
+
+    def _whole_ident_in_q(ident: str) -> bool:
+        if not ident:
+            return False
+        return bool(re.search(rf"(?<![a-z0-9_]){re.escape(ident)}(?![a-z0-9_])", q_low))
 
     for rel in visible_relations:
         rel_name_low = rel.name.lower()
         rel_desc_low = rel.description.lower()
+        rel_explicitly_named = _whole_ident_in_q(rel_name_low) or any(
+            (tok == rel_name_low) or (len(tok) >= 4 and tok in rel_desc_low) for tok in tokens
+        )
+        if rel_explicitly_named:
+            explicit_layers_hit.setdefault(rel.layer, set()).add(rel.name)
+            layers_hit.setdefault(rel.layer, set()).add(rel.name)
+
         for col in rel.columns:
             col_low = col.name.lower()
             col_desc_low = col.description.lower()
-            if col_low in q_low or any(
-                tok in col_low or (len(tok) >= 3 and tok in col_desc_low) for tok in tokens
-            ):
+            is_ubiquitous = total_rels >= 5 and (col_doc_freq.get(col_low, 0) / total_rels) > 0.30
+            col_exact_hit = _whole_ident_in_q(col_low) or any(
+                (tok == col_low) or (len(tok) >= 3 and tok in col_desc_low) for tok in tokens
+            )
+            if col_exact_hit:
+                if is_ubiquitous and not rel_explicitly_named:
+                    continue
                 matched_cols.append(
                     {
                         "relation": rel.name,
@@ -181,8 +206,11 @@ def classify_semantic_gap(
                     }
                 )
                 layers_hit.setdefault(rel.layer, set()).add(rel.name)
-        if rel_name_low in q_low or any(tok in rel_name_low or (len(tok) >= 4 and tok in rel_desc_low) for tok in tokens):
-            layers_hit.setdefault(rel.layer, set()).add(rel.name)
+
+    # When explicit relation name(s) matched in the question, prioritize them over noisy column-only hits
+    for layer_key in ("gold", "silver", "bronze", "other"):
+        if explicit_layers_hit.get(layer_key):
+            layers_hit[layer_key] = set(explicit_layers_hit[layer_key])
 
     # If user explicitly asked for fine-grain entity (e.g. customer_id / order_id) check if ANY column actually provides it
     if asks_fine_grain:

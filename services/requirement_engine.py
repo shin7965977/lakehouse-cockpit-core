@@ -202,11 +202,12 @@ def draft_and_classify_query_spec(
         "Authorized Candidate Relations (you MUST use ONLY the exact column names listed below):\n"
         + "\n".join(schema_lines)
         + "\n\nReturn ONLY a JSON object with keys:\n"
-        '- "relation": exact relation name from above\n'
-        '- "projection": list of exact dimension column names from above\n'
-        '- "aggregations": list of {"field": "<exact_col>", "func": "SUM|AVG|COUNT|MIN|MAX", "alias": "<name>"}\n'
-        '- "group_by": list of exact group-by column names from above\n'
-        '- "filters": list of {"field": "<exact_col>", "op": "=|!=|>|>=|<|<=|LAST_N_DAYS|LAST_N_MONTHS", "value": <val>} '
+        '- "relation": exact primary relation name from above\n'
+        '- "joins": optional list of {"left_relation": "<exact_rel>", "right_relation": "<exact_rel>", "on": "<join_cond>", "join_type": "LEFT|INNER"} when multiple relations are needed\n'
+        '- "projection": list of exact dimension column names (use "table.column" when joining multiple tables)\n'
+        '- "aggregations": list of {"field": "<exact_col_or_table.col>", "func": "SUM|AVG|COUNT|MIN|MAX", "alias": "<name>"}\n'
+        '- "group_by": list of exact group-by column names\n'
+        '- "filters": list of {"field": "<exact_col_or_table.col>", "op": "=|!=|>|>=|<|<=|LAST_N_DAYS|LAST_N_MONTHS", "value": <val>} '
         '(For relative date windows like last 30 days / last 3 months, use op="LAST_N_DAYS" or "LAST_N_MONTHS" with an integer value; never put NOW()/INTERVAL in a string value.)\n'
         '- "assumptions": list of explicit business assumptions\n'
     )
@@ -260,27 +261,53 @@ def draft_and_classify_query_spec(
     projection = [str(c) for c in (parsed.get("projection") or [])]
     group_by = [str(c) for c in (parsed.get("group_by") or [])]
 
-    # Strict column whitelist check to block LLM schema hallucinations
-    allowed_cols_low = {c.name.lower() for c in target_rel.columns}
+    # Strict multi-table column whitelist check across base relation and all JOIN relations
+    rel_col_map: dict[str, set[str]] = {
+        rel_name.lower(): {c.name.lower() for c in target_rel.columns}
+    }
+    for j in joins:
+        j_rel = catalog.get_relation(j.right_relation)
+        if j_rel is None:
+            raise RequirementDraftError(
+                "UNKNOWN_RELATION",
+                f"Joined relation '{j.right_relation}' does not exist in the authorized catalog.",
+            )
+        if not j_rel.columns:
+            raise RequirementDraftError(
+                "INCOMPLETE_CATALOG_METADATA",
+                f"Joined relation '{j.right_relation}' has no documented columns in the catalog.",
+            )
+        rel_col_map[j.right_relation.lower()] = {c.name.lower() for c in j_rel.columns}
+
+    all_allowed_cols_low: set[str] = set()
+    for cols in rel_col_map.values():
+        all_allowed_cols_low.update(cols)
+
     referenced_cols = (
         projection
         + group_by
         + [a.field for a in aggs if a.field != "*"]
         + [f.field for f in filters]
     )
-    hallucinated = sorted(
-        {
-            col
-            for col in referenced_cols
-            if col.split(".")[-1].strip().lower() not in allowed_cols_low
-        }
-    )
+    hallucinated: list[str] = []
+    for col in referenced_cols:
+        clean_col = col.strip()
+        if "." in clean_col:
+            t_part, c_part = clean_col.split(".", 1)
+            t_low, c_low = t_part.strip().strip('"').lower(), c_part.strip().strip('"').lower()
+            if t_low not in rel_col_map or c_low not in rel_col_map[t_low]:
+                hallucinated.append(clean_col)
+        else:
+            if clean_col.strip('"').lower() not in all_allowed_cols_low:
+                hallucinated.append(clean_col)
+
+    hallucinated = sorted(set(hallucinated))
     if hallucinated:
-        real_cols = [c.name for c in target_rel.columns]
+        authorized_summary = {t: sorted(cols) for t, cols in rel_col_map.items()}
         raise RequirementDraftError(
             "HALLUCINATED_COLUMN",
-            f"Drafted column(s) {hallucinated} do not exist in '{rel_name}'. "
-            f"Authorized columns: {real_cols}.",
+            f"Drafted column(s) {hallucinated} do not exist in authorized relation(s) {list(rel_col_map.keys())}. "
+            f"Authorized columns: {authorized_summary}.",
         )
 
     spec = QuerySpec(
