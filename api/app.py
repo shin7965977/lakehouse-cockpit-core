@@ -290,6 +290,7 @@ class ConsultantAnswerRequest(BaseModel):
 class ConsultantSummarizeRequest(BaseModel):
     history: list[ClarificationTurn] = Field(default_factory=list)
     live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
     glossary: list[GlossaryEntry] = Field(default_factory=list)
     tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
     timezone: str | None = None
@@ -473,7 +474,7 @@ def create_app(
         req: ConsultantSummarizeRequest,
         x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
     ) -> ConsultantIntentSummary:
-        cat, _, _ = _resolve_catalog(req.live_catalog)
+        cat, _, _ = _resolve_catalog(req.live_catalog, req.live_metrics)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         tz = req.timezone or x_user_timezone
         try:
