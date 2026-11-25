@@ -359,19 +359,37 @@ def answer_consultant_turn(
             }
         )
 
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", message or ""))
+    if has_cjk:
+        language_rule = (
+            "LANGUAGE RULE: Reply strictly in Traditional Chinese (繁體中文).\n"
+        )
+        structure_rule = (
+            "2. Do NOT merely recite raw table rows like a Q&A bot. Structure your response like a real senior consultant:\n"
+            "   - **核心發現（So What?）**：point out concentration risks, top-share imbalances, anomalies, or key ratios directly from the real data.\n"
+            "   - **可能商業假說（2 Hypotheses）**：propose 2 concrete, testable business hypotheses explaining WHY this pattern may be occurring.\n"
+            "   - **建議下一步延伸**：proactively recommend 1-2 sharp follow-up angles the user can ask next (and mention they can click '進入商業語意分析' whenever ready to turn this into a governed model).\n\n"
+        )
+    else:
+        language_rule = (
+            "LANGUAGE RULE: Reply STRICTLY in executive-level ENGLISH. Do NOT output any Chinese characters.\n"
+        )
+        structure_rule = (
+            "2. Do NOT merely recite raw table rows like a Q&A bot. Structure your response like a real senior consultant:\n"
+            "   - **Key Finding (So What?)**: point out concentration risks, top-share imbalances, anomalies, or key ratios directly from the real data.\n"
+            "   - **Business Hypotheses (2 Hypotheses)**: propose 2 concrete, testable business hypotheses explaining WHY this pattern may be occurring.\n"
+            "   - **Recommended Next Step**: proactively recommend 1-2 sharp follow-up angles the user can ask next (and mention they can click 'Enter Business Semantic Analysis' whenever ready to turn this into a governed model).\n\n"
+        )
+
     prompt = (
         "You are a Senior Enterprise ERP Business Consultant (hypothesis-driven, SO-WHAT mindset).\n"
-        "LANGUAGE RULE: ALWAYS reply in the EXACT SAME language as LatestUserMessage "
-        "(English if the user writes in English; Traditional Chinese 繁體中文 if the user writes in Chinese).\n"
-        f"CurrentDate ({tz_name}): {today_str}\n"
+        + language_rule
+        + f"CurrentDate ({tz_name}): {today_str}\n"
         "STRICT ANTI-HALLUCINATION & CONSULTING DEPTH RULES:\n"
         "1. ONLY cite real numbers explicitly present in SUCCEEDED QueryOutcomes below. If a query FAILED or returned 0 rows, "
         "state that honestly and NEVER fabricate numbers.\n"
-        "2. Do NOT merely recite raw table rows like a Q&A bot. Structure your response like a real senior consultant:\n"
-        "   - **核心發現（So What?）**：point out concentration risks, top-share imbalances, anomalies, or key ratios directly from the real data.\n"
-        "   - **可能商業假說（2 Hypotheses）**：propose 2 concrete, testable business hypotheses explaining WHY this pattern may be occurring.\n"
-        "   - **建議下一步延伸**：proactively recommend 1-2 sharp follow-up angles the user can ask next (and mention they can click '進入商業語意分析' whenever ready to turn this into a governed model).\n\n"
-        f"RecentConversationHistory: {json.dumps([t.model_dump() for t in recent_turns], ensure_ascii=False)}\n"
+        + structure_rule
+        + f"RecentConversationHistory: {json.dumps([t.model_dump() for t in recent_turns], ensure_ascii=False)}\n"
         f"SanitizedQueryOutcomes: {json.dumps(sanitized_outcomes, ensure_ascii=False)}\n"
         f"LatestUserMessage (RESPOND TO THIS MESSAGE): {message}\n"
     )
