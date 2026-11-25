@@ -68,6 +68,7 @@ try:
         RequirementDraftError,
         draft_and_classify_query_spec,
     )
+    from ..services.semantic_gap_detector import GapDetectionResult, classify_semantic_gap
     from ..services.semantic_promotion import (
         PromotionCandidate,
         generate_promotion_candidates,
@@ -130,6 +131,7 @@ except (ImportError, ValueError):
         RequirementDraftError,
         draft_and_classify_query_spec,
     )
+    from services.semantic_gap_detector import GapDetectionResult, classify_semantic_gap
     from services.semantic_promotion import (
         PromotionCandidate,
         generate_promotion_candidates,
@@ -152,6 +154,15 @@ class CatalogSearchRequest(BaseModel):
     query: str = ""
     limit: int = Field(default=10, ge=1, le=50)
     live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
+
+
+class GapDetectRequest(BaseModel):
+    question: str
+    is_authorized: bool = True
+    allowed_relations: list[str] | None = None
+    live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
 
 
 class DraftAndClassifyRequest(BaseModel):
@@ -162,6 +173,7 @@ class DraftAndClassifyRequest(BaseModel):
     allowed_relations: list[str] | None = None
     gemini_api_key: str = ""
     live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
 
 
 class SqlValidateRequest(BaseModel):
@@ -325,9 +337,12 @@ def create_app(
     allowed_relation_names = {r.name for r in active_catalog.relations}
     tenant_scoped_relations = _tenant_scoped_tables_from_catalog(active_catalog)
 
-    def _resolve_catalog(live_catalog: list[dict[str, Any]] | None) -> tuple[DbtMetadataCatalog, set[str], set[str]]:
+    def _resolve_catalog(
+        live_catalog: list[dict[str, Any]] | None,
+        live_metrics: list[dict[str, Any]] | None = None,
+    ) -> tuple[DbtMetadataCatalog, set[str], set[str]]:
         if live_catalog:
-            dyn_cat = DbtMetadataCatalog.from_live_schema(live_catalog)
+            dyn_cat = DbtMetadataCatalog.from_live_schema(live_catalog, metrics=live_metrics)
             return (
                 dyn_cat,
                 {r.name for r in dyn_cat.relations},
@@ -611,8 +626,24 @@ def create_app(
         dependencies=[Depends(_require_internal_token)],
     )
     def search_catalog(req: CatalogSearchRequest) -> CatalogSearchResult:
-        cat, _, _ = _resolve_catalog(req.live_catalog)
+        cat, _, _ = _resolve_catalog(req.live_catalog, req.live_metrics)
         return cat.search(req.query, limit=req.limit)
+
+    @app.post(
+        "/v1/semantic-gap/detect",
+        response_model=GapDetectionResult,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def detect_semantic_gap(req: GapDetectRequest) -> GapDetectionResult:
+        cat, _, _ = _resolve_catalog(req.live_catalog, req.live_metrics)
+        return classify_semantic_gap(
+            req.question,
+            cat,
+            is_authorized=req.is_authorized,
+            allowed_relations=(
+                set(req.allowed_relations) if req.allowed_relations is not None else None
+            ),
+        )
 
     @app.post(
         "/v1/query-spec/draft-and-classify",
@@ -623,7 +654,7 @@ def create_app(
         req: DraftAndClassifyRequest, request: Request
     ) -> DraftAndClassifyResponse:
         req_id = getattr(request.state, "request_id", None)
-        cat, _, _ = _resolve_catalog(req.live_catalog)
+        cat, _, _ = _resolve_catalog(req.live_catalog, req.live_metrics)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         try:
             resp = draft_and_classify_query_spec(

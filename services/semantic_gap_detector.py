@@ -102,8 +102,9 @@ def classify_semantic_gap(
     for m in visible_metrics:
         name_low = m.name.lower()
         label_low = m.label.lower()
-        # Extract parenthetical Chinese/English alias inside label, e.g. "Operating Revenue (營業收入)"
-        alias_parts = [p.strip() for p in re.split(r"[()（）]", label_low) if len(p.strip()) >= 2]
+        # Extract parenthetical / slash-separated Chinese/English aliases inside label,
+        # e.g. "Sales Revenue (銷售訂單業績 / 銷售額)"
+        alias_parts = [p.strip() for p in re.split(r"[()（）/、]", label_low) if len(p.strip()) >= 2]
         if (
             name_low in q_low
             or (label_low and label_low in q_low)

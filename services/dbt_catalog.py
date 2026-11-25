@@ -319,6 +319,7 @@ class DbtMetadataCatalog:
         cls,
         tables: list[dict[str, Any]],
         source_label: str = "live_erp_postgres",
+        metrics: list[dict[str, Any]] | None = None,
     ) -> DbtMetadataCatalog:
         """Build a normalized catalog directly from live database information_schema reflection."""
         relations: list[CatalogRelation] = []
@@ -344,14 +345,36 @@ class DbtMetadataCatalog:
                     unique_id=f"live.{schema_name}.{name}",
                     name=name,
                     schema_name=schema_name,
-                    layer="gold",
+                    layer=str(tbl.get("layer", "gold")).strip() or "gold",
                     resource_type="table",
-                    description=f"Live ERP PostgreSQL table ({schema_name}.{name})",
+                    description=str(tbl.get("description") or f"Live ERP PostgreSQL table ({schema_name}.{name})"),
                     columns=cols,
                     last_run_status="live",
                 )
             )
-        return cls(relations=relations, metrics=[], source_dir=source_label)
+
+        parsed_metrics: list[CatalogMetric] = []
+        for m in metrics or []:
+            if not isinstance(m, dict):
+                continue
+            m_name = str(m.get("name", "")).strip()
+            if not m_name:
+                continue
+            parsed_metrics.append(
+                CatalogMetric(
+                    name=m_name,
+                    label=str(m.get("label") or m_name),
+                    description=str(m.get("description") or ""),
+                    metric_type=str(m.get("metric_type") or m.get("type") or "simple"),
+                    semantic_model=str(m.get("semantic_model") or ""),
+                    source_relation=str(m.get("source_relation") or m.get("relation_name") or ""),
+                    time_granularity=str(m.get("time_granularity") or ""),
+                    filter_expr=str(m.get("filter_expr") or ""),
+                    dimensions=[str(d) for d in (m.get("dimensions") or []) if str(d).strip()],
+                    entities=[str(e) for e in (m.get("entities") or []) if str(e).strip()],
+                )
+            )
+        return cls(relations=relations, metrics=parsed_metrics, source_dir=source_label)
 
     def get_relation(self, name: str) -> CatalogRelation | None:
         return self._relations_by_name.get(name.strip().lower())
