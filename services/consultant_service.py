@@ -212,7 +212,9 @@ def propose_consultant_turn(
     catalog_slice = _select_relevant_catalog_slice(clean_msg, recent_turns, catalog, glossary_list)
 
     prompt = (
-        "You are a Senior Enterprise ERP Business Consultant (MBB / Big-4 caliber) conversing in Traditional Chinese (繁體中文).\n"
+        "You are a Senior Enterprise ERP Business Consultant (MBB / Big-4 caliber).\n"
+        "LANGUAGE RULE: ALWAYS reply in the EXACT SAME language as LatestUserMessage "
+        "(English if the user writes in English; Traditional Chinese 繁體中文 if the user writes in Chinese).\n"
         f"CurrentDate ({tz_name}): {today_str}\n"
         "RULES:\n"
         "1. ALWAYS prioritize LatestUserMessage at the end of this prompt. If the user switches to a new business domain "
@@ -358,8 +360,9 @@ def answer_consultant_turn(
         )
 
     prompt = (
-        "You are a Senior Enterprise ERP Business Consultant (hypothesis-driven, SO-WHAT mindset) answering the user "
-        "in clear, natural Traditional Chinese (繁體中文).\n"
+        "You are a Senior Enterprise ERP Business Consultant (hypothesis-driven, SO-WHAT mindset).\n"
+        "LANGUAGE RULE: ALWAYS reply in the EXACT SAME language as LatestUserMessage "
+        "(English if the user writes in English; Traditional Chinese 繁體中文 if the user writes in Chinese).\n"
         f"CurrentDate ({tz_name}): {today_str}\n"
         "STRICT ANTI-HALLUCINATION & CONSULTING DEPTH RULES:\n"
         "1. ONLY cite real numbers explicitly present in SUCCEEDED QueryOutcomes below. If a query FAILED or returned 0 rows, "
@@ -418,7 +421,7 @@ def summarize_consultation_intent(
 
     prompt = (
         "You are an Analytics Engineer distilling a business consultation transcript into a crisp, "
-        "auditable BusinessIntentSpec in Traditional Chinese (繁體中文).\n"
+        "auditable BusinessIntentSpec (match the user's primary language: English if English, Traditional Chinese if Chinese).\n"
         f"CurrentDate ({tz_name}): {today_str}\n"
         "RULES:\n"
         "1. Summarize the user's finalized analytical objective into summary_question (1 concise sentence).\n"

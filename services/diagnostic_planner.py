@@ -212,7 +212,8 @@ def build_diagnostic_plan(
     today_taipei = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
     prompt = (
         "You are an expert Analytics Engineer designing a bounded Diagnostic Analysis Plan "
-        f"(between 2 and {max_steps} read-only SQL steps) in Traditional Chinese (繁體中文).\n"
+        f"(between 2 and {max_steps} read-only SQL steps) matching the user's language "
+        "(English if original_question is in English; Traditional Chinese if in Chinese).\n"
         f"CurrentDate (Asia/Taipei): {today_taipei}\n"
         "CRITICAL RULES:\n"
         "1. Every step MUST use ONLY real table names and EXACT real column names from AvailableTables.\n"
@@ -348,7 +349,7 @@ def synthesize_diagnostic_findings(
 
     prompt = (
         "You are a Principal Analytics Consultant writing an Evidence-Grounded Diagnostic Summary "
-        "in Traditional Chinese (繁體中文).\n"
+        "in the SAME language as BusinessIntent.original_question (English if English; Traditional Chinese if Chinese).\n"
         "STRICT ANTI-HALLUCINATION RULES:\n"
         "1. ONLY cite numbers that explicitly appear in SUCCEEDED step_results below.\n"
         "2. NEVER invent, estimate, or extrapolate numbers for FAILED or 0-row steps.\n"
