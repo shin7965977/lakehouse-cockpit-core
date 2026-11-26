@@ -41,6 +41,8 @@ LIVE_METRICS = [
         "semantic_model": "erp_sales_orders",
         "source_relation": "sales_orders",
         "time_granularity": "day",
+        "measure_expr": "total_amount",
+        "measure_agg": "SUM",
         "dimensions": ["order_date", "status", "customer_id"],
         "entities": ["sales_order", "tenant", "customer"],
     },
@@ -147,3 +149,25 @@ def test_gap_detect_fails_loud_as_source_gap_for_missing_external_source() -> No
     assert resp.status_code == 200
     body = resp.json()
     assert body["classification"] == "SOURCE_GAP"
+
+
+def test_reuse_existing_draft_compiles_measure_aggregation_explicit_dim_and_date_window() -> None:
+    client = _client()
+    resp = client.post(
+        "/v1/query-spec/draft-and-classify",
+        headers=AUTH_HEADERS,
+        json={
+            "question": "What was the sales revenue and order status breakdown over the last 30 days?; Breakdown: status",
+            "dialect": "postgres",
+            "live_catalog": LIVE_CATALOG,
+            "live_metrics": LIVE_METRICS,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["gap"]["classification"] == "REUSE_EXISTING"
+    sql = body["compiled_sql"]
+    assert 'SUM("total_amount") AS "sales_revenue"' in sql
+    assert 'GROUP BY "status"' in sql
+    assert "INTERVAL '30 days'" in sql
+

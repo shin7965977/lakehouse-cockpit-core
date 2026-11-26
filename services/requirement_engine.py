@@ -149,7 +149,37 @@ def draft_and_classify_query_spec(
             if rel_name
             else []
         )
-        dims = metric.dimensions[:2]
+        q_low = q.lower()
+        explicit_dims = [
+            d for d in metric.dimensions
+            if re.search(rf"(?<![a-z0-9_]){re.escape(d.lower())}(?![a-z0-9_])", q_low)
+        ]
+        dims = explicit_dims if explicit_dims else metric.dimensions[:2]
+
+        aggs: list[AggregationSpec] = []
+        valid_aggs = {"SUM", "COUNT", "AVG", "MIN", "MAX", "COUNT_DISTINCT"}
+        if metric.measure_expr and metric.measure_agg in valid_aggs:
+            aggs.append(
+                AggregationSpec(
+                    field=metric.measure_expr,
+                    func=metric.measure_agg,  # type: ignore[arg-type]
+                    alias=metric.name,
+                )
+            )
+
+        filters: list[FilterCondition] = []
+        date_dim = next(
+            (d for d in metric.dimensions if "date" in d.lower() or d.lower() in ("created_at", "updated_at")),
+            "",
+        )
+        if date_dim:
+            m_days = re.search(r"(?:last|past|最近)\s*(\d+)\s*(?:days?|天)", q_low)
+            m_months = re.search(r"(?:last|past|最近)\s*(\d+)\s*(?:months?|個?月)", q_low)
+            if m_days:
+                filters.append(FilterCondition(field=date_dim, op="LAST_N_DAYS", value=int(m_days.group(1))))
+            elif m_months:
+                filters.append(FilterCondition(field=date_dim, op="LAST_N_MONTHS", value=int(m_months.group(1))))
+
         spec = QuerySpec(
             spec_id=_spec_id_for(q),
             purpose="ad_hoc",
@@ -157,7 +187,9 @@ def draft_and_classify_query_spec(
             semantic_match=metric.name,
             data_sources=sources,
             projection=dims,
+            aggregations=aggs,
             group_by=dims,
+            filters=filters,
             metrics=[metric.name],
             assumptions=[f"Reusing certified MetricFlow metric '{metric.name}' ({metric.label})."],
             dialect=dialect,
