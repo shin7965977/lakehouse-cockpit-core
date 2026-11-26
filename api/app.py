@@ -26,12 +26,16 @@ try:
     from ..integrations.langfuse_adapter import ObservabilityTracker
     from ..integrations.lightdash_adapter import LightdashAdapter
     from ..services.consultant_service import (
+        CandidateQueryDraft,
         ConsultantAnswer,
         ConsultantError,
         ConsultantIntentSummary,
         ConsultantProposal,
         ConsultantQueryOutcome,
+        EvidenceQuerySummary,
+        PreviousCandidateDraft,
         answer_consultant_turn,
+        draft_candidate_query,
         propose_consultant_turn,
         summarize_consultation_intent,
     )
@@ -89,12 +93,16 @@ except (ImportError, ValueError):
     from integrations.langfuse_adapter import ObservabilityTracker
     from integrations.lightdash_adapter import LightdashAdapter
     from services.consultant_service import (
+        CandidateQueryDraft,
         ConsultantAnswer,
         ConsultantError,
         ConsultantIntentSummary,
         ConsultantProposal,
         ConsultantQueryOutcome,
+        EvidenceQuerySummary,
+        PreviousCandidateDraft,
         answer_consultant_turn,
+        draft_candidate_query,
         propose_consultant_turn,
         summarize_consultation_intent,
     )
@@ -290,8 +298,24 @@ class ConsultantAnswerRequest(BaseModel):
 class ConsultantSummarizeRequest(BaseModel):
     history: list[ClarificationTurn] = Field(default_factory=list)
     live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
     glossary: list[GlossaryEntry] = Field(default_factory=list)
     tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    timezone: str | None = None
+    gemini_api_key: str = ""
+    tenant_id: str | int | None = None
+
+
+class ConsultantDraftCandidateRequest(BaseModel):
+    history: list[ClarificationTurn] = Field(default_factory=list)
+    evidence_queries: list[EvidenceQuerySummary] = Field(default_factory=list)
+    previous_candidate: PreviousCandidateDraft | None = None
+    refinement_feedback: str = ""
+    live_catalog: list[dict[str, Any]] | None = None
+    live_metrics: list[dict[str, Any]] | None = None
+    glossary: list[GlossaryEntry] = Field(default_factory=list)
+    tenant_value_samples: dict[str, list[str]] = Field(default_factory=dict)
+    dialect: QueryDialect = "postgres"
     timezone: str | None = None
     gemini_api_key: str = ""
     tenant_id: str | int | None = None
@@ -473,7 +497,7 @@ def create_app(
         req: ConsultantSummarizeRequest,
         x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
     ) -> ConsultantIntentSummary:
-        cat, _, _ = _resolve_catalog(req.live_catalog)
+        cat, _, _ = _resolve_catalog(req.live_catalog, req.live_metrics)
         effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
         tz = req.timezone or x_user_timezone
         try:
@@ -491,6 +515,57 @@ def create_app(
                 {
                     "classification": res.gap.classification.value,
                     "intent_type": res.business_intent.intent_type,
+                    "timezone": res.resolved_timezone,
+                    "tenant_id": req.tenant_id,
+                },
+            )
+            return res
+        except ConsultantError as exc:
+            status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.code in ("EMPTY_HISTORY", "API_KEY_MISSING")
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+
+    @app.post(
+        "/v1/consultant/draft-candidate-query",
+        response_model=CandidateQueryDraft,
+        dependencies=[Depends(_require_internal_token)],
+    )
+    def consultant_draft_candidate_endpoint(
+        req: ConsultantDraftCandidateRequest,
+        x_user_timezone: str | None = Header(default=None, alias="X-User-Timezone"),
+    ) -> CandidateQueryDraft:
+        cat, _, scoped_rels = _resolve_catalog(req.live_catalog, req.live_metrics)
+        effective_key = (req.gemini_api_key or os.getenv("GEMINI_API_KEY", "")).strip()
+        tz = req.timezone or x_user_timezone
+        try:
+            res = draft_candidate_query(
+                history=req.history,
+                catalog=cat,
+                evidence_queries=req.evidence_queries,
+                previous_candidate=req.previous_candidate,
+                refinement_feedback=req.refinement_feedback,
+                glossary=req.glossary,
+                tenant_value_samples=req.tenant_value_samples,
+                dialect=req.dialect,
+                user_timezone=tz,
+                tenant_id=req.tenant_id,
+                tenant_scoped_relations=scoped_rels,
+                api_key=effective_key,
+                structured_llm_fn=structured_llm_fn,
+            )
+            active_tracker.record_span(
+                "consultant_draft_candidate",
+                {
+                    "version": res.version,
+                    "classification": res.gap.classification.value,
+                    "validation_status": res.validation.status if res.validation else "NONE",
+                    "approvable": res.approvable,
                     "timezone": res.resolved_timezone,
                     "tenant_id": req.tenant_id,
                 },

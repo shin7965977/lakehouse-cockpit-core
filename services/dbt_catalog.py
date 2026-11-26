@@ -46,6 +46,8 @@ class CatalogMetric(BaseModel):
     source_relation: str = ""
     time_granularity: str = ""
     filter_expr: str = ""
+    measure_expr: str = ""
+    measure_agg: str = ""
     dimensions: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
 
@@ -370,6 +372,8 @@ class DbtMetadataCatalog:
                     source_relation=str(m.get("source_relation") or m.get("relation_name") or ""),
                     time_granularity=str(m.get("time_granularity") or ""),
                     filter_expr=str(m.get("filter_expr") or ""),
+                    measure_expr=str(m.get("measure_expr") or ""),
+                    measure_agg=str(m.get("measure_agg") or "").upper(),
                     dimensions=[str(d) for d in (m.get("dimensions") or []) if str(d).strip()],
                     entities=[str(e) for e in (m.get("entities") or []) if str(e).strip()],
                 )
