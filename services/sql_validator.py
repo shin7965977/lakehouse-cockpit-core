@@ -291,10 +291,55 @@ def _check_join_fanout(
     return True, ""
 
 
+def extract_output_group_by_columns(sql: str, dialect: str = "postgres") -> list[str]:
+    """Extract normalized output column names (alias-first, no table prefixes) for GROUP BY from SQL AST."""
+    raw = (sql or "").strip()
+    if not raw:
+        return []
+    try:
+        tree = sqlglot.parse_one(raw, read=dialect)
+    except Exception:
+        return []
+    if not isinstance(tree, exp.Select):
+        return []
+
+    alias_by_qual: dict[tuple[str, str], str] = {}
+    alias_by_name: dict[str, str] = {}
+    for expr in tree.expressions:
+        alias = ""
+        target = expr
+        if isinstance(expr, exp.Alias):
+            alias = expr.alias
+            target = expr.this
+        if isinstance(target, exp.Column):
+            out_name = alias or target.name
+            tbl = (target.table or "").lower()
+            col = target.name.lower()
+            if tbl:
+                alias_by_qual[(tbl, col)] = out_name
+            alias_by_name.setdefault(col, out_name)
+
+    grp = tree.args.get("group")
+    if not grp:
+        return []
+
+    result: list[str] = []
+    for g_expr in grp.expressions:
+        if isinstance(g_expr, exp.Column):
+            tbl = (g_expr.table or "").lower()
+            col = g_expr.name.lower()
+            resolved = alias_by_qual.get((tbl, col)) or alias_by_name.get(col) or g_expr.name
+            if resolved and resolved not in result:
+                result.append(resolved)
+    return result
+
+
 def _try_reconcile_simple_select(
     tree: exp.Expression,
     base_spec: QuerySpec,
     referenced_tables: list[str],
+    *,
+    scoped_sql: str | None = None,
 ) -> QuerySpec | None:
     """Reconcile a single-level SELECT into QuerySpec; return None if CTE/Window/Subquery."""
     if not isinstance(tree, exp.Select):
@@ -306,6 +351,9 @@ def _try_reconcile_simple_select(
 
     projection: list[str] = []
     aggregations: list[AggregationSpec] = []
+    alias_by_qual: dict[tuple[str, str], str] = {}
+    alias_by_name: dict[str, str] = {}
+    has_projection_alias = False
     for expr in tree.expressions:
         alias = ""
         target = expr
@@ -327,7 +375,15 @@ def _try_reconcile_simple_select(
                 field = inner_cols[0].name if inner_cols else "*"
                 aggregations.append(AggregationSpec(field=field, func=matched_agg, alias=alias))  # type: ignore[arg-type]
         elif isinstance(target, exp.Column):
-            projection.append(target.name)
+            out_name = alias or target.name
+            if alias and alias != target.name:
+                has_projection_alias = True
+            tbl = (target.table or "").lower()
+            col = target.name.lower()
+            if tbl:
+                alias_by_qual[(tbl, col)] = out_name
+            alias_by_name.setdefault(col, out_name)
+            projection.append(out_name)
         elif isinstance(target, exp.Star):
             continue
         else:
@@ -339,7 +395,11 @@ def _try_reconcile_simple_select(
     if grp:
         for g_expr in grp.expressions:
             if isinstance(g_expr, exp.Column):
-                group_by.append(g_expr.name)
+                tbl = (g_expr.table or "").lower()
+                col = g_expr.name.lower()
+                resolved = alias_by_qual.get((tbl, col)) or alias_by_name.get(col) or g_expr.name
+                if resolved not in group_by:
+                    group_by.append(resolved)
 
     filters: list[FilterCondition] = []
     where = tree.args.get("where")
@@ -386,6 +446,11 @@ def _try_reconcile_simple_select(
     if lim and lim.expression and isinstance(lim.expression, exp.Literal) and lim.expression.is_int:
         max_rows = max(1, min(10000, int(lim.expression.this)))
 
+    # Preserve verified executable SQL when JOINs, table aliases, or column aliases are present
+    # so downstream Build / compile_sql() NEVER strips table qualifiers/aliases and breaks execution.
+    has_table_aliases = any(bool(t.alias) for t in _direct_select_tables(tree))
+    preserve_override = scoped_sql if (joins or has_table_aliases or has_projection_alias) else None
+
     return base_spec.with_updates(
         data_sources=[DataSourceRef(relation=base_rel, catalog_ref=f"dbt://model/{base_rel}")],
         projection=projection,
@@ -394,7 +459,7 @@ def _try_reconcile_simple_select(
         filters=filters,
         joins=joins,
         max_rows=max_rows,
-        raw_sql_override=None,
+        raw_sql_override=preserve_override,
     )
 
 
@@ -501,7 +566,7 @@ def validate_and_reconcile_sql(
     patch = diff_sql(prior_sql, raw_sql)
 
     # Bidirectional AST -> QuerySpec Reconciliation
-    reconciled = _try_reconcile_simple_select(tree, base_spec, referenced_tables)
+    reconciled = _try_reconcile_simple_select(tree, base_spec, referenced_tables, scoped_sql=exec_sql)
     if reconciled is not None:
         return SqlValidationResult(
             status="VALID",

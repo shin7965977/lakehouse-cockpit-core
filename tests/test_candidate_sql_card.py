@@ -49,6 +49,19 @@ LIVE_METRICS = [
         "dimensions": ["order_date", "status", "customer_id"],
         "entities": ["sales_order", "tenant", "customer"],
     },
+    {
+        "name": "sales_order_count",
+        "label": "Sales Order Count (銷售訂單數)",
+        "description": "Total number of sales orders from sales_orders.id.",
+        "metric_type": "simple",
+        "semantic_model": "erp_sales_orders",
+        "source_relation": "sales_orders",
+        "time_granularity": "day",
+        "measure_expr": "id",
+        "measure_agg": "COUNT",
+        "dimensions": ["order_date", "status", "customer_id"],
+        "entities": ["sales_order", "tenant", "customer"],
+    },
 ]
 
 AUTH_HEADERS = {"X-Internal-Token": "test-secret"}
@@ -190,7 +203,7 @@ def test_supports_detail_listing_multi_table_left_join_and_window_function() -> 
                 'FROM "customers" LEFT JOIN "sales_orders" ON "customers"."id" = "sales_orders"."customer_id" '
                 'GROUP BY "customers"."id", "customers"."name" LIMIT 100'
             ),
-            ["customers.id", "customers.name"],
+            ["id", "name"],
             "VALID",
         ),
         (
@@ -416,3 +429,150 @@ def test_tenant_isolation_supports_multitenant_join_and_cte_scoping() -> None:
     # Ensure outer SELECT does NOT reference non-existent sales_orders.tenant_id
     outer_part = exec_sql.split("SELECT * FROM rfm")[-1]
     assert "sales_orders" not in outer_part
+
+
+def test_multitable_join_preserves_sql_for_build_and_aligns_output_grain() -> None:
+    """Verify multi-table JOIN with aliases preserves executable SQL for Build and normalizes Grain to output aliases."""
+    join_sql = (
+        "SELECT t1.customer_id, t2.name AS customer_name, MAX(t1.order_date) AS last_order_date, "
+        "COUNT(t1.id) AS frequency, SUM(t1.total_amount) AS monetary "
+        "FROM sales_orders AS t1 INNER JOIN customers AS t2 "
+        "ON t1.tenant_id = t2.tenant_id AND t1.customer_id = t2.id "
+        "WHERE t1.tenant_id = 1 GROUP BY t1.customer_id, t2.name LIMIT 200"
+    )
+
+    def fake_llm(_prompt: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "title": "Customer RFM Analysis with Customer Names",
+                "sql": join_sql,
+                "plain_language_explanation": "RFM with customer names.",
+                "assumptions": [],
+                # Intentionally noisy table-prefixed group_by from LLM
+                "group_by": ["t1.customer_id", "t2.name"],
+            }
+        )
+
+    client = _client(structured_llm_fn=fake_llm)
+    resp = client.post(
+        "/v1/consultant/draft-candidate-query",
+        headers=AUTH_HEADERS,
+        json={
+            "history": [{"role": "user", "content": "Join the customers table to include customer name"}],
+            "live_catalog": LIVE_CATALOG,
+            "live_metrics": LIVE_METRICS,
+            "dialect": "postgres",
+            "tenant_id": 1,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["validation"]["status"] == "VALID"
+    # Grain MUST be aligned to actual SELECT output aliases (no t1./t2. prefixes)
+    assert body["group_by"] == ["customer_id", "customer_name"]
+    assert body["query_spec"]["group_by"] == ["customer_id", "customer_name"]
+    # raw_sql_override MUST be preserved so Build does NOT strip AS t1 / AS t2
+    assert body["query_spec"]["raw_sql_override"]
+    assert "AS t1" in body["query_spec"]["raw_sql_override"]
+
+    # Now build dbt bundle from this QuerySpec and verify SQL keeps aliases & valid {{ ref(...) }}
+    build_resp = client.post(
+        "/v1/assets/build-and-validate",
+        headers=AUTH_HEADERS,
+        json={
+            "query_spec": body["query_spec"],
+            "model_name": "mart_customer_rfm",
+            "grain": body["group_by"],
+            "skip_local_validation": True,
+        },
+    )
+    assert build_resp.status_code == 200, build_resp.text
+    build_data = build_resp.json()
+    assert "AS t1" in build_data["compiled_sql"]
+    assert "AS t2" in build_data["compiled_sql"]
+    dbt_sql = build_data["bundle"]["dbt_sql"]
+    assert "{{ ref('sales_orders') }} AS t1" in dbt_sql
+    assert "{{ ref('customers') }} AS t2" in dbt_sql
+
+
+def test_ast_semantic_fingerprint_reuses_certified_even_when_paraphrased_and_detects_join_gap() -> None:
+    """Verify AST-first semantic gap: paraphrased metric -> REUSE_EXISTING; 'table' keyword does NOT dump all tables."""
+    # Build a catalog with 10 tables whose descriptions all contain "Live ERP PostgreSQL table"
+    large_catalog = list(LIVE_CATALOG) + [
+        {
+            "name": f"extra_table_{i}",
+            "schema": "public",
+            "columns": [{"name": "id", "data_type": "integer", "description": "ID"}],
+        }
+        for i in range(8)
+    ]
+
+    # 1. Paraphrased question ("How much money did we collect?") without saying "sales revenue"
+    def reuse_llm(_prompt: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "title": "Revenue by Status",
+                "sql": 'SELECT "status", SUM("total_amount") AS "total_revenue" FROM "sales_orders" GROUP BY "status" LIMIT 100',
+                "plain_language_explanation": "Total revenue by status.",
+                "assumptions": [],
+                "group_by": ["status"],
+            }
+        )
+
+    client1 = _client(structured_llm_fn=reuse_llm)
+    resp1 = client1.post(
+        "/v1/consultant/draft-candidate-query",
+        headers=AUTH_HEADERS,
+        json={
+            "history": [{"role": "user", "content": "How much money did we collect from sales_orders by status?"}],
+            "live_catalog": large_catalog,
+            "live_metrics": LIVE_METRICS,
+            "dialect": "postgres",
+            "tenant_id": 1,
+        },
+    )
+    assert resp1.status_code == 200, resp1.text
+    b1 = resp1.json()
+    assert b1["gap"]["classification"] == "REUSE_EXISTING", b1["gap"]
+    assert b1["gap"]["candidate_relations"] == ["sales_orders"]
+
+    # 2. RFM multi-table JOIN with word "table" in prompt -> MUST list ONLY ['customers', 'sales_orders'] (NOT extra_table_*)
+    def rfm_llm(_prompt: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "title": "Customer RFM",
+                "sql": (
+                    'SELECT "sales_orders"."customer_id", "customers"."name" AS "customer_name", '
+                    'MAX("sales_orders"."order_date") AS "last_order_date", '
+                    'SUM("sales_orders"."total_amount") AS "monetary" '
+                    'FROM "sales_orders" '
+                    'INNER JOIN "customers" ON "sales_orders"."customer_id" = "customers"."id" '
+                    'AND "sales_orders"."tenant_id" = "customers"."tenant_id" '
+                    'WHERE "sales_orders"."tenant_id" = 1 '
+                    'GROUP BY "sales_orders"."customer_id", "customers"."name" LIMIT 100'
+                ),
+                "plain_language_explanation": "RFM per customer.",
+                "assumptions": [],
+                "group_by": ["customer_id", "customer_name"],
+            }
+        )
+
+    client2 = _client(structured_llm_fn=rfm_llm)
+    resp2 = client2.post(
+        "/v1/consultant/draft-candidate-query",
+        headers=AUTH_HEADERS,
+        json={
+            "history": [{"role": "user", "content": "Join the customers table to include customer name"}],
+            "live_catalog": large_catalog,
+            "live_metrics": LIVE_METRICS,
+            "dialect": "postgres",
+            "tenant_id": 1,
+        },
+    )
+    assert resp2.status_code == 200, resp2.text
+    b2 = resp2.json()
+    assert b2["gap"]["classification"] == "NEW_SEMANTIC_METRIC", b2["gap"]
+    assert b2["gap"]["candidate_relations"] == ["customers", "sales_orders"]
+    assert "extra_table_0" not in b2["gap"]["reason"]
+    assert "MAX(order_date)" in b2["gap"]["reason"]
+    assert "sales_revenue" in b2["gap"]["reason"]

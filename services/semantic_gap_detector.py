@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+import sqlglot
 from pydantic import BaseModel, Field
+from sqlglot import exp
 
 try:
     from .dbt_catalog import CatalogMetric, DbtMetadataCatalog
@@ -164,13 +166,19 @@ def classify_semantic_gap(
     layers_hit: dict[str, set[str]] = {"gold": set(), "silver": set(), "bronze": set(), "other": set()}
     explicit_layers_hit: dict[str, set[str]] = {"gold": set(), "silver": set(), "bronze": set(), "other": set()}
 
-    # Statistical document-frequency filter (zero hardcoded column blacklists):
-    # columns appearing in >30% of visible tables (when >=5 tables) lack table-level discriminating power.
+    # Statistical document-frequency filter (zero hardcoded blacklists):
+    # columns or description tokens appearing in >30% of visible tables lack table-level discriminating power.
     col_doc_freq: dict[str, int] = {}
+    desc_doc_freq: dict[str, int] = {}
     for rel in visible_relations:
         for c_name in {c.name.lower() for c in rel.columns}:
             col_doc_freq[c_name] = col_doc_freq.get(c_name, 0) + 1
+        for d_tok in set(_extract_tokens(rel.description)):
+            desc_doc_freq[d_tok] = desc_doc_freq.get(d_tok, 0) + 1
     total_rels = len(visible_relations)
+
+    def _is_ubiquitous_desc_tok(tok: str) -> bool:
+        return total_rels >= 5 and (desc_doc_freq.get(tok, 0) / total_rels) > 0.30
 
     def _whole_ident_in_q(ident: str) -> bool:
         if not ident:
@@ -179,9 +187,11 @@ def classify_semantic_gap(
 
     for rel in visible_relations:
         rel_name_low = rel.name.lower()
-        rel_desc_low = rel.description.lower()
+        rel_desc_tokens = set(_extract_tokens(rel.description))
         rel_explicitly_named = _whole_ident_in_q(rel_name_low) or any(
-            (tok == rel_name_low) or (len(tok) >= 4 and tok in rel_desc_low) for tok in tokens
+            (tok == rel_name_low)
+            or (len(tok) >= 4 and tok in rel_desc_tokens and not _is_ubiquitous_desc_tok(tok))
+            for tok in tokens
         )
         if rel_explicitly_named:
             explicit_layers_hit.setdefault(rel.layer, set()).add(rel.name)
@@ -234,35 +244,38 @@ def classify_semantic_gap(
 
     if layers_hit["gold"]:
         rels = sorted(layers_hit["gold"])
+        display_rels = rels[:6] if len(rels) <= 6 else [*rels[:6], f"... (+{len(rels) - 6} more)"]
         return GapDetectionResult(
             classification=GapClassification.NEW_SEMANTIC_METRIC,
             question=q,
-            reason=f"Required fields exist in Gold relation(s) {rels}, but no certified MetricFlow metric matches.",
+            reason=f"Required fields exist in Gold relation(s) {display_rels}, but no certified MetricFlow metric matches.",
             candidate_relations=rels,
             matched_columns=matched_cols[:15],
-            evidence=[f"gold_relations={rels}", f"matched_columns={len(matched_cols)}"],
+            evidence=[f"gold_relations={display_rels}", f"matched_columns={len(matched_cols)}"],
         )
 
     if layers_hit["silver"]:
         rels = sorted(layers_hit["silver"])
+        display_rels = rels[:6] if len(rels) <= 6 else [*rels[:6], f"... (+{len(rels) - 6} more)"]
         return GapDetectionResult(
             classification=GapClassification.NEW_DBT_MODEL,
             question=q,
-            reason=f"Required inputs exist in Silver relation(s) {rels}, but no Gold mart exposes this grain.",
+            reason=f"Required inputs exist in Silver relation(s) {display_rels}, but no Gold mart exposes this grain.",
             candidate_relations=rels,
             matched_columns=matched_cols[:15],
-            evidence=[f"silver_relations={rels}", f"matched_columns={len(matched_cols)}"],
+            evidence=[f"silver_relations={display_rels}", f"matched_columns={len(matched_cols)}"],
         )
 
     if layers_hit["bronze"]:
         rels = sorted(layers_hit["bronze"])
+        display_rels = rels[:6] if len(rels) <= 6 else [*rels[:6], f"... (+{len(rels) - 6} more)"]
         return GapDetectionResult(
             classification=GapClassification.TRANSFORMATION_GAP,
             question=q,
-            reason=f"Required fields exist only in Bronze staging relation(s) {rels} and require Silver/Gold transformation.",
+            reason=f"Required fields exist only in Bronze staging relation(s) {display_rels} and require Silver/Gold transformation.",
             candidate_relations=rels,
             matched_columns=matched_cols[:15],
-            evidence=[f"bronze_relations={rels}", f"matched_columns={len(matched_cols)}"],
+            evidence=[f"bronze_relations={display_rels}", f"matched_columns={len(matched_cols)}"],
         )
 
     return GapDetectionResult(
@@ -272,4 +285,190 @@ def classify_semantic_gap(
         candidate_relations=[],
         matched_columns=[],
         evidence=[f"inspected_relations={len(visible_relations)}", f"inspected_metrics={len(visible_metrics)}"],
+    )
+
+
+_AST_AGG_MAP: dict[type[exp.Expression], str] = {
+    exp.Sum: "SUM",
+    exp.Avg: "AVG",
+    exp.Count: "COUNT",
+    exp.Min: "MIN",
+    exp.Max: "MAX",
+}
+
+
+def classify_sql_semantic_gap(
+    sql: str,
+    catalog: DbtMetadataCatalog,
+    *,
+    question: str = "",
+    dialect: str = "postgres",
+    precheck_gap: GapDetectionResult | None = None,
+) -> GapDetectionResult:
+    """AST-first Semantic Gap Classification: fingerprint Candidate SQL (tables, measures, dimensions) against live_metrics."""
+    raw = (sql or "").strip()
+    if not raw:
+        return precheck_gap or classify_semantic_gap(question, catalog)
+
+    try:
+        tree = sqlglot.parse_one(raw, read=dialect)
+    except Exception:
+        return precheck_gap or classify_semantic_gap(question, catalog)
+
+    cte_names = {cte.alias.lower() for cte in tree.find_all(exp.CTE) if cte.alias}
+    tables = sorted(
+        {
+            tbl.name
+            for tbl in tree.find_all(exp.Table)
+            if (tbl.name or "").strip() and tbl.name.lower() not in cte_names
+        }
+    )
+    if not tables:
+        return precheck_gap or classify_semantic_gap(question, catalog)
+
+    tables_low = {t.lower() for t in tables}
+    rel_layer_map = {r.name.lower(): r.layer for r in catalog.relations}
+    layers_present = {rel_layer_map.get(t.lower(), "gold") for t in tables}
+
+    # Extract SQL measures (AGG, col_lower, label)
+    measures: list[tuple[str, str, str]] = []
+    if isinstance(tree, exp.Select):
+        for expr in tree.expressions:
+            target = expr.this if isinstance(expr, exp.Alias) else expr
+            matched_agg = next(
+                (fn for cls_t, fn in _AST_AGG_MAP.items() if isinstance(target, cls_t)),
+                None,
+            )
+            if matched_agg:
+                if isinstance(target, exp.Count) and isinstance(target.this, exp.Distinct):
+                    cols = list(target.this.find_all(exp.Column))
+                    col_name = cols[0].name.lower() if cols else "*"
+                    measures.append(("COUNT_DISTINCT", col_name, f"COUNT(DISTINCT {col_name})"))
+                else:
+                    cols = list(target.find_all(exp.Column))
+                    col_name = cols[0].name.lower() if cols else "*"
+                    measures.append((matched_agg, col_name, f"{matched_agg}({col_name})"))
+
+    # Extract GROUP BY bare column names
+    group_cols: list[str] = []
+    if isinstance(tree, exp.Select):
+        grp = tree.args.get("group")
+        if grp:
+            for g_expr in grp.expressions:
+                if isinstance(g_expr, exp.Column):
+                    c_low = g_expr.name.lower()
+                    if c_low not in group_cols:
+                        group_cols.append(c_low)
+
+    has_complex = bool(
+        (isinstance(tree, exp.Select) and (tree.args.get("with_") or tree.args.get("with")))
+        or any(True for _ in tree.find_all(exp.Window, exp.Case))
+    )
+
+    # Match extracted SQL measures against certified catalog metrics
+    matched_metrics: list[CatalogMetric] = []
+    matched_metric_names: list[str] = []
+    uncertified_measures: list[str] = []
+
+    for agg_func, col_low, measure_label in measures:
+        hit: CatalogMetric | None = None
+        for m in catalog.metrics:
+            m_rel = (m.source_relation or "").lower()
+            if m_rel and m_rel not in tables_low:
+                continue
+            m_agg = (m.measure_agg or "").upper()
+            m_expr = (m.measure_expr or "").lower()
+            agg_ok = (m_agg == agg_func) or (
+                m_agg in ("COUNT", "COUNT_DISTINCT") and agg_func in ("COUNT", "COUNT_DISTINCT")
+            )
+            expr_ok = (m_expr == col_low) or (
+                agg_func == "COUNT" and col_low in ("*", "id") and m_expr in ("*", "id")
+            )
+            if agg_ok and expr_ok:
+                hit = m
+                break
+        if hit is not None:
+            if hit.name not in matched_metric_names:
+                matched_metrics.append(hit)
+                matched_metric_names.append(hit.name)
+        else:
+            uncertified_measures.append(measure_label)
+
+    # Check whether matched metrics cover ALL referenced tables and GROUP BY dimensions
+    covered_tables = {(m.source_relation or "").lower() for m in matched_metrics if m.source_relation}
+    extra_tables = sorted(t for t in tables if t.lower() not in covered_tables)
+    allowed_dims = {d.lower() for m in matched_metrics for d in (m.dimensions or [])}
+    uncovered_dims = [d for d in group_cols if allowed_dims and d not in allowed_dims]
+
+    # Case 1: Full certified coverage -> REUSE_EXISTING
+    if (
+        measures
+        and not uncertified_measures
+        and matched_metrics
+        and not extra_tables
+        and not uncovered_dims
+        and not has_complex
+    ):
+        primary = matched_metrics[0]
+        return GapDetectionResult(
+            classification=GapClassification.REUSE_EXISTING,
+            question=question,
+            reason=(
+                f"AST-verified reuse of certified MetricFlow metric(s) {matched_metric_names} "
+                f"on {tables}."
+            ),
+            matched_metric=primary,
+            candidate_metrics=matched_metrics,
+            candidate_relations=tables,
+            evidence=[
+                f"ast_tables={tables}",
+                f"matched_metrics={matched_metric_names}",
+                f"group_by={group_cols}",
+            ],
+        )
+
+    # Case 2: Determine layer-based gap classification strictly from AST-referenced tables
+    gap_details: list[str] = []
+    if uncertified_measures:
+        gap_details.append(f"uncertified calculation(s) {uncertified_measures}")
+    if matched_metrics and extra_tables:
+        gap_details.append(f"cross-table join on {extra_tables}")
+    if uncovered_dims:
+        gap_details.append(f"uncertified dimension(s) {uncovered_dims}")
+    if has_complex:
+        gap_details.append("custom CTE/window/case logic")
+    if not measures:
+        gap_details.append("row-level detail query (no certified metric aggregation)")
+
+    gap_summary = "; ".join(gap_details) if gap_details else "no certified MetricFlow metric covers this query"
+
+    if "bronze" in layers_present:
+        classification = GapClassification.TRANSFORMATION_GAP
+        reason = f"SQL references Bronze relation(s) {tables} ({gap_summary}); Silver/Gold transformation is required."
+    elif "silver" in layers_present:
+        classification = GapClassification.NEW_DBT_MODEL
+        reason = f"SQL references Silver relation(s) {tables} ({gap_summary}); a Gold mart model is recommended."
+    else:
+        classification = GapClassification.NEW_SEMANTIC_METRIC
+        if matched_metric_names:
+            reason = (
+                f"SQL uses Gold relation(s) {tables} (reusing {matched_metric_names}), "
+                f"but introduces {gap_summary}."
+            )
+        else:
+            reason = f"SQL uses Gold relation(s) {tables}, but no certified MetricFlow metric matches ({gap_summary})."
+
+    return GapDetectionResult(
+        classification=classification,
+        question=question,
+        reason=reason,
+        matched_metric=matched_metrics[0] if matched_metrics else None,
+        candidate_metrics=matched_metrics,
+        candidate_relations=tables,
+        evidence=[
+            f"ast_tables={tables}",
+            f"matched_metrics={matched_metric_names}",
+            f"uncertified_measures={uncertified_measures}",
+            f"group_by={group_cols}",
+        ],
     )
