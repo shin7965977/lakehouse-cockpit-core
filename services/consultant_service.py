@@ -37,7 +37,8 @@ try:
         QueryDialect,
         QuerySpec,
     )
-    from .semantic_gap_detector import GapDetectionResult, classify_semantic_gap
+    from .semantic_gap_detector import GapClassification, GapDetectionResult, classify_semantic_gap
+    from .sql_validator import SqlValidationResult, validate_and_reconcile_sql
 except (ImportError, ValueError):
     try:
         from services.dbt_catalog import DbtMetadataCatalog
@@ -57,7 +58,8 @@ except (ImportError, ValueError):
             QueryDialect,
             QuerySpec,
         )
-        from services.semantic_gap_detector import GapDetectionResult, classify_semantic_gap
+        from services.semantic_gap_detector import GapClassification, GapDetectionResult, classify_semantic_gap
+        from services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
     except (ImportError, ValueError):
         from cockpit_core.services.dbt_catalog import DbtMetadataCatalog
         from cockpit_core.services.diagnostic_planner import _is_pii_column
@@ -77,9 +79,11 @@ except (ImportError, ValueError):
             QuerySpec,
         )
         from cockpit_core.services.semantic_gap_detector import (
+            GapClassification,
             GapDetectionResult,
             classify_semantic_gap,
         )
+        from cockpit_core.services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
 
 
 _VALID_IANA_TZ_RE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
@@ -378,7 +382,7 @@ def answer_consultant_turn(
             "2. Do NOT merely recite raw table rows like a Q&A bot. Structure your response like a real senior consultant:\n"
             "   - **Key Finding (So What?)**: point out concentration risks, top-share imbalances, anomalies, or key ratios directly from the real data.\n"
             "   - **Business Hypotheses (2 Hypotheses)**: propose 2 concrete, testable business hypotheses explaining WHY this pattern may be occurring.\n"
-            "   - **Recommended Next Step**: proactively recommend 1-2 sharp follow-up angles the user can ask next (and mention they can click 'Enter Business Semantic Analysis' whenever ready to turn this into a governed model).\n\n"
+            "   - **Recommended Next Step**: proactively recommend 1-2 sharp follow-up angles the user can ask next (and mention they can click 'Draft Governed Query' whenever ready to turn this into a governed query or dbt model).\n\n"
         )
 
     prompt = (
@@ -479,5 +483,234 @@ def summarize_consultation_intent(
         summary_question=parsed.summary_question,
         business_intent=clean_intent,
         gap=gap,
+        resolved_timezone=tz_name,
+    )
+
+
+class EvidenceQuerySummary(BaseModel):
+    title: str = ""
+    sql: str = ""
+    status: str = "SUCCEEDED"
+
+
+class PreviousCandidateDraft(BaseModel):
+    version: int = 1
+    title: str = ""
+    sql: str = ""
+    plain_language_explanation: str = ""
+    group_by: list[str] = Field(default_factory=list)
+    spec_hash: str = ""
+
+
+class _LlmCandidateSqlPayload(BaseModel):
+    title: str
+    sql: str
+    plain_language_explanation: str
+    assumptions: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list)
+
+
+class CandidateQueryDraft(BaseModel):
+    version: int = 1
+    title: str = ""
+    sql: str = ""
+    plain_language_explanation: str = ""
+    assumptions: list[str] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list)
+    gap: GapDetectionResult
+    validation: SqlValidationResult | None = None
+    query_spec: QuerySpec | None = None
+    spec_hash: str = ""
+    approvable: bool = False
+    resolved_timezone: str = "UTC"
+
+
+def draft_candidate_query(
+    *,
+    history: list[ClarificationTurn],
+    catalog: DbtMetadataCatalog,
+    evidence_queries: list[EvidenceQuerySummary] | None = None,
+    previous_candidate: PreviousCandidateDraft | None = None,
+    refinement_feedback: str = "",
+    glossary: list[GlossaryEntry] | None = None,
+    tenant_value_samples: dict[str, list[str]] | None = None,
+    dialect: QueryDialect = "postgres",
+    user_timezone: str | None = None,
+    tenant_id: int | str | None = None,
+    tenant_scoped_relations: set[str] | None = None,
+    api_key: str = "",
+    structured_llm_fn: Callable[[str, type[Any]], Any] | None = None,
+) -> CandidateQueryDraft:
+    """Draft or iteratively refine (v1 -> v2) a governed candidate SQL + plain-language explanation."""
+    clean_feedback = (refinement_feedback or "").strip()
+    if not history and not clean_feedback:
+        raise ConsultantError(
+            "EMPTY_HISTORY",
+            "At least one consultation turn or refinement feedback is required to draft a candidate query.",
+        )
+
+    clean_key = (api_key or "").strip()
+    if structured_llm_fn is None and not clean_key:
+        raise ConsultantError(
+            "API_KEY_MISSING",
+            "Gemini API Key is required to draft a candidate SQL query (Fail-Loud).",
+        )
+
+    tz_name, today_str = resolve_user_timezone(user_timezone)
+    recent_turns = list(history)[-_SLIDING_WINDOW_TURNS:]
+    glossary_list = list(glossary or [])
+    user_msgs = [t.content for t in recent_turns if t.role == "user"]
+    latest_text = clean_feedback or (user_msgs[-1] if user_msgs else "")
+    combined_q = " ".join([*user_msgs, clean_feedback]).strip()
+    has_cjk = bool(re.search(r"[\u4e00-\u9fff]", latest_text))
+
+    # 1. Run deterministic Semantic Gap Classification against live_metrics + catalog first
+    gap = classify_semantic_gap(combined_q or latest_text, catalog)
+    next_version = (previous_candidate.version + 1) if previous_candidate is not None else 1
+
+    if gap.classification in (GapClassification.SOURCE_GAP, GapClassification.ACCESS_BLOCKED):
+        msg = (
+            f"無法產生 SQL：{gap.reason}"
+            if has_cjk
+            else f"Cannot draft governed SQL: {gap.reason}"
+        )
+        return CandidateQueryDraft(
+            version=next_version,
+            title="Source Gap Detected",
+            sql="",
+            plain_language_explanation=msg,
+            assumptions=[],
+            group_by=[],
+            gap=gap,
+            validation=None,
+            query_spec=None,
+            spec_hash="",
+            approvable=False,
+            resolved_timezone=tz_name,
+        )
+
+    # 2. Build Evidence Carry-Over + Refinement prompt grounded in AllowedCatalog & Certified Metrics
+    catalog_slice = _select_relevant_catalog_slice(latest_text or combined_q, recent_turns, catalog, glossary_list)
+    succeeded_evidence = [
+        e.model_dump() for e in (evidence_queries or []) if (e.sql or "").strip()
+    ][-4:]
+
+    certified_hint = ""
+    if gap.matched_metric is not None:
+        m = gap.matched_metric
+        certified_hint = (
+            f"CERTIFIED METRIC MATCHED (REUSE_EXISTING): name='{m.name}', relation='{m.source_relation}', "
+            f"measure='{m.measure_agg}({m.measure_expr})', dimensions={m.dimensions}. "
+            "You MUST honor this certified formula unless the user explicitly overrides it.\n"
+        )
+
+    lang_rule = (
+        "LANGUAGE RULE: Write `title`, `plain_language_explanation`, and `assumptions` STRICTLY in Traditional Chinese (繁體中文).\n"
+        if has_cjk
+        else "LANGUAGE RULE: Write `title`, `plain_language_explanation`, and `assumptions` STRICTLY in clear, executive-level ENGLISH. Do NOT use Chinese characters.\n"
+    )
+
+    prompt = (
+        "You are a Senior Analytics Engineer drafting a single executable READ-ONLY SQL query plus a concise "
+        "plain-language explanation for business sign-off.\n"
+        + lang_rule
+        + f"TargetDialect: {dialect}\n"
+        f"CurrentDate ({tz_name}): {today_str}\n"
+        + certified_hint
+        + "STRICT RULES:\n"
+        "1. Output ONLY a single READ-ONLY SELECT statement using exact table and column names from AllowedCatalog. "
+        "NEVER fabricate tables or columns.\n"
+        "2. EVIDENCE CARRY-OVER: If PriorVerifiedEvidenceQueries already executed a valid query answering the user, "
+        "preserve its proven aggregations (SUM/COUNT/AVG), joins, and date filters instead of dropping them.\n"
+        "3. ITERATIVE REFINEMENT: If PreviousCandidateDraft and RefinementFeedback are provided, modify PreviousCandidateDraft "
+        "to incorporate the exact requested changes.\n"
+        "4. EXPRESSIVENESS: Support aggregated metrics (GROUP BY), raw detail listings (no GROUP BY, group_by=[]), "
+        "multi-table LEFT/INNER JOINs (always qualify table.column on joins), CTEs, and Window Functions (OVER (...)).\n"
+        "5. For date comparisons on text date columns (e.g. order_date), always use CAST(\"order_date\" AS DATE) >= "
+        "CAST(CURRENT_DATE - INTERVAL '<n> days' AS DATE).\n"
+        "6. In `plain_language_explanation`, clearly explain in 2-4 sentences what this SQL computes, filters, joins, "
+        "and groups by, and end by asking if this matches what they want (or what they would like to adjust).\n"
+        "7. Populate `group_by` with the exact output grain column names (or [] for raw detail listings / single scalar totals).\n\n"
+        f"AllowedCatalog: {json.dumps(catalog_slice, ensure_ascii=False)}\n"
+        f"BusinessGlossary: {json.dumps([g.model_dump() for g in glossary_list], ensure_ascii=False)}\n"
+        f"TenantSampleDimensionValues (formatting hints only): {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
+        f"PriorVerifiedEvidenceQueries: {json.dumps(succeeded_evidence, ensure_ascii=False)}\n"
+        f"PreviousCandidateDraft: {json.dumps(previous_candidate.model_dump() if previous_candidate else None, ensure_ascii=False)}\n"
+        f"RefinementFeedback: {clean_feedback}\n"
+        f"ConsultationTranscript: {json.dumps([t.model_dump() for t in recent_turns], ensure_ascii=False)}\n"
+    )
+
+    try:
+        if structured_llm_fn is not None:
+            raw = structured_llm_fn(prompt, _LlmCandidateSqlPayload)
+        else:
+            raw = generate_gemini_structured(
+                api_key=clean_key,
+                prompt=prompt,
+                response_model=_LlmCandidateSqlPayload,
+            )
+        parsed = _LlmCandidateSqlPayload.model_validate(raw)
+    except Exception as exc:
+        raise ConsultantError("LLM_CANDIDATE_FAILED", f"Candidate SQL drafting failed: {exc}") from exc
+
+    # 3. Pre-validate through SQLGlot AST & Tenant Security Gate
+    clean_sql = (parsed.sql or "").strip()
+    allowed_names = {r.name for r in catalog.relations}
+    scoped_rels = tenant_scoped_relations
+    if scoped_rels is None:
+        scoped_rels = {
+            r.name for r in catalog.relations if any(c.name.lower() == "tenant_id" for c in r.columns)
+        }
+
+    base_spec = QuerySpec(
+        spec_id=f"qs_cand_v{next_version}_{hashlib.sha256(clean_sql.encode('utf-8')).hexdigest()[:6]}",
+        version=next_version,
+        purpose="ad_hoc",
+        question=latest_text or parsed.title,
+        semantic_match=gap.matched_metric.name if gap.matched_metric else None,
+        group_by=list(parsed.group_by),
+        assumptions=list(parsed.assumptions),
+        dialect=dialect,
+        raw_sql_override=clean_sql,
+        output=OutputSpec(
+            max_rows=100,
+            certification="CERTIFIED" if gap.classification == GapClassification.REUSE_EXISTING else "VALIDATED_EXPLORATORY",
+        ),
+    )
+
+    validation = validate_and_reconcile_sql(
+        clean_sql,
+        base_spec,
+        allowed_relations=allowed_names,
+        server_tenant_id=tenant_id,
+        tenant_scoped_relations=scoped_rels,
+    )
+
+    final_sql = (validation.executable_sql or clean_sql).strip()
+    final_spec = validation.reconciled_spec or base_spec
+    final_spec = final_spec.model_copy(
+        update={
+            "version": next_version,
+            "group_by": list(parsed.group_by),
+            "raw_sql_override": final_sql,
+        }
+    )
+    spec_hash = hashlib.sha256(f"v{next_version}:{final_sql}".encode("utf-8")).hexdigest()[:16]
+    final_spec.review.spec_hash = spec_hash
+
+    approvable = validation.status != "BLOCKED" and bool(final_sql)
+
+    return CandidateQueryDraft(
+        version=next_version,
+        title=parsed.title,
+        sql=final_sql,
+        plain_language_explanation=parsed.plain_language_explanation,
+        assumptions=list(parsed.assumptions),
+        group_by=list(parsed.group_by),
+        gap=gap,
+        validation=validation,
+        query_spec=final_spec,
+        spec_hash=spec_hash,
+        approvable=approvable,
         resolved_timezone=tz_name,
     )
