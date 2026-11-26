@@ -106,7 +106,12 @@ def _check_tenant_isolation(
 
     expected_str = str(server_tenant_id)
     # 1. Inspect every comparison involving `tenant_id` anywhere in the AST
+    # NOTE: In SQLGlot, `exp.And` inherits from `exp.Binary`. Skip `exp.And` so
+    # compound predicates like `WHERE order_date >= ... AND tenant_id = 1` are
+    # evaluated at their leaf comparison nodes instead of falsely blocked.
     for comp in tree.find_all(exp.Binary, exp.In):
+        if isinstance(comp, exp.And):
+            continue
         cols = [c.name.lower() for c in comp.find_all(exp.Column)]
         if "tenant_id" not in cols:
             continue
@@ -123,6 +128,15 @@ def _check_tenant_isolation(
             return (
                 False,
                 f"Unsafe tenant_id predicate '{comp.sql()}' is blocked; only server-scoped equality is allowed.",
+                tree,
+            )
+
+    # Reject `NOT` wrapping tenant_id (e.g. `NOT tenant_id = 1`)
+    for not_node in tree.find_all(exp.Not):
+        if any(c.name.lower() == "tenant_id" for c in not_node.find_all(exp.Column)):
+            return (
+                False,
+                "NOT-negated tenant_id filter is blocked to prevent tenant isolation bypass.",
                 tree,
             )
 

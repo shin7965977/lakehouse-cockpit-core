@@ -302,3 +302,52 @@ def test_fail_loud_on_missing_api_key_source_gap_and_blocked_dml() -> None:
     body_dml = resp_dml.json()
     assert body_dml["validation"]["status"] == "BLOCKED"
     assert body_dml["approvable"] is False
+
+
+def test_tenant_isolation_allows_compound_and_idempotency_and_blocks_bypasses() -> None:
+    """Regression: SQLGlot exp.And inherits from exp.Binary and must NOT false-block valid AND tenant_id = 1."""
+    client = _client(structured_llm_fn=None)
+
+    # 1. Valid SQL already containing date filter AND tenant_id = 1 (idempotent re-validation)
+    already_scoped_sql = (
+        'SELECT "status", SUM("total_amount") AS "total_revenue", COUNT("id") AS "order_count" '
+        'FROM "sales_orders" '
+        "WHERE CAST(\"order_date\" AS DATE) >= CAST(CURRENT_DATE - INTERVAL '30 days' AS DATE) "
+        'AND "tenant_id" = 1 '
+        'GROUP BY "status" LIMIT 100'
+    )
+    resp_ok = client.post(
+        "/v1/sql/validate-and-reconcile",
+        headers=AUTH_HEADERS,
+        json={
+            "sql": already_scoped_sql,
+            "dialect": "postgres",
+            "tenant_id": 1,
+            "live_catalog": LIVE_CATALOG,
+        },
+    )
+    assert resp_ok.status_code == 200, resp_ok.text
+    body_ok = resp_ok.json()
+    assert body_ok["status"] == "VALID", body_ok
+    assert body_ok["executable_sql"].lower().count("tenant_id") == 1
+
+    # 2. Bypass attempts MUST still be BLOCKED
+    bypass_queries = [
+        'SELECT "status" FROM "sales_orders" WHERE "status" = \'Completed\' AND "tenant_id" != 1 LIMIT 10',
+        'SELECT "status" FROM "sales_orders" WHERE "status" = \'Completed\' OR "tenant_id" = 1 LIMIT 10',
+        'SELECT "status" FROM "sales_orders" WHERE "status" = \'Completed\' AND "tenant_id" = 2 LIMIT 10',
+        'SELECT "status" FROM "sales_orders" WHERE NOT ("tenant_id" = 1) LIMIT 10',
+    ]
+    for bad_sql in bypass_queries:
+        resp_bad = client.post(
+            "/v1/sql/validate-and-reconcile",
+            headers=AUTH_HEADERS,
+            json={
+                "sql": bad_sql,
+                "dialect": "postgres",
+                "tenant_id": 1,
+                "live_catalog": LIVE_CATALOG,
+            },
+        )
+        assert resp_bad.status_code == 200, resp_bad.text
+        assert resp_bad.json()["status"] == "BLOCKED", f"Expected BLOCKED for: {bad_sql}"
