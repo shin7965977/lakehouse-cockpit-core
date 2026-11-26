@@ -267,11 +267,21 @@ def test_fail_loud_on_missing_api_key_source_gap_and_blocked_dml() -> None:
     )
     assert resp_no_key.status_code == 400
 
-    # 2. Out-of-domain external source -> SOURCE_GAP, no fabricated SQL, approvable=False
-    def fail_if_called(_p: str, _s: type[Any]) -> Any:
-        raise AssertionError("LLM must not fabricate SQL on SOURCE_GAP")
+    # 2. Out-of-domain external source -> LLM Structured Abstention returns SOURCE_GAP, no SQL, approvable=False
+    def abstaining_llm(_p: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "can_answer": False,
+                "source_gap_reason": "No GA4 or Facebook Ads tables exist in AllowedCatalog.",
+                "title": "External Ad Source Missing",
+                "sql": "",
+                "plain_language_explanation": "Cannot answer: GA4 and Facebook Ads data are not in the ERP catalog.",
+                "assumptions": [],
+                "group_by": [],
+            }
+        )
 
-    client_gap = _client(structured_llm_fn=fail_if_called)
+    client_gap = _client(structured_llm_fn=abstaining_llm)
     resp_gap = client_gap.post(
         "/v1/consultant/draft-candidate-query",
         headers=AUTH_HEADERS,
@@ -287,6 +297,77 @@ def test_fail_loud_on_missing_api_key_source_gap_and_blocked_dml() -> None:
     assert body_gap["gap"]["classification"] == "SOURCE_GAP"
     assert body_gap["sql"] == ""
     assert body_gap["approvable"] is False
+
+    # 2b. Anti-hallucination hard guard: even if LLM hallucinates an unlisted table, AST blocks it as SOURCE_GAP
+    def hallucinating_llm(_p: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "can_answer": True,
+                "title": "Hallucinated ROAS",
+                "sql": "SELECT SUM(spend) FROM facebook_ads LIMIT 10",
+                "plain_language_explanation": "Sums ad spend.",
+                "assumptions": [],
+                "group_by": [],
+            }
+        )
+
+    client_hal = _client(structured_llm_fn=hallucinating_llm)
+    resp_hal = client_hal.post(
+        "/v1/consultant/draft-candidate-query",
+        headers=AUTH_HEADERS,
+        json={
+            "history": [{"role": "user", "content": "Facebook ROAS"}],
+            "live_catalog": LIVE_CATALOG,
+            "live_metrics": LIVE_METRICS,
+            "tenant_id": 1,
+        },
+    )
+    assert resp_hal.status_code == 200
+    body_hal = resp_hal.json()
+    assert body_hal["gap"]["classification"] == "SOURCE_GAP"
+    assert body_hal["validation"]["status"] == "BLOCKED"
+    assert body_hal["approvable"] is False
+
+    # 2c. Singular "customer" RFM question (no regex match on plural "customers") MUST NOT falsely trigger SOURCE_GAP
+    def rfm_singular_llm(_p: str, schema: type[Any]) -> Any:
+        return schema.model_validate(
+            {
+                "can_answer": True,
+                "title": "Customer RFM Segmentation",
+                "sql": (
+                    'SELECT "customer_id", MAX("order_date") AS "last_order_date", '
+                    'COUNT("id") AS "frequency", SUM("total_amount") AS "monetary" '
+                    'FROM "sales_orders" GROUP BY "customer_id" LIMIT 200'
+                ),
+                "plain_language_explanation": "Computes RFM per customer.",
+                "assumptions": [],
+                "group_by": ["customer_id"],
+            }
+        )
+
+    client_rfm = _client(structured_llm_fn=rfm_singular_llm)
+    resp_rfm = client_rfm.post(
+        "/v1/consultant/draft-candidate-query",
+        headers=AUTH_HEADERS,
+        json={
+            "history": [{"role": "user", "content": "Can we run an RFM customer segmentation analysis?"}],
+            "evidence_queries": [
+                {
+                    "title": "Customer RFM Base Data",
+                    "sql": 'SELECT "customer_id", MAX("order_date") FROM "sales_orders" GROUP BY "customer_id"',
+                    "status": "SUCCEEDED",
+                }
+            ],
+            "live_catalog": LIVE_CATALOG,
+            "live_metrics": LIVE_METRICS,
+            "tenant_id": 1,
+        },
+    )
+    assert resp_rfm.status_code == 200
+    body_rfm = resp_rfm.json()
+    assert body_rfm["gap"]["classification"] == "NEW_SEMANTIC_METRIC"
+    assert body_rfm["gap"]["candidate_relations"] == ["sales_orders"]
+    assert body_rfm["approvable"] is True
 
     # 3. Unsafe DML -> AST status BLOCKED, approvable=False
     def dml_llm(_p: str, schema: type[Any]) -> Any:
