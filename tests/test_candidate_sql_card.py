@@ -337,6 +337,10 @@ def test_tenant_isolation_allows_compound_and_idempotency_and_blocks_bypasses() 
         'SELECT "status" FROM "sales_orders" WHERE "status" = \'Completed\' OR "tenant_id" = 1 LIMIT 10',
         'SELECT "status" FROM "sales_orders" WHERE "status" = \'Completed\' AND "tenant_id" = 2 LIMIT 10',
         'SELECT "status" FROM "sales_orders" WHERE NOT ("tenant_id" = 1) LIMIT 10',
+        'SELECT "status" FROM "sales_orders" WHERE "tenant_id" IN (1, 2) LIMIT 10',
+        'SELECT "status" FROM "sales_orders" WHERE "tenant_id" BETWEEN 1 AND 2 LIMIT 10',
+        # Column-to-different-column equality on tenant_id MUST be blocked
+        'SELECT "sales_orders"."id" FROM "sales_orders" JOIN "customers" ON "sales_orders"."tenant_id" = "customers"."id" LIMIT 10',
     ]
     for bad_sql in bypass_queries:
         resp_bad = client.post(
@@ -351,3 +355,64 @@ def test_tenant_isolation_allows_compound_and_idempotency_and_blocks_bypasses() 
         )
         assert resp_bad.status_code == 200, resp_bad.text
         assert resp_bad.json()["status"] == "BLOCKED", f"Expected BLOCKED for: {bad_sql}"
+
+
+def test_tenant_isolation_supports_multitenant_join_and_cte_scoping() -> None:
+    """Verify a.tenant_id = b.tenant_id JOIN is allowed, still enforces WHERE tenant_id = 1, and scopes CTEs safely."""
+    client = _client(structured_llm_fn=None)
+
+    # 1. Multi-table JOIN with a.tenant_id = b.tenant_id AND explicit WHERE a.tenant_id = 1 -> VALID
+    join_with_where = (
+        'SELECT "customers"."id", "customers"."name", COUNT("sales_orders"."id") AS "frequency", '
+        'SUM("sales_orders"."total_amount") AS "monetary" '
+        'FROM "sales_orders" '
+        'JOIN "customers" ON "sales_orders"."customer_id" = "customers"."id" '
+        'AND "sales_orders"."tenant_id" = "customers"."tenant_id" '
+        'WHERE "sales_orders"."tenant_id" = 1 '
+        'GROUP BY "customers"."id", "customers"."name" LIMIT 100'
+    )
+    resp1 = client.post(
+        "/v1/sql/validate-and-reconcile",
+        headers=AUTH_HEADERS,
+        json={"sql": join_with_where, "dialect": "postgres", "tenant_id": 1, "live_catalog": LIVE_CATALOG},
+    )
+    assert resp1.status_code == 200, resp1.text
+    assert resp1.json()["status"] == "VALID", resp1.json()
+
+    # 2. Multi-table JOIN with ONLY ON a.tenant_id = b.tenant_id (missing WHERE) -> MUST auto-inject WHERE ...tenant_id = 1
+    join_without_where = (
+        'SELECT "customers"."id", "customers"."name", COUNT("sales_orders"."id") AS "frequency" '
+        'FROM "sales_orders" '
+        'JOIN "customers" ON "sales_orders"."customer_id" = "customers"."id" '
+        'AND "sales_orders"."tenant_id" = "customers"."tenant_id" '
+        'GROUP BY "customers"."id", "customers"."name" LIMIT 100'
+    )
+    resp2 = client.post(
+        "/v1/sql/validate-and-reconcile",
+        headers=AUTH_HEADERS,
+        json={"sql": join_without_where, "dialect": "postgres", "tenant_id": 1, "live_catalog": LIVE_CATALOG},
+    )
+    assert resp2.status_code == 200, resp2.text
+    body2 = resp2.json()
+    assert body2["status"] == "VALID", body2
+    assert 'WHERE "sales_orders"."tenant_id" = 1' in body2["executable_sql"]
+
+    # 3. CTE reading sales_orders -> tenant_id = 1 must be injected inside CTE, NOT on outer SELECT * FROM rfm
+    cte_sql = (
+        'WITH rfm AS (SELECT "customer_id", SUM("total_amount") AS "monetary" '
+        'FROM "sales_orders" GROUP BY "customer_id") '
+        'SELECT * FROM rfm LIMIT 20'
+    )
+    resp3 = client.post(
+        "/v1/sql/validate-and-reconcile",
+        headers=AUTH_HEADERS,
+        json={"sql": cte_sql, "dialect": "postgres", "tenant_id": 1, "live_catalog": LIVE_CATALOG},
+    )
+    assert resp3.status_code == 200, resp3.text
+    body3 = resp3.json()
+    assert body3["status"] == "REQUIRES_AE_REVIEW", body3
+    exec_sql = body3["executable_sql"]
+    assert "WHERE tenant_id = 1" in exec_sql
+    # Ensure outer SELECT does NOT reference non-existent sales_orders.tenant_id
+    outer_part = exec_sql.split("SELECT * FROM rfm")[-1]
+    assert "sales_orders" not in outer_part
