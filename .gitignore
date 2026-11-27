@@ -12,3 +12,5 @@ build/
 examples/jaffle_dbt/target/
 examples/jaffle_dbt/dbt_packages/
 examples/jaffle_dbt/logs/
+examples/jaffle_dbt/edr_target/
+examples/jaffle_dbt/.user.yml
