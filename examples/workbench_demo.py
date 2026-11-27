@@ -58,7 +58,7 @@ from services.neon_demo_engine import (
 )
 from services.query_spec import DataSourceRef, OutputSpec, QuerySpec
 from services.release_orchestrator import orchestrate_draft_pr
-from services.semantic_gap_detector import classify_sql_semantic_gap
+from services.semantic_gap_detector import GapDetectionResult, classify_sql_semantic_gap
 from services.source_ingestion import APPROVED_CONNECTOR_REGISTRY, propose_source_ingestion
 from services.sql_repair import repair_sql_bounded
 from services.sql_validator import validate_and_reconcile_sql
@@ -300,7 +300,7 @@ def _get_lightdash_status() -> dict[str, Any]:
     return adapter.check_status()
 
 
-def _record_gap_event(question: str, gap) -> None:
+def _record_gap_event(question: str, gap: GapDetectionResult | None) -> None:
     if gap is None:
         return
     cls_val = gap.classification.value
@@ -310,7 +310,7 @@ def _record_gap_event(question: str, gap) -> None:
                 "question": question,
                 "classification": cls_val,
                 "candidate_relations": list(gap.candidate_relations or []),
-                "rationale": gap.rationale,
+                "rationale": gap.reason,
             }
         )
 
@@ -918,7 +918,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             with st.container(border=True):
                 gl, gr = st.columns([3, 1])
                 gl.markdown('<div class="erp-card-title">Semantic Gap Classification</div>', unsafe_allow_html=True)
-                gl.caption(gap.rationale)
+                gl.caption(gap.reason)
                 g_val = gap.classification.value
                 g_var = "green" if g_val == "REUSE_EXISTING" else ("red" if g_val in ("SOURCE_GAP", "ACCESS_BLOCKED") else "amber")
                 gr.markdown(f'<div class="erp-pill-row">{_pill(g_val, g_var)}</div>', unsafe_allow_html=True)
@@ -1418,9 +1418,9 @@ def _render_tab5_review_release() -> None:
                     st.error(f"🚫 **BLOCKED (`{', '.join(prop.reason_codes)}`)**: {'; '.join(prop.messages)}")
                 else:
                     st.success(f"✅ **{prop.status}** — Target: `raw.{prop.target_bronze_table}`")
-                    if prop.dlt_pipeline_code:
+                    if prop.dlt_scaffold_py:
                         with st.expander("View Generated dlt Pipeline Scaffold"):
-                            st.code(prop.dlt_pipeline_code, language="python")
+                            st.code(prop.dlt_scaffold_py, language="python")
 
 
 def _render_tab6_observability(db_url: str, catalog) -> None:
