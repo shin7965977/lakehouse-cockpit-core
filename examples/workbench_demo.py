@@ -68,6 +68,9 @@ MAX_LLM_CALLS_PER_SESSION = 20
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
 DBT_DOCS_STATIC_PATH = ROOT / "examples" / "demo_artifacts" / "dbt_docs_static.html"
+GH_PAGES_BASE = "https://shin7965977.github.io/lakehouse-cockpit-core"
+ELEMENTARY_PAGES_URL = f"{GH_PAGES_BASE}/elementary_report.html"
+DBT_DOCS_PAGES_URL = f"{GH_PAGES_BASE}/dbt_docs_static.html"
 
 NAV_TABS = [
     "1️⃣ Governance Timeline",
@@ -1389,8 +1392,8 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
     view_mode = st.radio(
         "Select Observability / Documentation Surface:",
         options=[
-            "📊 Elementary Data Observability (Live Neon)",
-            "🗺️ dbt Lineage DAG & Model Catalog",
+            "📊 Official Elementary Report UI",
+            "🗺️ Official dbt Docs & Lineage DAG",
             "🗄️ Live dbt Table Explorer (Neon)",
         ],
         horizontal=True,
@@ -1399,126 +1402,42 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
     if view_mode.startswith("📊"):
         with st.container(border=True):
             hl, hr = st.columns([2.5, 1.5])
-            hl.markdown('<div class="erp-card-title">Elementary Data Observability Dashboard (Live from Neon `dbt_dev_elementary`)</div>', unsafe_allow_html=True)
+            hl.markdown('<div class="erp-card-title">Official Elementary Data Observability Report (Generated from Neon)</div>', unsafe_allow_html=True)
             hl.caption(
-                "Queried live from Elementary's PostgreSQL metadata tables populated by `dbt build` + `dbt snapshot` + `edr report`."
+                "Hosted on GitHub Pages (`gh-pages`) so the full official Elementary React UI runs natively without `srcdoc` sandbox restrictions."
             )
-            if ELEMENTARY_REPORT_PATH.exists():
-                hr.download_button(
-                    "⬇️ Download Full Elementary HTML (5 MB)",
-                    data=ELEMENTARY_REPORT_PATH.read_bytes(),
-                    file_name="elementary_report.html",
-                    mime="text/html",
-                    use_container_width=True,
-                    help="下載完整版互動式 Elementary HTML 報表（本機瀏覽器開啟不受 iframe 沙盒限制）。",
-                )
+            hr.link_button(
+                "Open Official Elementary UI Fullscreen ↗",
+                ELEMENTARY_PAGES_URL,
+                type="primary",
+                use_container_width=True,
+            )
+            components.iframe(ELEMENTARY_PAGES_URL, height=860, scrolling=True)
 
-            try:
-                tests_df = execute_neon_readonly(
-                    """
-                    SELECT
-                        table_name,
-                        COALESCE(column_name, '-') AS column_name,
-                        test_unique_id,
-                        status,
-                        detected_at
-                    FROM dbt_dev_elementary.elementary_test_results
-                    ORDER BY detected_at DESC
-                    LIMIT 50
-                    """,
-                    max_rows=50,
-                    db_url=db_url,
-                )
-                runs_df = execute_neon_readonly(
-                    """
-                    SELECT
-                        name,
-                        resource_type,
-                        status,
-                        ROUND(execution_time::numeric, 2) AS exec_sec,
-                        generated_at
-                    FROM dbt_dev_elementary.dbt_run_results
-                    WHERE unique_id LIKE '%.jaffle_governance_demo.%'
-                    ORDER BY generated_at DESC
-                    LIMIT 50
-                    """,
-                    max_rows=50,
-                    db_url=db_url,
-                )
-                total_tests = len(tests_df)
-                passed_tests = int((tests_df["status"].str.lower() == "pass").sum()) if not tests_df.empty else 0
-                pass_rate = f"{(passed_tests / total_tests * 100):.0f}%" if total_tests > 0 else "N/A"
-                avg_sec = float(runs_df["exec_sec"].astype(float).mean()) if not runs_df.empty else 0.0
-
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("dbt Data Tests Executed", f"{total_tests}")
-                k2.metric("Test Pass Rate", pass_rate)
-                k3.metric("Jaffle dbt Invocations", f"{len(runs_df)}")
-                k4.metric("Avg Execution Time", f"{avg_sec:.2f}s")
-
-                st.markdown("#### ✅ Live Elementary Test Results (`dbt_dev_elementary.elementary_test_results`)")
-                if not tests_df.empty:
+            with st.expander("🔍 Raw Neon Elementary Metadata Tables (`dbt_dev_elementary`)"):
+                try:
+                    tests_df = execute_neon_readonly(
+                        "SELECT table_name, COALESCE(column_name, '-') AS column_name, test_unique_id, status, detected_at "
+                        "FROM dbt_dev_elementary.elementary_test_results ORDER BY detected_at DESC LIMIT 30",
+                        max_rows=30,
+                        db_url=db_url,
+                    )
                     st.dataframe(tests_df, use_container_width=True, hide_index=True)
-                else:
-                    st.info("No test results recorded yet.")
-
-                st.markdown("#### ⏱️ dbt Build & Snapshot Run History (`dbt_dev_elementary.dbt_run_results`)")
-                if not runs_df.empty:
-                    st.dataframe(runs_df, use_container_width=True, hide_index=True)
-            except Exception as exc:
-                st.error(f"Could not query `dbt_dev_elementary` tables: {exc}")
+                except Exception as exc:
+                    st.error(f"Could not query `dbt_dev_elementary`: {exc}")
 
     elif view_mode.startswith("🗺️"):
         with st.container(border=True):
             dl, dr = st.columns([2.5, 1.5])
-            dl.markdown('<div class="erp-card-title">dbt Lineage DAG & Model Catalog (Neon PostgreSQL)</div>', unsafe_allow_html=True)
-            dl.caption("Interactive Medallion + SCD Type 2 lineage graph & live dbt model metadata from Neon.")
-            if DBT_DOCS_STATIC_PATH.exists():
-                dr.download_button(
-                    "⬇️ Download Static dbt Docs HTML (3.9 MB)",
-                    data=DBT_DOCS_STATIC_PATH.read_bytes(),
-                    file_name="dbt_docs_static.html",
-                    mime="text/html",
-                    use_container_width=True,
-                    help="下載完整版靜態 dbt docs 網站（本機瀏覽器開啟可互動探索完整血緣圖）。",
-                )
-
-            st.graphviz_chart(
-                """
-                digraph dbt_lineage {
-                    rankdir=LR;
-                    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];
-                    raw_orders [label="raw.raw_orders\n(Source)", fillcolor="#e2e8f0", color="#64748b"];
-                    raw_customers [label="raw.raw_customers\n(Source)", fillcolor="#e2e8f0", color="#64748b"];
-                    stg_orders [label="dbt_silver.stg_orders\n(Silver View)", fillcolor="#dbeafe", color="#2563eb"];
-                    stg_customers [label="dbt_silver.stg_customers\n(Silver View)", fillcolor="#dbeafe", color="#2563eb"];
-                    snap_customers [label="dbt_snapshots.snap_customers_dbt\n(SCD Type 2 Snapshot)", fillcolor="#fef3c7", color="#d97706"];
-                    fct_orders [label="dbt_gold.fct_orders_dbt\n(Gold Fact · Enforced Contract)", fillcolor="#dcfce7", color="#16a34a"];
-                    dim_customers [label="dbt_gold.dim_customers_dbt\n(Gold SCD2 Dim)", fillcolor="#dcfce7", color="#16a34a"];
-                    lightdash [label="Lightdash BI & AI Workbench\n(Semantic Layer)", fillcolor="#ede9fe", color="#7c3aed"];
-
-                    raw_orders -> stg_orders -> fct_orders -> lightdash;
-                    raw_customers -> stg_customers -> snap_customers -> dim_customers -> lightdash;
-                }
-                """,
+            dl.markdown('<div class="erp-card-title">Official dbt Docs & Interactive Lineage DAG (Generated from Neon)</div>', unsafe_allow_html=True)
+            dl.caption("Click the teal Lineage icon at the bottom-right inside the dbt Docs frame to explore the full DAG.")
+            dr.link_button(
+                "Open Official dbt Docs Fullscreen ↗",
+                DBT_DOCS_PAGES_URL,
+                type="primary",
                 use_container_width=True,
             )
-
-            try:
-                models_df = execute_neon_readonly(
-                    """
-                    SELECT alias AS model_name, schema_name, materialization, description, depends_on_nodes
-                    FROM dbt_dev_elementary.dbt_models
-                    WHERE unique_id LIKE 'model.jaffle_governance_demo.%'
-                    ORDER BY schema_name, alias
-                    """,
-                    max_rows=50,
-                    db_url=db_url,
-                )
-                st.markdown("#### 📚 Registered dbt Models (`dbt_dev_elementary.dbt_models`)")
-                st.dataframe(models_df, use_container_width=True, hide_index=True)
-            except Exception as exc:
-                st.error(f"Could not query dbt models metadata: {exc}")
+            components.iframe(DBT_DOCS_PAGES_URL, height=860, scrolling=True)
 
     else:
         with st.container(border=True):
