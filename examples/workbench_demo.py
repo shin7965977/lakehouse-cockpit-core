@@ -1389,8 +1389,8 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
     view_mode = st.radio(
         "Select Observability / Documentation Surface:",
         options=[
-            "📊 Elementary Data Observability Report",
-            "🗺️ dbt Docs & Lineage DAG (Static)",
+            "📊 Elementary Data Observability (Live Neon)",
+            "🗺️ dbt Lineage DAG & Docs",
             "🗄️ Live dbt Table Explorer (Neon)",
         ],
         horizontal=True,
@@ -1398,27 +1398,186 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
 
     if view_mode.startswith("📊"):
         with st.container(border=True):
-            st.markdown('<div class="erp-card-title">Elementary Data Observability Report (Generated Live from Neon PostgreSQL)</div>', unsafe_allow_html=True)
+            hl, hr = st.columns([2.5, 1.5])
+            hl.markdown(
+                '<div class="erp-card-title">Elementary Data Observability Dashboard (Live from Neon `dbt_dev_elementary`)</div>',
+                unsafe_allow_html=True,
+            )
+            hl.caption(
+                "Queried live from Neon PostgreSQL `dbt_dev_elementary` tables populated by `dbt build` + `dbt snapshot`. "
+                "(Note: Browsers block 5 MB React SPAs inside sandboxed `srcdoc` iframes, so we render live native telemetry + full HTML download.)"
+            )
             if ELEMENTARY_REPORT_PATH.exists():
-                st.caption(
-                    f"Real interactive HTML report (`{ELEMENTARY_REPORT_PATH.name}`, "
-                    f"{ELEMENTARY_REPORT_PATH.stat().st_size / 1024:.0f} KB) built via `dbt build` + `dbt snapshot` + `edr report` against Neon."
+                hr.download_button(
+                    "⬇️ Download Full elementary_report.html (5.1 MB)",
+                    data=ELEMENTARY_REPORT_PATH.read_bytes(),
+                    file_name="elementary_report.html",
+                    mime="text/html",
+                    type="primary",
+                    use_container_width=True,
+                    help="下載完整的 5.1 MB 互動式 Elementary HTML 報表，在本機瀏覽器打開即可操作完整原版 UI。",
                 )
-                components.html(ELEMENTARY_REPORT_PATH.read_text(encoding="utf-8", errors="ignore"), height=840, scrolling=True)
-            else:
-                st.warning(f"Elementary report not found at `{ELEMENTARY_REPORT_PATH}`.")
+
+            try:
+                tests_df = execute_neon_readonly(
+                    """
+                    SELECT table_name, column_name, test_type, test_sub_type, status, detected_at
+                    FROM dbt_dev_elementary.elementary_test_results
+                    ORDER BY detected_at DESC
+                    LIMIT 50
+                    """,
+                    max_rows=50,
+                    db_url=db_url,
+                )
+                runs_df = execute_neon_readonly(
+                    """
+                    SELECT name, resource_type, status, ROUND(execution_time::numeric, 3) AS exec_sec, generated_at
+                    FROM dbt_dev_elementary.dbt_run_results
+                    WHERE unique_id LIKE '%.jaffle_governance_demo.%'
+                    ORDER BY generated_at DESC
+                    LIMIT 50
+                    """,
+                    max_rows=50,
+                    db_url=db_url,
+                )
+                models_df = execute_neon_readonly(
+                    """
+                    SELECT name, schema_name, materialization, description
+                    FROM dbt_dev_elementary.dbt_models
+                    WHERE package_name = 'jaffle_governance_demo'
+                    ORDER BY schema_name, name
+                    """,
+                    max_rows=50,
+                    db_url=db_url,
+                )
+
+                total_t = len(tests_df)
+                passed_t = int((tests_df["status"].str.lower() == "pass").sum()) if not tests_df.empty else 0
+                pass_rate = (passed_t / total_t * 100.0) if total_t else 100.0
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("dbt Tests Executed", f"{total_t}")
+                k2.metric("Tests Passed", f"{passed_t} / {total_t}")
+                k3.metric("Test Pass Rate", f"{pass_rate:.0f}%")
+                k4.metric("Governed dbt Models", f"{len(models_df)}")
+
+                st.markdown("#### ✅ Live Elementary Test Results (`dbt_dev_elementary.elementary_test_results`)")
+                if not tests_df.empty:
+                    st.dataframe(tests_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No test results recorded in `dbt_dev_elementary.elementary_test_results` yet.")
+
+                c_m, c_r = st.columns(2)
+                with c_m:
+                    st.markdown("#### 📦 dbt Models Registered (`dbt_models`)")
+                    st.dataframe(models_df, use_container_width=True, hide_index=True)
+                with c_r:
+                    st.markdown("#### ⏱️ Recent dbt Run Results (`dbt_run_results`)")
+                    st.dataframe(runs_df, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Failed to query live Elementary tables from Neon: {exc}")
 
     elif view_mode.startswith("🗺️"):
         with st.container(border=True):
-            st.markdown('<div class="erp-card-title">dbt Docs & Interactive Lineage DAG (Generated from Neon)</div>', unsafe_allow_html=True)
+            dl, dr = st.columns([2.5, 1.5])
+            dl.markdown('<div class="erp-card-title">Medallion & SCD Type 2 dbt Lineage DAG</div>', unsafe_allow_html=True)
+            dl.caption("Visualizes the full Bronze → Silver → SCD2 Snapshot → Gold → Semantic Layer lineage built in Neon.")
             if DBT_DOCS_STATIC_PATH.exists():
-                st.caption(
-                    f"Real static `dbt docs` site (`{DBT_DOCS_STATIC_PATH.name}`, "
-                    f"{DBT_DOCS_STATIC_PATH.stat().st_size / 1024:.0f} KB). Click the bottom-right teal icon inside the frame to expand the Lineage Graph!"
+                dr.download_button(
+                    "⬇️ Download Static dbt_docs_static.html (3.9 MB)",
+                    data=DBT_DOCS_STATIC_PATH.read_bytes(),
+                    file_name="dbt_docs_static.html",
+                    mime="text/html",
+                    type="primary",
+                    use_container_width=True,
+                    help="下載完整的 3.9 MB 靜態 dbt docs 網站，在本機瀏覽器開啟可操作完整原版 DAG。",
                 )
-                components.html(DBT_DOCS_STATIC_PATH.read_text(encoding="utf-8", errors="ignore"), height=840, scrolling=True)
-            else:
-                st.warning(f"Static dbt docs not found at `{DBT_DOCS_STATIC_PATH}`.")
+
+            lineage_html = """
+            <div style="background:#ffffff;padding:12px;border-radius:8px;">
+              <pre class="mermaid">
+              flowchart LR
+                subgraph RAW["🥉 Raw (Neon raw.*)"]
+                  R1["raw_orders"]
+                  R2["raw_customers"]
+                  R3["raw_order_items"]
+                  R4["raw_products"]
+                end
+                subgraph SILVER["🥈 Silver & Snapshot"]
+                  S1["stg_orders (view)"]
+                  S2["stg_customers (view)"]
+                  SN["snap_customers_dbt (SCD Type 2)"]
+                end
+                subgraph GOLD["🥇 Gold (Kimball Star Schema)"]
+                  G1["fct_orders_dbt (enforced contract)"]
+                  G2["dim_customers_dbt (SCD2)"]
+                  G3["fct_order_items"]
+                  G4["dim_products"]
+                  G5["mart_customer_value"]
+                end
+                subgraph SEM["📊 Semantic & BI"]
+                  B1["Lightdash Cloud / PBIP TMDL"]
+                  B2["AI Analytics Workbench"]
+                  B3["Elementary Observability"]
+                end
+                R1 --> S1 --> G1
+                R2 --> S2 --> SN --> G2
+                R3 --> G3
+                R4 --> G4
+                G1 --> G5
+                G2 --> G5
+                G1 --> B1
+                G2 --> B1
+                G5 --> B2
+                G1 -.-> B3
+                G2 -.-> B3
+              </pre>
+            </div>
+            <script type="module">
+              import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+              mermaid.initialize({ startOnLoad: true, theme: 'default' });
+            </script>
+            """
+            components.html(lineage_html, height=420, scrolling=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.container(border=True):
+                st.markdown('<div class="erp-card-title">Certified Metrics (Single Source of Truth)</div>', unsafe_allow_html=True)
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "metric": m.name,
+                                "label": m.label,
+                                "source_relation": m.source_relation,
+                                "expr": f"{m.measure_agg.upper()}({m.measure_expr})" if m.measure_agg else m.measure_expr,
+                                "dimensions": ", ".join(m.dimensions),
+                            }
+                            for m in catalog.metrics
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        with c2:
+            with st.container(border=True):
+                st.markdown('<div class="erp-card-title">Governed Gold Relations & Grains</div>', unsafe_allow_html=True)
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "relation": r.name,
+                                "layer": r.layer,
+                                "schema": r.schema_name,
+                                "columns": len(r.columns),
+                                "description": r.description,
+                            }
+                            for r in catalog.relations
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     else:
         with st.container(border=True):
