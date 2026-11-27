@@ -94,6 +94,77 @@ def _extract_literal_value(node: exp.Expression) -> Any:
     return node.sql()
 
 
+_UNSAFE_TENANT_PREDICATE_NODES = (
+    exp.NEQ,
+    exp.GT,
+    exp.GTE,
+    exp.LT,
+    exp.LTE,
+    exp.In,
+    exp.Between,
+    exp.Like,
+    exp.ILike,
+)
+
+
+def _is_tenant_column(node: exp.Expression | None) -> bool:
+    return isinstance(node, exp.Column) and node.name.lower() == "tenant_id"
+
+
+def _is_tenant_literal_eq(eq: exp.EQ, expected_str: str) -> bool:
+    """Return True iff `eq` is strictly `tenant_id = <expected_literal>` (either side)."""
+    left, right = eq.this, eq.expression
+    if _is_tenant_column(left) and isinstance(right, exp.Literal):
+        return str(_extract_literal_value(right)) == expected_str
+    if _is_tenant_column(right) and isinstance(left, exp.Literal):
+        return str(_extract_literal_value(left)) == expected_str
+    return False
+
+
+def _direct_select_tables(select_node: exp.Select) -> list[exp.Table]:
+    """Return exp.Table nodes directly in FROM or JOIN clauses of this SELECT (excluding CTEs/subqueries)."""
+    tables: list[exp.Table] = []
+    from_clause = select_node.args.get("from_") or select_node.args.get("from")
+    if from_clause and isinstance(from_clause.this, exp.Table):
+        tables.append(from_clause.this)
+    for j in select_node.args.get("joins") or []:
+        if isinstance(j.this, exp.Table):
+            tables.append(j.this)
+    return tables
+
+
+def _select_has_literal_tenant_scope(select_node: exp.Select, expected_str: str) -> bool:
+    """Check if this SELECT's own WHERE clause already enforces `tenant_id = <expected_str>`."""
+    where = select_node.args.get("where")
+    if not where:
+        return False
+    return any(_is_tenant_literal_eq(eq, expected_str) for eq in where.find_all(exp.EQ))
+
+
+def _inject_tenant_scope_on_select(
+    select_node: exp.Select,
+    scoped_low: set[str],
+    tenant_expr: exp.Expression,
+    expected_str: str,
+) -> bool:
+    """Inject `WHERE [<qualifier>.]tenant_id = <tenant_id>` on a SELECT that directly reads a scoped table."""
+    direct_tables = _direct_select_tables(select_node)
+    scoped_direct = [t for t in direct_tables if t.name.lower() in scoped_low]
+    if not scoped_direct:
+        return False
+    if _select_has_literal_tenant_scope(select_node, expected_str):
+        return False
+
+    table_qualifier = scoped_direct[0].alias_or_name if len(direct_tables) > 1 else None
+    tenant_col = (
+        exp.column("tenant_id", table=table_qualifier, quoted=True)
+        if table_qualifier
+        else exp.column("tenant_id")
+    )
+    select_node.where(exp.EQ(this=tenant_col, expression=tenant_expr.copy()), copy=False)
+    return True
+
+
 def _check_tenant_isolation(
     tree: exp.Expression,
     referenced_tables: list[str],
@@ -105,33 +176,33 @@ def _check_tenant_isolation(
         return True, "", tree
 
     expected_str = str(server_tenant_id)
-    # 1. Inspect every comparison involving `tenant_id` anywhere in the AST
-    # NOTE: In SQLGlot, `exp.And` inherits from `exp.Binary`. Skip `exp.And` so
-    # compound predicates like `WHERE order_date >= ... AND tenant_id = 1` are
-    # evaluated at their leaf comparison nodes instead of falsely blocked.
-    for comp in tree.find_all(exp.Binary, exp.In):
-        if isinstance(comp, exp.And):
-            continue
-        cols = [c.name.lower() for c in comp.find_all(exp.Column)]
+
+    # 1a. Inspect explicit equality nodes involving `tenant_id`
+    for eq in tree.find_all(exp.EQ):
+        cols = [c.name.lower() for c in eq.find_all(exp.Column)]
         if "tenant_id" not in cols:
             continue
-        if isinstance(comp, exp.EQ):
-            lits = [str(_extract_literal_value(lit)) for lit in comp.find_all(exp.Literal)]
-            if not lits or any(v != expected_str for v in lits):
-                return (
-                    False,
-                    f"Cross-tenant filter detected: expected tenant_id = {expected_str}.",
-                    tree,
-                )
-        else:
-            # Any !=, <, >, IN, OR predicate on tenant_id is a potential bypass
+        # Allow safe multi-tenant JOIN equality: `a.tenant_id = b.tenant_id`
+        if _is_tenant_column(eq.this) and _is_tenant_column(eq.expression):
+            continue
+        # Otherwise, must strictly equal the server-scoped tenant literal
+        if not _is_tenant_literal_eq(eq, expected_str):
+            return (
+                False,
+                f"Cross-tenant filter detected: expected tenant_id = {expected_str}.",
+                tree,
+            )
+
+    # 1b. Explicitly reject unsafe comparison / set predicates on `tenant_id`
+    for comp in tree.find_all(*_UNSAFE_TENANT_PREDICATE_NODES):
+        if any(c.name.lower() == "tenant_id" for c in comp.find_all(exp.Column)):
             return (
                 False,
                 f"Unsafe tenant_id predicate '{comp.sql()}' is blocked; only server-scoped equality is allowed.",
                 tree,
             )
 
-    # Reject `NOT` wrapping tenant_id (e.g. `NOT tenant_id = 1`)
+    # 1c. Reject `NOT` wrapping tenant_id (e.g. `NOT tenant_id = 1`)
     for not_node in tree.find_all(exp.Not):
         if any(c.name.lower() == "tenant_id" for c in not_node.find_all(exp.Column)):
             return (
@@ -140,7 +211,7 @@ def _check_tenant_isolation(
                 tree,
             )
 
-    # Reject `OR` sibling combined with tenant_id equality (classic SQLi bypass)
+    # 1d. Reject `OR` sibling combined with tenant_id equality (classic SQLi bypass)
     for or_node in tree.find_all(exp.Or):
         if any(c.name.lower() == "tenant_id" for c in or_node.find_all(exp.Column)):
             return (
@@ -149,41 +220,31 @@ def _check_tenant_isolation(
                 tree,
             )
 
-    # 2. Auto-scope tables declared as tenant-scoped if query is a top-level Select
+    # 2. Auto-scope SELECTs referencing tenant-scoped tables (CTE-safe; never tricked by column-to-column JOINs)
     scoped_low = {t.lower() for t in (tenant_scoped_relations or set())}
     needs_scope = any(t.lower() in scoped_low for t in referenced_tables)
     if needs_scope and isinstance(tree, exp.Select):
-        has_eq_tenant = any(
-            isinstance(eq, exp.EQ)
-            and any(c.name.lower() == "tenant_id" for c in eq.find_all(exp.Column))
-            for eq in tree.find_all(exp.EQ)
+        tenant_expr = (
+            exp.Literal.number(server_tenant_id)
+            if isinstance(server_tenant_id, int)
+            else exp.Literal.string(str(server_tenant_id))
         )
-        if not has_eq_tenant:
-            tenant_expr = (
-                exp.Literal.number(server_tenant_id)
-                if isinstance(server_tenant_id, int)
-                else exp.Literal.string(str(server_tenant_id))
-            )
-            scoped_tree = tree.copy()
-            # When joining multiple tables, qualify tenant_id with the primary scoped table to avoid
-            # PostgreSQL "column reference 'tenant_id' is ambiguous" errors.
-            table_qualifier: str | None = None
-            if len(referenced_tables) > 1:
-                from_clause = scoped_tree.args.get("from_") or scoped_tree.args.get("from")
-                if from_clause and isinstance(from_clause.this, exp.Table):
-                    if from_clause.this.name.lower() in scoped_low:
-                        table_qualifier = from_clause.this.alias_or_name
-                if not table_qualifier:
-                    for t_node in scoped_tree.find_all(exp.Table):
-                        if t_node.name.lower() in scoped_low:
-                            table_qualifier = t_node.alias_or_name
-                            break
-            tenant_col = (
-                exp.column("tenant_id", table=table_qualifier, quoted=True)
-                if table_qualifier
-                else exp.column("tenant_id")
-            )
-            scoped_tree.where(exp.EQ(this=tenant_col, expression=tenant_expr), copy=False)
+        scoped_tree = tree.copy()
+        injected_any = False
+
+        # First try injecting on the top-level SELECT if it directly reads a scoped table
+        if _inject_tenant_scope_on_select(scoped_tree, scoped_low, tenant_expr, expected_str):
+            injected_any = True
+
+        # Also scope any CTE inner SELECTs that directly read a scoped table without literal tenant filter
+        with_clause = scoped_tree.args.get("with_") or scoped_tree.args.get("with")
+        if with_clause:
+            for cte in with_clause.find_all(exp.CTE):
+                if isinstance(cte.this, exp.Select):
+                    if _inject_tenant_scope_on_select(cte.this, scoped_low, tenant_expr, expected_str):
+                        injected_any = True
+
+        if injected_any:
             return True, "", scoped_tree
 
     return True, "", tree
@@ -203,14 +264,17 @@ def _check_join_fanout(
 
     from_clause = tree.args.get("from_") or tree.args.get("from")
     base_tbl = ""
+    alias_to_table: dict[str, str] = {}
     if from_clause and isinstance(from_clause.this, exp.Table):
         base_tbl = from_clause.this.name.lower()
+        alias_to_table[from_clause.this.alias_or_name.lower()] = base_tbl
 
     pair_set = {(a.lower(), b.lower()) for a, b in one_to_many_joins}
     fanout_parents: set[str] = set()
     for j in joins:
         if isinstance(j.this, exp.Table):
             right_tbl = j.this.name.lower()
+            alias_to_table[j.this.alias_or_name.lower()] = right_tbl
             if (base_tbl, right_tbl) in pair_set:
                 fanout_parents.add(base_tbl)
             elif (right_tbl, base_tbl) in pair_set:
@@ -221,7 +285,8 @@ def _check_join_fanout(
 
     for agg in tree.find_all(exp.Sum, exp.Avg):
         for col in agg.find_all(exp.Column):
-            tbl_ref = (col.table or "").lower()
+            raw_ref = (col.table or "").lower()
+            tbl_ref = alias_to_table.get(raw_ref, raw_ref)
             if tbl_ref in fanout_parents or (not tbl_ref and base_tbl in fanout_parents):
                 return (
                     False,
@@ -230,10 +295,55 @@ def _check_join_fanout(
     return True, ""
 
 
+def extract_output_group_by_columns(sql: str, dialect: str = "postgres") -> list[str]:
+    """Extract normalized output column names (alias-first, no table prefixes) for GROUP BY from SQL AST."""
+    raw = (sql or "").strip()
+    if not raw:
+        return []
+    try:
+        tree = sqlglot.parse_one(raw, read=dialect)
+    except Exception:
+        return []
+    if not isinstance(tree, exp.Select):
+        return []
+
+    alias_by_qual: dict[tuple[str, str], str] = {}
+    alias_by_name: dict[str, str] = {}
+    for expr in tree.expressions:
+        alias = ""
+        target = expr
+        if isinstance(expr, exp.Alias):
+            alias = expr.alias
+            target = expr.this
+        if isinstance(target, exp.Column):
+            out_name = alias or target.name
+            tbl = (target.table or "").lower()
+            col = target.name.lower()
+            if tbl:
+                alias_by_qual[(tbl, col)] = out_name
+            alias_by_name.setdefault(col, out_name)
+
+    grp = tree.args.get("group")
+    if not grp:
+        return []
+
+    result: list[str] = []
+    for g_expr in grp.expressions:
+        if isinstance(g_expr, exp.Column):
+            tbl = (g_expr.table or "").lower()
+            col = g_expr.name.lower()
+            resolved = alias_by_qual.get((tbl, col)) or alias_by_name.get(col) or g_expr.name
+            if resolved and resolved not in result:
+                result.append(resolved)
+    return result
+
+
 def _try_reconcile_simple_select(
     tree: exp.Expression,
     base_spec: QuerySpec,
     referenced_tables: list[str],
+    *,
+    scoped_sql: str | None = None,
 ) -> QuerySpec | None:
     """Reconcile a single-level SELECT into QuerySpec; return None if CTE/Window/Subquery."""
     if not isinstance(tree, exp.Select):
@@ -245,6 +355,9 @@ def _try_reconcile_simple_select(
 
     projection: list[str] = []
     aggregations: list[AggregationSpec] = []
+    alias_by_qual: dict[tuple[str, str], str] = {}
+    alias_by_name: dict[str, str] = {}
+    has_projection_alias = False
     for expr in tree.expressions:
         alias = ""
         target = expr
@@ -266,7 +379,15 @@ def _try_reconcile_simple_select(
                 field = inner_cols[0].name if inner_cols else "*"
                 aggregations.append(AggregationSpec(field=field, func=matched_agg, alias=alias))  # type: ignore[arg-type]
         elif isinstance(target, exp.Column):
-            projection.append(target.name)
+            out_name = alias or target.name
+            if alias and alias != target.name:
+                has_projection_alias = True
+            tbl = (target.table or "").lower()
+            col = target.name.lower()
+            if tbl:
+                alias_by_qual[(tbl, col)] = out_name
+            alias_by_name.setdefault(col, out_name)
+            projection.append(out_name)
         elif isinstance(target, exp.Star):
             continue
         else:
@@ -278,7 +399,11 @@ def _try_reconcile_simple_select(
     if grp:
         for g_expr in grp.expressions:
             if isinstance(g_expr, exp.Column):
-                group_by.append(g_expr.name)
+                tbl = (g_expr.table or "").lower()
+                col = g_expr.name.lower()
+                resolved = alias_by_qual.get((tbl, col)) or alias_by_name.get(col) or g_expr.name
+                if resolved not in group_by:
+                    group_by.append(resolved)
 
     filters: list[FilterCondition] = []
     where = tree.args.get("where")
@@ -325,6 +450,11 @@ def _try_reconcile_simple_select(
     if lim and lim.expression and isinstance(lim.expression, exp.Literal) and lim.expression.is_int:
         max_rows = max(1, min(10000, int(lim.expression.this)))
 
+    # Preserve verified executable SQL when JOINs, table aliases, or column aliases are present
+    # so downstream Build / compile_sql() NEVER strips table qualifiers/aliases and breaks execution.
+    has_table_aliases = any(bool(t.alias) for t in _direct_select_tables(tree))
+    preserve_override = scoped_sql if (joins or has_table_aliases or has_projection_alias) else None
+
     return base_spec.with_updates(
         data_sources=[DataSourceRef(relation=base_rel, catalog_ref=f"dbt://model/{base_rel}")],
         projection=projection,
@@ -333,7 +463,7 @@ def _try_reconcile_simple_select(
         filters=filters,
         joins=joins,
         max_rows=max_rows,
-        raw_sql_override=None,
+        raw_sql_override=preserve_override,
     )
 
 
@@ -440,7 +570,7 @@ def validate_and_reconcile_sql(
     patch = diff_sql(prior_sql, raw_sql)
 
     # Bidirectional AST -> QuerySpec Reconciliation
-    reconciled = _try_reconcile_simple_select(tree, base_spec, referenced_tables)
+    reconciled = _try_reconcile_simple_select(tree, base_spec, referenced_tables, scoped_sql=exec_sql)
     if reconciled is not None:
         return SqlValidationResult(
             status="VALID",

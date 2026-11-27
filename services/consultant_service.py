@@ -37,8 +37,17 @@ try:
         QueryDialect,
         QuerySpec,
     )
-    from .semantic_gap_detector import GapClassification, GapDetectionResult, classify_semantic_gap
-    from .sql_validator import SqlValidationResult, validate_and_reconcile_sql
+    from .semantic_gap_detector import (
+        GapClassification,
+        GapDetectionResult,
+        classify_semantic_gap,
+        classify_sql_semantic_gap,
+    )
+    from .sql_validator import (
+        SqlValidationResult,
+        extract_output_group_by_columns,
+        validate_and_reconcile_sql,
+    )
 except (ImportError, ValueError):
     try:
         from services.dbt_catalog import DbtMetadataCatalog
@@ -58,8 +67,17 @@ except (ImportError, ValueError):
             QueryDialect,
             QuerySpec,
         )
-        from services.semantic_gap_detector import GapClassification, GapDetectionResult, classify_semantic_gap
-        from services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
+        from services.semantic_gap_detector import (
+            GapClassification,
+            GapDetectionResult,
+            classify_semantic_gap,
+            classify_sql_semantic_gap,
+        )
+        from services.sql_validator import (
+            SqlValidationResult,
+            extract_output_group_by_columns,
+            validate_and_reconcile_sql,
+        )
     except (ImportError, ValueError):
         from cockpit_core.services.dbt_catalog import DbtMetadataCatalog
         from cockpit_core.services.diagnostic_planner import _is_pii_column
@@ -82,8 +100,13 @@ except (ImportError, ValueError):
             GapClassification,
             GapDetectionResult,
             classify_semantic_gap,
+            classify_sql_semantic_gap,
         )
-        from cockpit_core.services.sql_validator import SqlValidationResult, validate_and_reconcile_sql
+        from cockpit_core.services.sql_validator import (
+            SqlValidationResult,
+            extract_output_group_by_columns,
+            validate_and_reconcile_sql,
+        )
 
 
 _VALID_IANA_TZ_RE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
@@ -394,7 +417,7 @@ def answer_consultant_turn(
         "state that honestly and NEVER fabricate numbers.\n"
         + structure_rule
         + f"RecentConversationHistory: {json.dumps([t.model_dump() for t in recent_turns], ensure_ascii=False)}\n"
-        f"SanitizedQueryOutcomes: {json.dumps(sanitized_outcomes, ensure_ascii=False)}\n"
+        f"SanitizedQueryOutcomes: {json.dumps(sanitized_outcomes, ensure_ascii=False, default=str)}\n"
         f"LatestUserMessage (RESPOND TO THIS MESSAGE): {message}\n"
     )
 
@@ -503,9 +526,11 @@ class PreviousCandidateDraft(BaseModel):
 
 
 class _LlmCandidateSqlPayload(BaseModel):
-    title: str
-    sql: str
-    plain_language_explanation: str
+    can_answer: bool = True
+    source_gap_reason: str = ""
+    title: str = ""
+    sql: str = ""
+    plain_language_explanation: str = ""
     assumptions: list[str] = Field(default_factory=list)
     group_by: list[str] = Field(default_factory=list)
 
@@ -563,51 +588,31 @@ def draft_candidate_query(
     latest_text = clean_feedback or (user_msgs[-1] if user_msgs else "")
     combined_q = " ".join([*user_msgs, clean_feedback]).strip()
     has_cjk = bool(re.search(r"[\u4e00-\u9fff]", latest_text))
-
-    # 1. Run deterministic Semantic Gap Classification against live_metrics + catalog first
-    gap = classify_semantic_gap(combined_q or latest_text, catalog)
     next_version = (previous_candidate.version + 1) if previous_candidate is not None else 1
 
-    if gap.classification in (GapClassification.SOURCE_GAP, GapClassification.ACCESS_BLOCKED):
-        msg = (
-            f"無法產生 SQL：{gap.reason}"
-            if has_cjk
-            else f"Cannot draft governed SQL: {gap.reason}"
-        )
-        return CandidateQueryDraft(
-            version=next_version,
-            title="Source Gap Detected",
-            sql="",
-            plain_language_explanation=msg,
-            assumptions=[],
-            group_by=[],
-            gap=gap,
-            validation=None,
-            query_spec=None,
-            spec_hash="",
-            approvable=False,
-            resolved_timezone=tz_name,
-        )
-
-    # 2. Build Evidence Carry-Over + Refinement prompt grounded in AllowedCatalog & Certified Metrics
+    # 1. Build Evidence Carry-Over + Refinement prompt grounded in AllowedCatalog & Certified Metrics
+    # NOTE: No brittle regex/keyword pre-check blocking here — semantic availability (SOURCE_GAP)
+    # is decided via LLM Structured Abstention + deterministic SQLGlot AST allowlist & fingerprinting.
     catalog_slice = _select_relevant_catalog_slice(latest_text or combined_q, recent_turns, catalog, glossary_list)
     succeeded_evidence = [
         e.model_dump() for e in (evidence_queries or []) if (e.sql or "").strip()
     ][-4:]
 
-    certified_hint = ""
-    if gap.matched_metric is not None:
-        m = gap.matched_metric
-        certified_hint = (
-            f"CERTIFIED METRIC MATCHED (REUSE_EXISTING): name='{m.name}', relation='{m.source_relation}', "
-            f"measure='{m.measure_agg}({m.measure_expr})', dimensions={m.dimensions}. "
-            "You MUST honor this certified formula unless the user explicitly overrides it.\n"
-        )
+    certified_metrics_payload = [
+        {
+            "name": m.name,
+            "label": m.label,
+            "relation": m.source_relation,
+            "formula": f"{m.measure_agg}({m.measure_expr})" if m.measure_agg and m.measure_expr else "",
+            "dimensions": list(m.dimensions or []),
+        }
+        for m in catalog.metrics
+    ]
 
     lang_rule = (
-        "LANGUAGE RULE: Write `title`, `plain_language_explanation`, and `assumptions` STRICTLY in Traditional Chinese (繁體中文).\n"
+        "LANGUAGE RULE: Write `title`, `plain_language_explanation`, `source_gap_reason`, and `assumptions` STRICTLY in Traditional Chinese (繁體中文).\n"
         if has_cjk
-        else "LANGUAGE RULE: Write `title`, `plain_language_explanation`, and `assumptions` STRICTLY in clear, executive-level ENGLISH. Do NOT use Chinese characters.\n"
+        else "LANGUAGE RULE: Write `title`, `plain_language_explanation`, `source_gap_reason`, and `assumptions` STRICTLY in clear, executive-level ENGLISH. Do NOT use Chinese characters.\n"
     )
 
     prompt = (
@@ -616,21 +621,29 @@ def draft_candidate_query(
         + lang_rule
         + f"TargetDialect: {dialect}\n"
         f"CurrentDate ({tz_name}): {today_str}\n"
-        + certified_hint
         + "STRICT RULES:\n"
+        "0. STRUCTURED ABSTENTION (SOURCE_GAP): If the user asks for external data sources or domains that CANNOT "
+        "be answered from AllowedCatalog (e.g., Facebook Ads ROAS, Google Analytics / GA4 clicks, Instagram ads), "
+        "set `can_answer=false`, `sql=\"\"`, explain clearly what source data is missing in `source_gap_reason` and "
+        "`plain_language_explanation`, and NEVER fabricate tables or columns. Conversely, if PriorVerifiedEvidenceQueries "
+        "already succeeded or the required tables exist in AllowedCatalog, set `can_answer=true`.\n"
         "1. Output ONLY a single READ-ONLY SELECT statement using exact table and column names from AllowedCatalog. "
-        "NEVER fabricate tables or columns.\n"
+        "NEVER fabricate tables or columns. If a CertifiedMetrics entry matches the user's requested metric, honor its exact formula.\n"
         "2. EVIDENCE CARRY-OVER: If PriorVerifiedEvidenceQueries already executed a valid query answering the user, "
         "preserve its proven aggregations (SUM/COUNT/AVG), joins, and date filters instead of dropping them.\n"
         "3. ITERATIVE REFINEMENT: If PreviousCandidateDraft and RefinementFeedback are provided, modify PreviousCandidateDraft "
         "to incorporate the exact requested changes.\n"
-        "4. EXPRESSIVENESS: Support aggregated metrics (GROUP BY), raw detail listings (no GROUP BY, group_by=[]), "
-        "multi-table LEFT/INNER JOINs (always qualify table.column on joins), CTEs, and Window Functions (OVER (...)).\n"
+        "4. EXPRESSIVENESS & STYLE: Support aggregated metrics (GROUP BY), raw detail listings (no GROUP BY, group_by=[]), "
+        "multi-table LEFT/INNER JOINs, CTEs, and Window Functions (OVER (...)). "
+        "Follow dbt Style Guide: NEVER use meaningless table aliases like t1, t2, a, b — always use full table names "
+        "(e.g. \"sales_orders\".\"id\", \"customers\".\"name\") when qualifying columns on joins.\n"
         "5. For date comparisons on text date columns (e.g. order_date), always use CAST(\"order_date\" AS DATE) >= "
         "CAST(CURRENT_DATE - INTERVAL '<n> days' AS DATE).\n"
         "6. In `plain_language_explanation`, clearly explain in 2-4 sentences what this SQL computes, filters, joins, "
         "and groups by, and end by asking if this matches what they want (or what they would like to adjust).\n"
-        "7. Populate `group_by` with the exact output grain column names (or [] for raw detail listings / single scalar totals).\n\n"
+        "7. Populate `group_by` with the exact SELECT output column names / aliases (no table prefixes like 't1.'; "
+        "e.g. ['customer_id', 'customer_name'], or [] for raw detail listings / single scalar totals).\n\n"
+        f"CertifiedMetrics: {json.dumps(certified_metrics_payload, ensure_ascii=False)}\n"
         f"AllowedCatalog: {json.dumps(catalog_slice, ensure_ascii=False)}\n"
         f"BusinessGlossary: {json.dumps([g.model_dump() for g in glossary_list], ensure_ascii=False)}\n"
         f"TenantSampleDimensionValues (formatting hints only): {json.dumps(tenant_value_samples or {}, ensure_ascii=False)}\n"
@@ -653,8 +666,37 @@ def draft_candidate_query(
     except Exception as exc:
         raise ConsultantError("LLM_CANDIDATE_FAILED", f"Candidate SQL drafting failed: {exc}") from exc
 
-    # 3. Pre-validate through SQLGlot AST & Tenant Security Gate
+    # 2. Structured Abstention -> Fail-Loud SOURCE_GAP without fabricating SQL
     clean_sql = (parsed.sql or "").strip()
+    if not parsed.can_answer or not clean_sql:
+        gap_reason = (
+            parsed.source_gap_reason
+            or parsed.plain_language_explanation
+            or "Requested domain or data source is not present in the authorized ERP catalog."
+        )
+        source_gap = GapDetectionResult(
+            classification=GapClassification.SOURCE_GAP,
+            question=latest_text or combined_q,
+            reason=gap_reason,
+            candidate_relations=[],
+            evidence=["llm_structured_abstention=source_gap"],
+        )
+        return CandidateQueryDraft(
+            version=next_version,
+            title=parsed.title or "Source Gap Detected",
+            sql="",
+            plain_language_explanation=parsed.plain_language_explanation or f"Cannot draft governed SQL: {gap_reason}",
+            assumptions=list(parsed.assumptions),
+            group_by=[],
+            gap=source_gap,
+            validation=None,
+            query_spec=None,
+            spec_hash="",
+            approvable=False,
+            resolved_timezone=tz_name,
+        )
+
+    # 3. Pre-validate through SQLGlot AST & Tenant Security Gate
     allowed_names = {r.name for r in catalog.relations}
     scoped_rels = tenant_scoped_relations
     if scoped_rels is None:
@@ -667,15 +709,12 @@ def draft_candidate_query(
         version=next_version,
         purpose="ad_hoc",
         question=latest_text or parsed.title,
-        semantic_match=gap.matched_metric.name if gap.matched_metric else None,
+        semantic_match=None,
         group_by=list(parsed.group_by),
         assumptions=list(parsed.assumptions),
         dialect=dialect,
         raw_sql_override=clean_sql,
-        output=OutputSpec(
-            max_rows=100,
-            certification="CERTIFIED" if gap.classification == GapClassification.REUSE_EXISTING else "VALIDATED_EXPLORATORY",
-        ),
+        output=OutputSpec(max_rows=100, certification="VALIDATED_EXPLORATORY"),
     )
 
     validation = validate_and_reconcile_sql(
@@ -687,12 +726,56 @@ def draft_candidate_query(
     )
 
     final_sql = (validation.executable_sql or clean_sql).strip()
+
+    # 4. Ground Semantic Gap & Output Grain directly in verified SQL AST (eliminates keyword noise)
+    ast_group_by = extract_output_group_by_columns(final_sql, dialect=dialect)
+    normalized_group_by = (
+        ast_group_by
+        if ast_group_by
+        else [g.split(".")[-1].strip('"').strip() for g in parsed.group_by if g and g.strip()]
+    )
+    if validation.status == "BLOCKED" and "UNLISTED_RELATION" in validation.reason_codes:
+        # Anti-hallucination hard guard: LLM referenced a non-existent table -> Fail-Loud SOURCE_GAP
+        gap = GapDetectionResult(
+            classification=GapClassification.SOURCE_GAP,
+            question=latest_text or combined_q,
+            reason="; ".join(validation.messages) or "SQL referenced an unlisted table not in the authorized catalog.",
+            candidate_relations=[],
+            evidence=["ast_allowlist_blocked=UNLISTED_RELATION"],
+        )
+    elif validation.status != "BLOCKED" and final_sql:
+        gap = classify_sql_semantic_gap(
+            final_sql,
+            catalog,
+            question=latest_text or combined_q,
+            dialect=dialect,
+        )
+    else:
+        gap = GapDetectionResult(
+            classification=GapClassification.NEW_SEMANTIC_METRIC,
+            question=latest_text or combined_q,
+            reason="; ".join(validation.messages) or "Candidate SQL blocked by AST security gate.",
+            candidate_relations=[],
+            evidence=list(validation.reason_codes),
+        )
+
     final_spec = validation.reconciled_spec or base_spec
+    updated_output = final_spec.output.model_copy(
+        update={
+            "certification": (
+                "CERTIFIED"
+                if gap.classification == GapClassification.REUSE_EXISTING
+                else "VALIDATED_EXPLORATORY"
+            )
+        }
+    )
     final_spec = final_spec.model_copy(
         update={
             "version": next_version,
-            "group_by": list(parsed.group_by),
+            "semantic_match": gap.matched_metric.name if gap.matched_metric else None,
+            "group_by": normalized_group_by,
             "raw_sql_override": final_sql,
+            "output": updated_output,
         }
     )
     spec_hash = hashlib.sha256(f"v{next_version}:{final_sql}".encode("utf-8")).hexdigest()[:16]
@@ -706,7 +789,7 @@ def draft_candidate_query(
         sql=final_sql,
         plain_language_explanation=parsed.plain_language_explanation,
         assumptions=list(parsed.assumptions),
-        group_by=list(parsed.group_by),
+        group_by=normalized_group_by,
         gap=gap,
         validation=validation,
         query_spec=final_spec,

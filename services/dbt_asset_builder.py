@@ -88,17 +88,25 @@ def build_dbt_and_lightdash_bundle(
     """Synthesize minimal dbt SQL, enforced schema.yml, separate Lightdash YAML, and BI Asset Manifest."""
     safe_model = _sanitize_model_name(model_name)
     col_types = {k: v for k, v in (column_types or {}).items()}
-    upstream_relations = [s.relation for s in query_spec.data_sources if s.relation]
+    upstream_relations = list(
+        dict.fromkeys(
+            [s.relation for s in query_spec.data_sources if s.relation]
+            + [j.right_relation for j in query_spec.joins if j.right_relation]
+        )
+    )
 
-    # 1. Strip trailing LIMIT so materialized Gold Mart is complete, then replace upstream tables with {{ ref(...) }}
+    # 1. Strip trailing LIMIT so materialized Gold Mart is complete, then replace FROM/JOIN upstream tables with {{ ref(...) }}
     raw_sql = query_spec.compile_sql()
     unbounded_sql = re.sub(r"\s+LIMIT\s+\d+\s*$", "", raw_sql.strip().rstrip(";"), flags=re.IGNORECASE)
     dbt_body = unbounded_sql
     for rel in upstream_relations:
+        # Only replace table references in FROM/JOIN clauses so qualified column prefixes like
+        # `"sales_orders"."id"` are preserved cleanly as valid SQL.
         dbt_body = re.sub(
-            rf'"{re.escape(rel)}"|\b{re.escape(rel)}\b',
-            f"{{{{ ref('{rel}') }}}}",
+            rf'(\b(?:FROM|JOIN)\s+)(?:"{re.escape(rel)}"|\b{re.escape(rel)}\b)',
+            rf"\1{{{{ ref('{rel}') }}}}",
             dbt_body,
+            flags=re.IGNORECASE,
         )
 
     dbt_sql = (

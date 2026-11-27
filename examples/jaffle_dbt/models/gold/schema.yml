@@ -1,0 +1,56 @@
+version: 2
+
+models:
+  - name: fct_orders_dbt
+    description: "Governed Gold order fact table (grain: order_id) with enforced contract and quality checks."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: order_id
+        data_type: integer
+        constraints:
+          - type: not_null
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        data_type: integer
+        tests:
+          - not_null
+      - name: order_date
+        data_type: date
+        tests:
+          - not_null
+      - name: order_month
+        data_type: text
+      - name: status
+        data_type: text
+        tests:
+          - accepted_values:
+              values: ['Completed', 'Pending', 'Returned']
+      - name: is_completed
+        data_type: boolean
+      - name: order_total
+        data_type: double precision
+      - name: realized_revenue
+        data_type: double precision
+      - name: cost_total
+        data_type: double precision
+      - name: gross_profit
+        data_type: double precision
+
+  - name: dim_customers_dbt
+    description: "SCD Type 2 customer dimension built from dbt snapshot (grain: dbt_scd_id)."
+    columns:
+      - name: dbt_scd_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: customer_tier
+        tests:
+          - accepted_values:
+              values: ['Standard', 'Silver', 'VIP']
