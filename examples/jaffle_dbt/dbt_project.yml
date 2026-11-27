@@ -9,11 +9,17 @@ snapshot-paths: ["snapshots"]
 target-path: "target"
 clean-targets: ["target", "dbt_packages"]
 
+flags:
+  require_explicit_package_overrides_for_builtin_materializations: false
+
 models:
   jaffle_governance_demo:
     silver:
       +materialized: view
       +schema: dbt_silver
+    staging:
+      +materialized: table
+      +schema: dbt_staging
     gold:
       +materialized: table
       +schema: dbt_gold

@@ -4,8 +4,8 @@
     config(
       target_schema='dbt_snapshots',
       unique_key='customer_id',
-      strategy='check',
-      check_cols=['customer_tier', 'region'],
+      strategy='timestamp',
+      updated_at='updated_at',
       invalidate_hard_deletes=True
     )
 }}

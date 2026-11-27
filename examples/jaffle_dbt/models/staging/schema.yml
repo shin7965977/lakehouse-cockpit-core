@@ -1,0 +1,21 @@
+version: 2
+
+models:
+  - name: candidate_fct_orders
+    description: "Write-Audit-Publish candidate staging table tested with --store-failures before publishing to Gold."
+    tests:
+      - dbt_utils.expression_is_true:
+          arguments:
+            expression: "order_total >= 0 and cost_total >= 0"
+    columns:
+      - name: order_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id

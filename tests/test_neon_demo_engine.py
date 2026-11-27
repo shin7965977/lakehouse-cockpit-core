@@ -84,8 +84,10 @@ def test_live_neon_day0_to_day20_lifecycle_and_reset() -> None:
     r15 = run_day15_dirty_data_wap()
     assert r15["published_to_gold"] is False
     assert r15["lkg_preserved"] is True
-    assert r15["quarantined_rows"] == 5
+    assert r15["failed_check_count"] >= 3
     assert r15["lkg_order_count"] == 560
+    state15 = fetch_demo_state()
+    assert state15["quarantine_count"] >= 5  # Populated dynamically by real `dbt test --store-failures`!
 
     r20 = run_day20_semantic_drift_ci()
     assert r20["merge_allowed"] is False

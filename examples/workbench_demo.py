@@ -383,11 +383,45 @@ def _render_nav_bar() -> str:
     return st.session_state["active_tab"]
 
 
+SCENARIO_NARRATIVES: dict[int, dict[str, str]] = {
+    0: {
+        "what": "初始化 Jaffle Shop 2025 上半年（H1）基準資料（120 位客戶、520 筆訂單），並以真正的 dbt Core 建立 Silver、SCD Type 2 初始快照與 Gold 正式表。",
+        "how": "依序執行 `dbt snapshot` → `dbt run`（建 candidate 表）→ `dbt test --store-failures` → 全部通過後才發布 `dbt_gold.fct_orders_dbt` 與 `mart_scd_comparison`。",
+        "why": "所有商業報表與 AI 查詢都從乾淨、經過契約驗證的 Single Source of Truth 起步，避免直接掃描未清洗的原始表。",
+        "stakeholder": "業務與管理層拿到的起始數字 100% 經過唯一性、非空與外鍵檢核，且後續所有變更都能追溯版本。",
+    },
+    5: {
+        "what": "第 5 天上游正常湧入 25 筆新訂單（2025-07-01 ~ 07-05），需要例行更新正式 Gold 報表。",
+        "how": "執行真實 **Write-Audit-Publish (WAP)**：先 `dbt run --select candidate_fct_orders` 建候選表，再跑 `dbt test --select candidate_fct_orders --store-failures`（`not_null`、`unique`、`relationships`、`dbt_utils.expression_is_true`），全綠後才發布到 `fct_orders_dbt`。",
+        "why": "把「建表」跟「發布」拆開——只有驗證通過的候選表才允許覆蓋正式表，防止任何壞資料偷渡進 BI。",
+        "stakeholder": "業務每天早上打開 Power BI / Lightdash 看到最新數字，同時獲得自動化品質保證，不需要人工對帳確認。",
+    },
+    10: {
+        "what": "第 10 天有 15 位原本是 `Standard` 的高潛力客戶正式升級為 `VIP`（部分同時跨區異動），上游 ERP 直接覆蓋最新狀態，並產生升級後的新訂單。",
+        "how": "執行真實 **`dbt snapshot`（SCD Type 2, `strategy='timestamp'`）**：自動把舊版本的 `dbt_valid_to` 填上 `2025-07-10` 關閉生效，再插入 `VIP` 新版本（`dbt_valid_to = NULL`），並重建 `mart_scd_comparison`。",
+        "why": "如果只做覆蓋（SCD Type 1），2025 上半年那 15 位客戶買的 `$7,474.5` 會被「溯及既往」偷算到 VIP 頭上，導致歷史報表憑空失真！",
+        "stakeholder": "財務、行銷與管理層在回顧去年或上季各客群業績時，數字永遠維持當時的歷史真相（Point-in-Time Accuracy），不會因為今天客戶升級就讓歷史財報對不上帳。",
+    },
+    15: {
+        "what": "第 15 天上游系統異常，送進 5 筆髒資料（2 筆重複 `order_id`、2 筆負數金額、1 筆 `NULL customer_id`）。",
+        "how": "執行真實 **`dbt test --select candidate_fct_orders --store-failures`**：3 項 dbt 測試立即 FAIL，dbt **自動把違規列寫進 `dbt_dev_dbt_test__audit.*` 隔離表**，並跳過 `fct_orders_dbt` 發布——正式 Gold 維持在 **Last-Known-Good（昨日最後可信版本）**！",
+        "why": "絕不在 SQL 裡偷寫 `ROW_NUMBER() = 1` 硬吞或讓殘缺資料直接覆蓋正式表（\"A transformation should not resolve an ambiguity it is not authorized to resolve\"）。",
+        "stakeholder": "1) 老闆的 BI 看板**不會突然炸掉或算錯帳**（維持可控的 LKG）；2) 分析師直接拿 `dbt_test__audit` 隔離清冊找業務確認「負數金額是上游 Bug 還是新上線的退款規則」，把商業決定權還給業務。",
+    },
+    20: {
+        "what": "第 20 天有工程師開了一支 PR，無意間把 `realized_revenue` 的 `WHERE status = 'Completed'` 移除，導致未付款（`Pending`）與退貨（`Returned`）訂單全被算進實收營收。",
+        "how": "在隔離的 `ci_pr` schema 跑 3 層 CI 檢查：雖然 **Schema Contract（欄位與型別）10/10 PASS**，但 **Staging vs. Prod Data Diff（+25% 飄移超過 5% 門檻）** 與 **GL 對帳測試** 直接亮紅燈 **BLOCK PR Merge**！",
+        "why": "證明「光靠 Data Contract 只鎖得住欄位型別，抓不到商業口徑被偷改（Semantic Drift）」——必須在 CI 階段加入 KPI Data Diff 與對帳測試。",
+        "stakeholder": "杜絕「程式碼沒報錯、但全公司營收憑空暴增 25%」的靜默災難；任何正式 KPI 口徑調整都必須經 Data Owner 審核並同步更新文件，守住全公司對數據的信任。",
+    },
+}
+
+
 def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
-    st.subheader("Interactive Data Governance & SCD Type 2 Timeline (Live Neon PostgreSQL)")
+    st.subheader("Interactive Real-dbt Governance & SCD Type 2 Lab (Live Neon PostgreSQL)")
     st.caption(
-        "Hover over each button to inspect the exact database & CI event it triggers. "
-        "All actions execute real PostgreSQL transactions against Neon (zero LLM tokens)."
+        "Every button triggers **real dbt Core (`dbtRunner`)** commands against Neon PostgreSQL: "
+        "`dbt snapshot` (SCD Type 2), `dbt test --store-failures` (native audit quarantine), and `mart_scd_comparison`."
     )
 
     with st.container(border=True):
@@ -395,62 +429,75 @@ def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
         if b0.button(
             "🔄 Day 0 Reset Baseline",
             use_container_width=True,
-            help="【重置基準】清空並重建 Neon raw / snapshots / gold / quarantine 表，回到 Day 0 乾淨狀態（120 客戶、520 訂單、120 筆初始 SCD2 快照）。",
+            help="【重置基準】重建 Neon raw 表，並跑真實 dbt snapshot + dbt run + dbt test 建立乾淨 Day 0 基線。",
         ):
-            with st.spinner("Seeding Day 0 baseline in Neon..."):
+            with st.spinner("Running real `dbt snapshot` + `dbt run` + `dbt test` on Neon (~8s)..."):
                 st.session_state["last_timeline_result"] = reset_demo(db_url)
             st.rerun()
 
         if b5.button(
             "✅ Day 5 Normal Refresh",
             use_container_width=True,
-            help="【正常每日刷新 · WAP】寫入 25 筆正常新訂單進 raw → 建立 candidate 表 → 跑 4 項品質檢核（not_null / unique / non_negative / FK）全綠 → 發布至 gold.fct_orders。",
+            help="【正常刷新 · 真 dbt WAP】寫入 25 筆新訂單 → 跑 dbt run -s candidate_fct_orders → dbt test --store-failures 全綠 → 發布 fct_orders_dbt。",
         ):
-            with st.spinner("Running Day 5 Write-Audit-Publish on Neon..."):
+            with st.spinner("Running real `dbt run -s candidate_fct_orders` & `dbt test --store-failures` on Neon..."):
                 st.session_state["last_timeline_result"] = run_day5_normal_refresh(db_url)
             st.rerun()
 
         if b10.button(
             "🧬 Day 10 SCD Type 2",
             use_container_width=True,
-            help="【客戶屬性異動 · SCD Type 2】將 15 位 Standard 客戶升級 VIP → 執行 SCD2 Snapshot（舊列補上 dbt_valid_to、新增 VIP 列）→ 現場對比 SCD1 歷史失真 vs. Point-in-Time Join 歷史保真。",
+            help="【客戶異動 · 真 dbt snapshot】15 位 Standard 客戶升級 VIP → 跑真實 dbt snapshot（SCD Type 2）並重建 mart_scd_comparison。",
         ):
-            with st.spinner("Upgrading 15 customers & running SCD Type 2 Snapshot on Neon..."):
+            with st.spinner("Running real `dbt snapshot` (SCD Type 2) & rebuilding `mart_scd_comparison` on Neon..."):
                 st.session_state["last_timeline_result"] = run_day10_scd_type2(db_url)
             st.rerun()
 
         if b15.button(
             "🛡️ Day 15 Dirty Data WAP",
             use_container_width=True,
-            help="【上游髒資料防護 · WAP + LKG】注入 5 筆壞資料（重複 PK、負數金額、NULL 客戶 ID）→ Candidate 驗證失敗 → 拒絕覆蓋正式表（保留 Last-Known-Good）並將壞資料送進 Quarantine 隔離表待業務確認。",
+            help="【髒資料攔截 · 真 dbt --store-failures】注入 5 筆壞資料 → dbt test 失敗自動寫入 dbt_dev_dbt_test__audit 隔離表 → 拒絕覆蓋 Gold（保留 LKG）。",
         ):
-            with st.spinner("Injecting bad records & running WAP Gate on Neon..."):
+            with st.spinner("Injecting dirty rows & running real `dbt test --store-failures` on Neon..."):
                 st.session_state["last_timeline_result"] = run_day15_dirty_data_wap(db_url)
             st.rerun()
 
         if b20.button(
             "🚨 Day 20 Semantic Drift CI",
             use_container_width=True,
-            help="【CI/CD 阻擋語意飄移】在隔離的 ci_pr schema 模擬 PR 偷改口徑（納入 Pending/Returned 訂單）→ Schema Contract 雖 PASS，但 CI Data Diff（+25% 飄移）與總帳對帳 FAIL → 直接 BLOCK PR Merge。",
+            help="【CI 攔截語意飄移】在 ci_pr 模擬拿掉 Completed 過濾 → Schema Contract PASS，但 CI Data Diff（+25%）與對帳測試直接 BLOCK PR Merge。",
         ):
-            with st.spinner("Simulating drifted PR & running 3-layer CI Gate on Neon..."):
+            with st.spinner("Running 3-layer CI Semantic Drift Gate on Neon..."):
                 st.session_state["last_timeline_result"] = run_day20_semantic_drift_ci(db_url)
             st.rerun()
 
         latest = state.get("latest_run")
         if latest:
+            run_day = int(latest["run_day"])
             st_status = latest["status"]
             if st_status == "HEALTHY":
-                st.success(f"**Day {latest['run_day']} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
+                st.success(f"**Day {run_day} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
             elif st_status == "DEGRADED_LKG":
-                st.warning(f"**Day {latest['run_day']} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
+                st.warning(f"**Day {run_day} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
             else:
-                st.error(f"**Day {latest['run_day']} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
+                st.error(f"**Day {run_day} ({latest['sim_date']}) — {latest['event_type']}**: {latest['summary']}")
 
             details = json.loads(latest["details_json"]) if isinstance(latest.get("details_json"), str) else {}
 
+            # Business & Architecture Explanation Card
+            narr = SCENARIO_NARRATIVES.get(run_day)
+            if narr:
+                n1, n2 = st.columns(2)
+                with n1:
+                    st.info(f"**📌 發生了什麼事（What Happened）**\n\n{narr['what']}\n\n**🛠️ dbt 怎麼解決（How dbt Solved It）**\n\n{narr['how']}")
+                with n2:
+                    st.success(f"**🧠 為什麼這麼做（Why This Architecture）**\n\n{narr['why']}\n\n**💼 對 Stakeholder 的影響與好處**\n\n{narr['stakeholder']}")
+
+            if details.get("dbt_commands"):
+                st.code("\n".join(details["dbt_commands"]), language="bash")
+
             if "wap_checks" in details:
-                st.markdown("#### Write-Audit-Publish (Candidate Validation Gates)")
+                st.markdown("#### Real dbt Test Results (`dbt test --select candidate_fct_orders --store-failures`)")
                 st.dataframe(pd.DataFrame(details["wap_checks"]), use_container_width=True, hide_index=True)
 
             if "ci_gates" in details:
@@ -470,43 +517,31 @@ def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
     col_l, col_r = st.columns(2)
     with col_l:
         with st.container(border=True):
-            st.markdown("#### 🧬 SCD Type 1 vs. SCD Type 2 (H1 2025 Historical Revenue)")
+            st.markdown("#### 🧬 SCD Type 1 vs. SCD Type 2 (`dbt_dev_dbt_gold.mart_scd_comparison`)")
             st.caption(
-                "After **Day 10**, 15 Standard customers upgrade to VIP. Naive SCD Type 1 retroactively rewrites H1 2025 "
-                "revenue (`historical_distortion != 0`), while **Point-in-Time SCD Type 2** preserves historical truth."
+                "Materialized by real dbt Gold model `mart_scd_comparison.sql`. After **Day 10**, notice how naive SCD Type 1 "
+                "retroactively distorts H1 2025 revenue, while **Point-in-Time SCD Type 2** preserves historical truth."
             )
             st.dataframe(pd.DataFrame(state["scd_comparison"]), use_container_width=True, hide_index=True)
 
     with col_r:
         with st.container(border=True):
-            st.markdown("#### 📜 SCD Type 2 Version History (`snapshots.snap_customers`)")
+            st.markdown("#### 📜 Real dbt Snapshot History (`dbt_snapshots.snap_customers_dbt`)")
             if state["scd_changed_rows"]:
                 st.dataframe(pd.DataFrame(state["scd_changed_rows"]), use_container_width=True, hide_index=True)
             else:
-                st.info("No multi-version customers yet. Click **🧬 Day 10 SCD Type 2** above to trigger live customer upgrades.")
+                st.info("No multi-version customers yet. Click **🧬 Day 10 SCD Type 2** above to run real `dbt snapshot`.")
 
     with st.container(border=True):
-        st.markdown("#### 🛡️ Quarantine Table (`quarantine.rejected_orders` — For Stakeholder Clarification)")
+        st.markdown("#### 🛡️ Native dbt `--store-failures` Quarantine (`dbt_dev_dbt_test__audit.*`)")
         if state["quarantine_rows"]:
-            st.caption("Offending rows are quarantined instead of silently deduplicated (`ROW_NUMBER() = 1`) or published to Gold.")
+            st.caption(
+                "100% populated automatically by `dbt test --select candidate_fct_orders --store-failures` (zero hardcoded rows). "
+                "Share these exact failing records with stakeholders before touching production SQL."
+            )
             st.dataframe(pd.DataFrame(state["quarantine_rows"]), use_container_width=True, hide_index=True)
         else:
-            st.info("Quarantine is empty. Click **🛡️ Day 15 Dirty Data WAP** to inject duplicate PKs, negative amounts, and NULL FKs.")
-
-    with st.expander("📋 Pipeline Execution Audit Log (`governance.pipeline_runs`)"):
-        runs_df = pd.DataFrame(
-            [
-                {
-                    "day": r["run_day"],
-                    "sim_date": r["sim_date"],
-                    "event_type": r["event_type"],
-                    "status": r["status"],
-                    "summary": r["summary"],
-                }
-                for r in state["runs"]
-            ]
-        )
-        st.dataframe(runs_df, use_container_width=True, hide_index=True)
+            st.info("No dbt test audit failures stored. Click **🛡️ Day 15 Dirty Data WAP** to trigger real `dbt test --store-failures`.")
 
 
 def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:

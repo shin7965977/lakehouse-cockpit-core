@@ -1,23 +1,26 @@
-"""Neon PostgreSQL Interactive Data Governance & SCD Type 2 Demo Engine.
+"""Neon PostgreSQL Real-dbt Data Governance & SCD Type 2 Demo Engine.
 
-Powers the Day 0 / Day 5 / Day 10 / Day 15 / Day 20 interactive lifecycle on a real
-Neon PostgreSQL database (single-company Jaffle Shop e-commerce model, no tenant_id):
-  - Day 0  : Reset & seed deterministic Jaffle Shop baseline + initial SCD2 snapshot
-  - Day 5  : Normal daily refresh via Write-Audit-Publish (Candidate -> Validate -> Publish)
-  - Day 10 : Customer tier/region changes via SCD Type 2 snapshot + Point-in-Time comparison
-  - Day 15 : Dirty upstream data blocked by WAP -> Last-Known-Good preserved + Quarantine table
-  - Day 20 : Semantic drift in CI PR -> Schema Contract PASS, Data Diff & Reconciliation BLOCK
+Executes REAL dbt Core commands via `dbt.cli.main.dbtRunner` against live Neon PostgreSQL
+(single-company Jaffle Shop e-commerce model, no tenant_id):
+  - Day 0  : Reset raw tables -> real `dbt snapshot` + `dbt run` + `dbt test --store-failures`
+  - Day 5  : Normal orders -> `dbt run -s candidate_fct_orders` -> `dbt test --store-failures` -> publish `fct_orders_dbt`
+  - Day 10 : Customer upgrades -> real `dbt snapshot` (SCD Type 2) -> `dbt run -s dim_customers_dbt mart_scd_comparison`
+  - Day 15 : Dirty upstream rows -> `dbt test -s candidate_fct_orders --store-failures` FAILS ->
+             Gold untouched (Last-Known-Good) + failed rows auto-stored by dbt in `dbt_dev_dbt_test__audit.*`
+  - Day 20 : Semantic drift PR in `ci_pr` -> Schema Contract PASS, CI Data Diff & Reconciliation BLOCK
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
-import hashlib
 import json
 import os
+from pathlib import Path
 import random
 from typing import Any
+from urllib.parse import urlparse
 
+from dbt.cli.main import dbtRunner
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
@@ -45,6 +48,9 @@ except (ImportError, ValueError):
             DbtMetadataCatalog,
         )
 
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+DBT_PROJECT_DIR = ROOT_DIR / "examples" / "jaffle_dbt"
 
 DEMO_BASE_DATE = date(2025, 1, 1)
 DEMO_H1_END = date(2025, 6, 30)
@@ -96,9 +102,44 @@ def _connect(db_url: str | None = None):
     return psycopg2.connect(get_database_url(db_url))
 
 
-def _scd_id(customer_id: int, valid_from: str, tier: str, region: str) -> str:
-    raw = f"{customer_id}|{valid_from}|{tier}|{region}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+def _set_dbt_env(db_url: str | None = None) -> None:
+    parsed = urlparse(get_database_url(db_url))
+    os.environ["NEON_HOST"] = parsed.hostname or ""
+    os.environ["NEON_USER"] = parsed.username or ""
+    os.environ["NEON_PASSWORD"] = parsed.password or ""
+    os.environ["NEON_DB"] = (parsed.path or "/neondb").lstrip("/")
+
+
+def _invoke_dbt(args: list[str], db_url: str | None = None) -> tuple[bool, list[dict[str, Any]]]:
+    """Execute a real dbt command in-process via dbtRunner against Neon PostgreSQL."""
+    _set_dbt_env(db_url)
+    runner = dbtRunner()
+    common = ["--project-dir", str(DBT_PROJECT_DIR), "--profiles-dir", str(DBT_PROJECT_DIR)]
+
+    if not (DBT_PROJECT_DIR / "dbt_packages").exists() and args[0] != "deps":
+        deps_res = runner.invoke(["deps", *common])
+        if not deps_res.success:
+            raise RuntimeError(f"dbt deps failed: {deps_res.exception}")
+
+    res = runner.invoke([*args, *common])
+    node_results: list[dict[str, Any]] = []
+    if res.result is not None and hasattr(res.result, "results"):
+        for r in res.result.results:
+            node = getattr(r, "node", None)
+            node_name = getattr(node, "name", "") or getattr(node, "unique_id", "")
+            status_val = str(getattr(r, "status", ""))
+            failures = getattr(r, "failures", 0)
+            relation_name = getattr(node, "relation_name", "") or ""
+            node_results.append(
+                {
+                    "test_or_model": node_name,
+                    "status": status_val,
+                    "passed": status_val.lower() in ("pass", "success"),
+                    "violations": int(failures) if failures is not None else 0,
+                    "audit_table": relation_name if "dbt_test__audit" in relation_name else "",
+                }
+            )
+    return bool(res.success), node_results
 
 
 def _generate_baseline_data() -> dict[str, list[tuple[Any, ...]]]:
@@ -106,7 +147,6 @@ def _generate_baseline_data() -> dict[str, list[tuple[Any, ...]]]:
     rng = random.Random(42)
 
     customers: list[tuple[Any, ...]] = []
-    # 120 customers: 12 VIP (Pareto top accounts), 28 Silver, 80 Standard
     for cid in range(1, 121):
         name = f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}"
         if cid <= 12:
@@ -125,14 +165,13 @@ def _generate_baseline_data() -> dict[str, list[tuple[Any, ...]]]:
 
     total_days = (DEMO_H1_END - DEMO_BASE_DATE).days + 1
     for _ in range(520):
-        # Pareto skew: VIPs & top Standard accounts order more frequently
         r = rng.random()
         if r < 0.30:
-            cid = rng.randint(1, 12)  # VIP
+            cid = rng.randint(1, 12)
         elif r < 0.55:
-            cid = rng.randint(13, 40)  # Silver
+            cid = rng.randint(13, 40)
         elif r < 0.80:
-            cid = rng.randint(41, 60)  # High-potential Standard (upgrade candidates on Day 10!)
+            cid = rng.randint(41, 60)
         else:
             cid = rng.randint(61, 120)
 
@@ -149,7 +188,6 @@ def _generate_baseline_data() -> dict[str, list[tuple[Any, ...]]]:
         order_total = 0.0
         cost_total = 0.0
         for _ in range(n_items):
-            # VIP & high-potential Standard sometimes buy Bundles
             if cid <= 12 or (41 <= cid <= 55 and rng.random() < 0.35):
                 prod = rng.choice(PRODUCTS_SEED)
             else:
@@ -173,190 +211,51 @@ def _generate_baseline_data() -> dict[str, list[tuple[Any, ...]]]:
     }
 
 
-def _create_schemas_and_tables(cur) -> None:
+def _sync_gold_explore_views(cur) -> None:
+    """Point Explore-layer `gold.*` views directly at the dbt-published Gold tables."""
     cur.execute(
         """
-        CREATE SCHEMA IF NOT EXISTS raw;
-        CREATE SCHEMA IF NOT EXISTS snapshots;
-        CREATE SCHEMA IF NOT EXISTS gold;
-        CREATE SCHEMA IF NOT EXISTS quarantine;
-        CREATE SCHEMA IF NOT EXISTS ci_pr;
-        CREATE SCHEMA IF NOT EXISTS governance;
-        """
-    )
+        DROP SCHEMA IF EXISTS gold CASCADE;
+        CREATE SCHEMA gold;
 
-    cur.execute(
-        """
-        DROP TABLE IF EXISTS raw.raw_order_items CASCADE;
-        DROP TABLE IF EXISTS raw.raw_orders CASCADE;
-        DROP TABLE IF EXISTS raw.raw_customers CASCADE;
-        DROP TABLE IF EXISTS raw.raw_products CASCADE;
+        CREATE VIEW gold.fct_orders AS
+        SELECT * FROM dbt_dev_dbt_gold.fct_orders_dbt;
 
-        DROP TABLE IF EXISTS snapshots.snap_customers CASCADE;
-        DROP TABLE IF EXISTS gold.candidate_fct_orders CASCADE;
-        DROP TABLE IF EXISTS gold.fct_order_items CASCADE;
-        DROP TABLE IF EXISTS gold.fct_orders CASCADE;
-        DROP TABLE IF EXISTS gold.dim_customers_scd2 CASCADE;
-        DROP TABLE IF EXISTS gold.dim_products CASCADE;
-        DROP TABLE IF EXISTS gold.mart_customer_value CASCADE;
+        CREATE VIEW gold.dim_customers_scd2 AS
+        SELECT * FROM dbt_dev_dbt_gold.dim_customers_dbt;
 
-        DROP TABLE IF EXISTS quarantine.rejected_orders CASCADE;
-        DROP TABLE IF EXISTS ci_pr.fct_orders_pr CASCADE;
-        DROP TABLE IF EXISTS governance.pipeline_runs CASCADE;
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE raw.raw_products (
-            product_id INTEGER PRIMARY KEY,
-            product_name VARCHAR(120) NOT NULL,
-            category VARCHAR(60) NOT NULL,
-            unit_price NUMERIC(12, 2) NOT NULL,
-            unit_cost NUMERIC(12, 2) NOT NULL
-        );
-
-        CREATE TABLE raw.raw_customers (
-            customer_id INTEGER PRIMARY KEY,
-            customer_name VARCHAR(120) NOT NULL,
-            customer_tier VARCHAR(32) NOT NULL,
-            region VARCHAR(64) NOT NULL,
-            updated_at DATE NOT NULL
-        );
-
-        -- Intentionally no PK/NOT NULL constraint on raw_orders so Day 15 can simulate upstream bad data!
-        CREATE TABLE raw.raw_orders (
-            order_id INTEGER,
-            customer_id INTEGER,
-            order_date DATE,
-            status VARCHAR(32),
-            order_total NUMERIC(12, 2),
-            cost_total NUMERIC(12, 2)
-        );
-
-        CREATE TABLE raw.raw_order_items (
-            order_item_id INTEGER,
-            order_id INTEGER,
-            product_id INTEGER,
-            quantity INTEGER,
-            unit_price NUMERIC(12, 2),
-            line_total NUMERIC(12, 2)
-        );
-
-        CREATE TABLE snapshots.snap_customers (
-            dbt_scd_id VARCHAR(64) PRIMARY KEY,
-            customer_id INTEGER NOT NULL,
-            customer_name VARCHAR(120) NOT NULL,
-            customer_tier VARCHAR(32) NOT NULL,
-            region VARCHAR(64) NOT NULL,
-            dbt_updated_at DATE NOT NULL,
-            dbt_valid_from DATE NOT NULL,
-            dbt_valid_to DATE,
-            is_current BOOLEAN NOT NULL
-        );
-
-        CREATE TABLE quarantine.rejected_orders (
-            quarantine_id SERIAL PRIMARY KEY,
-            run_day INTEGER NOT NULL,
-            order_id INTEGER,
-            customer_id INTEGER,
-            order_date DATE,
-            status VARCHAR(32),
-            order_total NUMERIC(12, 2),
-            rejection_reason VARCHAR(255) NOT NULL,
-            quarantined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE governance.pipeline_runs (
-            run_id SERIAL PRIMARY KEY,
-            run_day INTEGER NOT NULL,
-            sim_date DATE NOT NULL,
-            event_type VARCHAR(64) NOT NULL,
-            status VARCHAR(48) NOT NULL,
-            summary TEXT NOT NULL,
-            details_json TEXT NOT NULL,
-            executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-
-
-def _materialize_gold_from_raw(cur) -> None:
-    """Publish validated Gold tables from raw & snapshots."""
-    cur.execute(
-        """
-        DROP TABLE IF EXISTS gold.dim_products CASCADE;
-        CREATE TABLE gold.dim_products AS
+        CREATE VIEW gold.dim_products AS
         SELECT
-            product_id,
-            product_name,
-            category,
+            product_id, product_name, category,
             unit_price::DOUBLE PRECISION AS unit_price,
             unit_cost::DOUBLE PRECISION AS unit_cost,
             ROUND((unit_price - unit_cost) / NULLIF(unit_price, 0), 4)::DOUBLE PRECISION AS gross_margin_pct
         FROM raw.raw_products;
 
-        DROP TABLE IF EXISTS gold.dim_customers_scd2 CASCADE;
-        CREATE TABLE gold.dim_customers_scd2 AS
+        CREATE VIEW gold.fct_order_items AS
         SELECT
-            dbt_scd_id,
-            customer_id,
-            customer_name,
-            customer_tier,
-            region,
-            dbt_valid_from,
-            dbt_valid_to,
-            is_current
-        FROM snapshots.snap_customers;
+            order_item_id, order_id, product_id, quantity,
+            unit_price::DOUBLE PRECISION AS unit_price,
+            line_total::DOUBLE PRECISION AS line_total
+        FROM raw.raw_order_items;
 
-        DROP TABLE IF EXISTS gold.fct_orders CASCADE;
-        CREATE TABLE gold.fct_orders AS
+        CREATE VIEW gold.mart_customer_value AS
         SELECT
-            o.order_id,
-            o.customer_id,
-            o.order_date,
-            TO_CHAR(o.order_date, 'YYYY-MM') AS order_month,
-            o.status,
-            (o.status = 'Completed') AS is_completed,
-            o.order_total::DOUBLE PRECISION AS order_total,
-            CASE WHEN o.status = 'Completed' THEN o.order_total::DOUBLE PRECISION ELSE 0.0 END AS realized_revenue,
-            o.cost_total::DOUBLE PRECISION AS cost_total,
-            CASE WHEN o.status = 'Completed' THEN (o.order_total - o.cost_total)::DOUBLE PRECISION ELSE 0.0 END AS gross_profit
-        FROM raw.raw_orders o;
-
-        DROP TABLE IF EXISTS gold.fct_order_items CASCADE;
-        CREATE TABLE gold.fct_order_items AS
-        SELECT
-            i.order_item_id,
-            i.order_id,
-            i.product_id,
-            i.quantity,
-            i.unit_price::DOUBLE PRECISION AS unit_price,
-            i.line_total::DOUBLE PRECISION AS line_total
-        FROM raw.raw_order_items i;
-
-        DROP TABLE IF EXISTS gold.mart_customer_value CASCADE;
-        CREATE TABLE gold.mart_customer_value AS
-        SELECT
-            c.customer_id,
-            c.customer_name,
-            c.customer_tier,
-            c.region,
+            c.customer_id, c.customer_name, c.customer_tier, c.region,
             COUNT(o.order_id) AS order_count,
             COALESCE(SUM(o.realized_revenue), 0.0)::DOUBLE PRECISION AS total_revenue,
             COALESCE(AVG(CASE WHEN o.is_completed THEN o.order_total END), 0.0)::DOUBLE PRECISION AS average_order_value,
             COALESCE(MAX(CASE WHEN o.is_completed THEN o.order_total END), 0.0)::DOUBLE PRECISION AS max_order_amount,
             COALESCE(SUM(o.gross_profit), 0.0)::DOUBLE PRECISION AS total_gross_profit
-        FROM gold.dim_customers_scd2 c
-        LEFT JOIN gold.fct_orders o
-          ON c.customer_id = o.customer_id
+        FROM dbt_dev_dbt_gold.dim_customers_dbt c
+        LEFT JOIN dbt_dev_dbt_gold.fct_orders_dbt o ON c.customer_id = o.customer_id
         WHERE c.is_current = TRUE
         GROUP BY c.customer_id, c.customer_name, c.customer_tier, c.region;
         """
     )
 
 
-def _log_run(
+def _log_state(
     cur,
     *,
     run_day: int,
@@ -368,6 +267,17 @@ def _log_run(
 ) -> None:
     cur.execute(
         """
+        CREATE SCHEMA IF NOT EXISTS governance;
+        CREATE TABLE IF NOT EXISTS governance.pipeline_runs (
+            run_id SERIAL PRIMARY KEY,
+            run_day INTEGER NOT NULL,
+            sim_date DATE NOT NULL,
+            event_type VARCHAR(64) NOT NULL,
+            status VARCHAR(48) NOT NULL,
+            summary TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         INSERT INTO governance.pipeline_runs (run_day, sim_date, event_type, status, summary, details_json)
         VALUES (%s, %s, %s, %s, %s, %s)
         """,
@@ -376,154 +286,120 @@ def _log_run(
 
 
 def reset_demo(db_url: str | None = None) -> dict[str, Any]:
-    """Day 0: Reset all demo schemas in Neon and seed deterministic Jaffle Shop baseline."""
+    """Day 0: Reset raw tables & dbt schemas in Neon, then run real dbt snapshot + run + test."""
     seed = _generate_baseline_data()
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
-            _create_schemas_and_tables(cur)
-            execute_values(
-                cur,
-                "INSERT INTO raw.raw_products VALUES %s",
-                seed["products"],
-            )
-            execute_values(
-                cur,
-                "INSERT INTO raw.raw_customers VALUES %s",
-                seed["customers"],
-            )
-            execute_values(
-                cur,
-                "INSERT INTO raw.raw_orders VALUES %s",
-                seed["orders"],
-            )
-            execute_values(
-                cur,
-                "INSERT INTO raw.raw_order_items VALUES %s",
-                seed["order_items"],
-            )
-
-            snap_rows = [
-                (
-                    _scd_id(cid, str(updated_at), tier, region),
-                    cid,
-                    name,
-                    tier,
-                    region,
-                    updated_at,
-                    updated_at,
-                    None,
-                    True,
-                )
-                for (cid, name, tier, region, updated_at) in seed["customers"]
-            ]
-            execute_values(
-                cur,
+            cur.execute(
                 """
-                INSERT INTO snapshots.snap_customers (
-                    dbt_scd_id, customer_id, customer_name, customer_tier, region,
-                    dbt_updated_at, dbt_valid_from, dbt_valid_to, is_current
-                ) VALUES %s
-                """,
-                snap_rows,
+                CREATE SCHEMA IF NOT EXISTS raw;
+                CREATE SCHEMA IF NOT EXISTS ci_pr;
+                CREATE SCHEMA IF NOT EXISTS governance;
+
+                DROP SCHEMA IF EXISTS dbt_snapshots CASCADE;
+                DROP SCHEMA IF EXISTS dbt_dev_dbt_test__audit CASCADE;
+                DROP SCHEMA IF EXISTS dbt_dev_dbt_staging CASCADE;
+                DROP SCHEMA IF EXISTS dbt_dev_dbt_gold CASCADE;
+                DROP TABLE IF EXISTS ci_pr.fct_orders_pr CASCADE;
+                DROP TABLE IF EXISTS governance.pipeline_runs CASCADE;
+
+                DROP TABLE IF EXISTS raw.raw_order_items CASCADE;
+                DROP TABLE IF EXISTS raw.raw_orders CASCADE;
+                DROP TABLE IF EXISTS raw.raw_customers CASCADE;
+                DROP TABLE IF EXISTS raw.raw_products CASCADE;
+
+                CREATE TABLE raw.raw_products (
+                    product_id INTEGER PRIMARY KEY,
+                    product_name VARCHAR(120) NOT NULL,
+                    category VARCHAR(60) NOT NULL,
+                    unit_price NUMERIC(12, 2) NOT NULL,
+                    unit_cost NUMERIC(12, 2) NOT NULL
+                );
+                CREATE TABLE raw.raw_customers (
+                    customer_id INTEGER PRIMARY KEY,
+                    customer_name VARCHAR(120) NOT NULL,
+                    customer_tier VARCHAR(32) NOT NULL,
+                    region VARCHAR(64) NOT NULL,
+                    updated_at DATE NOT NULL
+                );
+                CREATE TABLE raw.raw_orders (
+                    order_id INTEGER,
+                    customer_id INTEGER,
+                    order_date DATE,
+                    status VARCHAR(32),
+                    order_total NUMERIC(12, 2),
+                    cost_total NUMERIC(12, 2)
+                );
+                CREATE TABLE raw.raw_order_items (
+                    order_item_id INTEGER,
+                    order_id INTEGER,
+                    product_id INTEGER,
+                    quantity INTEGER,
+                    unit_price NUMERIC(12, 2),
+                    line_total NUMERIC(12, 2)
+                );
+                """
             )
+            execute_values(cur, "INSERT INTO raw.raw_products VALUES %s", seed["products"])
+            execute_values(cur, "INSERT INTO raw.raw_customers VALUES %s", seed["customers"])
+            execute_values(cur, "INSERT INTO raw.raw_orders VALUES %s", seed["orders"])
+            execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", seed["order_items"])
+        conn.commit()
 
-            _materialize_gold_from_raw(cur)
+    # Run REAL dbt snapshot + run + test
+    ok_silver, _ = _invoke_dbt(["run", "--select", "stg_orders", "stg_customers"], db_url)
+    ok_snap, _ = _invoke_dbt(["snapshot"], db_url)
+    ok_cand, _ = _invoke_dbt(["run", "--select", "candidate_fct_orders", "dim_customers_dbt"], db_url)
+    ok_test, test_rows = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    if not (ok_silver and ok_snap and ok_cand and ok_test):
+        raise RuntimeError(f"Day 0 dbt baseline failed: {test_rows}")
+    ok_gold, _ = _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
+    if not ok_gold:
+        raise RuntimeError("Day 0 dbt Gold materialization failed.")
 
-            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM gold.fct_orders")
+    with _connect(db_url) as conn:
+        with conn.cursor() as cur:
+            _sync_gold_explore_views(cur)
+            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM dbt_dev_dbt_gold.fct_orders_dbt")
             order_cnt, total_rev = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM dbt_snapshots.snap_customers_dbt")
+            snap_cnt = int(cur.fetchone()[0])
             details = {
+                "dbt_commands": [
+                    "dbt snapshot",
+                    "dbt run --select stg_orders stg_customers candidate_fct_orders dim_customers_dbt",
+                    "dbt test --select candidate_fct_orders --store-failures",
+                    "dbt run --select fct_orders_dbt mart_scd_comparison",
+                ],
                 "customers": len(seed["customers"]),
                 "orders": int(order_cnt),
                 "order_items": len(seed["order_items"]),
                 "realized_revenue": float(total_rev or 0.0),
-                "snapshot_versions": len(snap_rows),
+                "snapshot_versions": snap_cnt,
             }
-            _log_run(
+            _log_state(
                 cur,
                 run_day=0,
                 sim_date=DEMO_H1_END,
                 event_type="RESET_BASELINE",
                 status="HEALTHY",
-                summary=f"Day 0 baseline seeded: {order_cnt} orders, {len(seed['customers'])} customers (initial SCD2 v1).",
+                summary=f"Day 0 real dbt baseline built: {order_cnt} orders, {snap_cnt} initial dbt snapshot rows.",
                 details=details,
             )
         conn.commit()
     return {"run_day": 0, "status": "HEALTHY", **details}
 
 
-def _validate_candidate_orders(cur) -> list[dict[str, Any]]:
-    """Run deterministic Write-Audit-Publish checks on gold.candidate_fct_orders."""
-    checks: list[dict[str, Any]] = []
-
-    cur.execute("SELECT COUNT(*) FROM gold.candidate_fct_orders WHERE order_id IS NULL OR customer_id IS NULL")
-    null_cnt = int(cur.fetchone()[0])
-    checks.append(
-        {
-            "check": "not_null(order_id, customer_id)",
-            "passed": null_cnt == 0,
-            "violations": null_cnt,
-        }
-    )
-
-    cur.execute(
-        """
-        SELECT COUNT(*) FROM (
-            SELECT order_id FROM gold.candidate_fct_orders
-            WHERE order_id IS NOT NULL
-            GROUP BY order_id HAVING COUNT(*) > 1
-        ) dup
-        """
-    )
-    dup_cnt = int(cur.fetchone()[0])
-    checks.append(
-        {
-            "check": "unique(order_id)",
-            "passed": dup_cnt == 0,
-            "violations": dup_cnt,
-        }
-    )
-
-    cur.execute("SELECT COUNT(*) FROM gold.candidate_fct_orders WHERE order_total < 0 OR cost_total < 0")
-    neg_cnt = int(cur.fetchone()[0])
-    checks.append(
-        {
-            "check": "non_negative(order_total, cost_total)",
-            "passed": neg_cnt == 0,
-            "violations": neg_cnt,
-        }
-    )
-
-    cur.execute(
-        """
-        SELECT COUNT(*) FROM gold.candidate_fct_orders o
-        LEFT JOIN raw.raw_customers c ON o.customer_id = c.customer_id
-        WHERE o.customer_id IS NOT NULL AND c.customer_id IS NULL
-        """
-    )
-    orphan_cnt = int(cur.fetchone()[0])
-    checks.append(
-        {
-            "check": "referential_integrity(customer_id)",
-            "passed": orphan_cnt == 0,
-            "violations": orphan_cnt,
-        }
-    )
-    return checks
-
-
 def run_day5_normal_refresh(db_url: str | None = None) -> dict[str, Any]:
-    """Day 5: Normal incremental orders arrive -> Write-Audit-Publish passes -> Gold updated."""
+    """Day 5: Insert 25 clean orders -> real dbt run candidate -> real dbt test --store-failures -> publish Gold."""
     sim_date = date(2025, 7, 5)
     rng = random.Random(505)
 
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
-            # Remove any prior Day 5 synthetic rows for idempotency if re-clicked
             cur.execute("DELETE FROM raw.raw_order_items WHERE order_id BETWEEN 5001 AND 5099")
             cur.execute("DELETE FROM raw.raw_orders WHERE order_id BETWEEN 5001 AND 5099")
-
-            new_orders = []
-            new_items = []
+            new_orders, new_items = [], []
             item_id = 50001
             for idx in range(25):
                 oid = 5001 + idx
@@ -537,62 +413,58 @@ def run_day5_normal_refresh(db_url: str | None = None) -> dict[str, Any]:
                 new_orders.append((oid, cid, odate, status, otot, ctot))
                 new_items.append((item_id, oid, prod[0], qty, prod[3], otot))
                 item_id += 1
-
             execute_values(cur, "INSERT INTO raw.raw_orders VALUES %s", new_orders)
             execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", new_items)
+        conn.commit()
 
-            # Write-Audit-Publish: build candidate first
-            cur.execute(
-                """
-                DROP TABLE IF EXISTS gold.candidate_fct_orders;
-                CREATE TABLE gold.candidate_fct_orders AS
-                SELECT
-                    order_id, customer_id, order_date,
-                    TO_CHAR(order_date, 'YYYY-MM') AS order_month,
-                    status,
-                    (status = 'Completed') AS is_completed,
-                    order_total::DOUBLE PRECISION AS order_total,
-                    CASE WHEN status = 'Completed' THEN order_total::DOUBLE PRECISION ELSE 0.0 END AS realized_revenue,
-                    cost_total::DOUBLE PRECISION AS cost_total,
-                    CASE WHEN status = 'Completed' THEN (order_total - cost_total)::DOUBLE PRECISION ELSE 0.0 END AS gross_profit
-                FROM raw.raw_orders;
-                """
-            )
-            checks = _validate_candidate_orders(cur)
-            all_passed = all(c["passed"] for c in checks)
+    # Real dbt Write-Audit-Publish
+    _invoke_dbt(["run", "--select", "stg_orders", "candidate_fct_orders"], db_url)
+    all_passed, wap_checks = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    if all_passed:
+        _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
+
+    with _connect(db_url) as conn:
+        with conn.cursor() as cur:
             if all_passed:
-                _materialize_gold_from_raw(cur)
-
-            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM gold.fct_orders")
+                _sync_gold_explore_views(cur)
+            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM dbt_dev_dbt_gold.fct_orders_dbt")
             total_orders, total_rev = cur.fetchone()
             details = {
+                "dbt_commands": [
+                    "dbt run --select stg_orders candidate_fct_orders",
+                    "dbt test --select candidate_fct_orders --store-failures",
+                    "dbt run --select fct_orders_dbt mart_scd_comparison" if all_passed else "(SKIPPED Gold publish — tests failed)",
+                ],
                 "new_orders_added": len(new_orders),
-                "wap_checks": checks,
+                "wap_checks": wap_checks,
                 "published_to_gold": all_passed,
                 "gold_order_count": int(total_orders),
                 "gold_realized_revenue": float(total_rev or 0.0),
             }
-            _log_run(
+            _log_state(
                 cur,
                 run_day=5,
                 sim_date=sim_date,
                 event_type="DAY5_NORMAL_REFRESH",
-                status="HEALTHY" if all_passed else "FAILED",
-                summary=f"Day 5 Write-Audit-Publish PASSED: +{len(new_orders)} clean orders published to gold.fct_orders.",
+                status="HEALTHY" if all_passed else "DEGRADED_LKG",
+                summary=(
+                    f"Day 5 real dbt WAP PASSED ({len(wap_checks)}/{len(wap_checks)} tests): +{len(new_orders)} orders published to dbt_gold.fct_orders_dbt."
+                    if all_passed
+                    else "Day 5 dbt test FAILED (upstream still contains unresolved dirty rows from Day 15 — Gold preserved at LKG)."
+                ),
                 details=details,
             )
         conn.commit()
-    return {"run_day": 5, "sim_date": str(sim_date), "status": "HEALTHY", **details}
+    return {"run_day": 5, "sim_date": str(sim_date), "status": "HEALTHY" if all_passed else "DEGRADED_LKG", **details}
 
 
 def run_day10_scd_type2(db_url: str | None = None) -> dict[str, Any]:
-    """Day 10: Customer tier & region changes -> SCD Type 2 snapshot + post-upgrade orders."""
+    """Day 10: Update 15 customers in raw -> real `dbt snapshot` (SCD Type 2) -> rebuild mart_scd_comparison."""
     sim_date = date(2025, 7, 10)
-    upgrade_ids = list(range(41, 56))  # 15 high-potential Standard customers -> VIP
+    upgrade_ids = list(range(41, 56))
 
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
-            # 1. Update raw.raw_customers (source overwrites latest state, just like real ERP)
             cur.execute(
                 """
                 UPDATE raw.raw_customers
@@ -603,64 +475,10 @@ def run_day10_scd_type2(db_url: str | None = None) -> dict[str, Any]:
                 """,
                 (sim_date, upgrade_ids),
             )
-
-            # 2. Execute dbt-equivalent SCD Type 2 snapshot merge on snapshots.snap_customers
-            cur.execute(
-                """
-                UPDATE snapshots.snap_customers s
-                SET dbt_valid_to = %s,
-                    is_current = FALSE
-                FROM raw.raw_customers r
-                WHERE s.customer_id = r.customer_id
-                  AND s.is_current = TRUE
-                  AND (s.customer_tier <> r.customer_tier OR s.region <> r.region)
-                """,
-                (sim_date,),
-            )
-            closed_rows = cur.rowcount
-
-            cur.execute(
-                """
-                SELECT r.customer_id, r.customer_name, r.customer_tier, r.region, r.updated_at
-                FROM raw.raw_customers r
-                LEFT JOIN snapshots.snap_customers s
-                  ON r.customer_id = s.customer_id AND s.is_current = TRUE
-                WHERE s.customer_id IS NULL
-                """
-            )
-            new_versions = cur.fetchall()
-            if new_versions:
-                snap_inserts = [
-                    (
-                        _scd_id(cid, str(updated_at), tier, region),
-                        cid,
-                        name,
-                        tier,
-                        region,
-                        updated_at,
-                        updated_at,
-                        None,
-                        True,
-                    )
-                    for (cid, name, tier, region, updated_at) in new_versions
-                ]
-                execute_values(
-                    cur,
-                    """
-                    INSERT INTO snapshots.snap_customers (
-                        dbt_scd_id, customer_id, customer_name, customer_tier, region,
-                        dbt_updated_at, dbt_valid_from, dbt_valid_to, is_current
-                    ) VALUES %s
-                    """,
-                    snap_inserts,
-                )
-
-            # 3. Add post-upgrade orders on 2025-07-10 for upgraded VIP customers
             cur.execute("DELETE FROM raw.raw_order_items WHERE order_id BETWEEN 10001 AND 10099")
             cur.execute("DELETE FROM raw.raw_orders WHERE order_id BETWEEN 10001 AND 10099")
             rng = random.Random(1010)
-            post_orders = []
-            post_items = []
+            post_orders, post_items = [], []
             item_id = 100001
             for idx, cid in enumerate(upgrade_ids):
                 oid = 10001 + idx
@@ -671,46 +489,42 @@ def run_day10_scd_type2(db_url: str | None = None) -> dict[str, Any]:
                 post_orders.append((oid, cid, sim_date, "Completed", otot, ctot))
                 post_items.append((item_id, oid, prod[0], qty, prod[3], otot))
                 item_id += 1
-
             execute_values(cur, "INSERT INTO raw.raw_orders VALUES %s", post_orders)
             execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", post_items)
+        conn.commit()
 
-            # Refresh Gold dim_customers_scd2 & fct_orders (only if no dirty rows exist)
-            cur.execute(
-                """
-                DROP TABLE IF EXISTS gold.candidate_fct_orders;
-                CREATE TABLE gold.candidate_fct_orders AS
-                SELECT
-                    order_id, customer_id, order_date,
-                    TO_CHAR(order_date, 'YYYY-MM') AS order_month,
-                    status, (status = 'Completed') AS is_completed,
-                    order_total::DOUBLE PRECISION AS order_total,
-                    CASE WHEN status = 'Completed' THEN order_total::DOUBLE PRECISION ELSE 0.0 END AS realized_revenue,
-                    cost_total::DOUBLE PRECISION AS cost_total,
-                    CASE WHEN status = 'Completed' THEN (order_total - cost_total)::DOUBLE PRECISION ELSE 0.0 END AS gross_profit
-                FROM raw.raw_orders;
-                """
-            )
-            if all(c["passed"] for c in _validate_candidate_orders(cur)):
-                _materialize_gold_from_raw(cur)
+    # Run REAL dbt snapshot + candidate WAP + Gold SCD comparison mart
+    _invoke_dbt(["snapshot"], db_url)
+    _invoke_dbt(["run", "--select", "dim_customers_dbt", "candidate_fct_orders"], db_url)
+    all_passed, _ = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    if all_passed:
+        _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
+    else:
+        _invoke_dbt(["run", "--select", "mart_scd_comparison"], db_url)
 
-            cur.execute("SELECT COUNT(*) FROM snapshots.snap_customers")
+    with _connect(db_url) as conn:
+        with conn.cursor() as cur:
+            _sync_gold_explore_views(cur)
+            cur.execute("SELECT COUNT(*) FROM dbt_snapshots.snap_customers_dbt")
             total_snap_rows = int(cur.fetchone()[0])
-
             details = {
+                "dbt_commands": [
+                    "dbt snapshot",
+                    "dbt run --select dim_customers_dbt candidate_fct_orders",
+                    "dbt test --select candidate_fct_orders --store-failures",
+                    "dbt run --select fct_orders_dbt mart_scd_comparison",
+                ],
                 "upgraded_customers": len(upgrade_ids),
-                "closed_old_versions": closed_rows,
-                "inserted_new_versions": len(new_versions),
                 "total_snapshot_rows": total_snap_rows,
                 "post_upgrade_orders_added": len(post_orders),
             }
-            _log_run(
+            _log_state(
                 cur,
                 run_day=10,
                 sim_date=sim_date,
                 event_type="DAY10_SCD_TYPE2_SNAPSHOT",
                 status="HEALTHY",
-                summary=f"Day 10 SCD Type 2 Snapshot: {len(upgrade_ids)} Standard customers upgraded to VIP ({closed_rows} old rows closed, {len(new_versions)} new versions inserted).",
+                summary=f"Day 10 real `dbt snapshot` executed: 15 Standard customers upgraded to VIP ({total_snap_rows} total SCD2 rows in dbt_snapshots.snap_customers_dbt).",
                 details=details,
             )
         conn.commit()
@@ -718,22 +532,17 @@ def run_day10_scd_type2(db_url: str | None = None) -> dict[str, Any]:
 
 
 def run_day15_dirty_data_wap(db_url: str | None = None) -> dict[str, Any]:
-    """Day 15: Inject dirty upstream rows -> WAP rejects publish -> LKG preserved + Quarantine populated."""
+    """Day 15: Inject dirty rows -> real `dbt test --store-failures` FAILS -> Gold preserved + audit tables populated."""
     sim_date = date(2025, 7, 15)
 
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
-            # Record current Last-Known-Good Gold metrics before dirty injection
-            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM gold.fct_orders")
+            cur.execute("SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2) FROM dbt_dev_dbt_gold.fct_orders_dbt")
             lkg_count, lkg_rev = cur.fetchone()
 
-            # Clean prior Day 15 injection if re-clicked
             cur.execute("DELETE FROM raw.raw_orders WHERE order_id IN (1001, 1002) AND order_date = %s", (sim_date,))
             cur.execute("DELETE FROM raw.raw_orders WHERE order_id BETWEEN 15001 AND 15099 OR order_id IS NULL")
-            cur.execute("DELETE FROM quarantine.rejected_orders WHERE run_day = 15")
 
-            # Inject 5 dirty rows into raw.raw_orders:
-            # 2 duplicate PKs (1001, 1002), 2 negative amounts, 1 NULL customer_id
             dirty_rows = [
                 (1001, 5, sim_date, "Completed", 420.00, 120.00),     # Duplicate PK
                 (1002, 8, sim_date, "Completed", 180.00, 60.00),      # Duplicate PK
@@ -742,66 +551,40 @@ def run_day15_dirty_data_wap(db_url: str | None = None) -> dict[str, Any]:
                 (15003, None, sim_date, "Completed", 210.00, 70.00),  # NULL customer_id
             ]
             execute_values(cur, "INSERT INTO raw.raw_orders VALUES %s", dirty_rows)
+        conn.commit()
 
-            # Build candidate table & validate BEFORE publishing
-            cur.execute(
-                """
-                DROP TABLE IF EXISTS gold.candidate_fct_orders;
-                CREATE TABLE gold.candidate_fct_orders AS
-                SELECT
-                    order_id, customer_id, order_date,
-                    TO_CHAR(order_date, 'YYYY-MM') AS order_month,
-                    status, (status = 'Completed') AS is_completed,
-                    order_total::DOUBLE PRECISION AS order_total,
-                    CASE WHEN status = 'Completed' THEN order_total::DOUBLE PRECISION ELSE 0.0 END AS realized_revenue,
-                    cost_total::DOUBLE PRECISION AS cost_total,
-                    CASE WHEN status = 'Completed' THEN (order_total - cost_total)::DOUBLE PRECISION ELSE 0.0 END AS gross_profit
-                FROM raw.raw_orders;
-                """
-            )
-            checks = _validate_candidate_orders(cur)
-            failed_checks = [c for c in checks if not c["passed"]]
+    # Real dbt WAP: build candidate -> test with --store-failures -> DO NOT publish Gold!
+    _invoke_dbt(["run", "--select", "stg_orders", "candidate_fct_orders"], db_url)
+    all_passed, wap_checks = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    failed_checks = [c for c in wap_checks if not c["passed"]]
 
-            # Quarantine offending rows instead of silently deduplicating or publishing bad data
-            quarantine_rows = [
-                (15, 1001, 5, sim_date, "Completed", 420.00, "DUPLICATE_PRIMARY_KEY: order_id=1001 already exists"),
-                (15, 1002, 8, sim_date, "Completed", 180.00, "DUPLICATE_PRIMARY_KEY: order_id=1002 already exists"),
-                (15, 15001, 12, sim_date, "Completed", -350.00, "NEGATIVE_AMOUNT: order_total < 0 (possible unflagged refund)"),
-                (15, 15002, 19, sim_date, "Completed", -95.00, "NEGATIVE_AMOUNT: order_total < 0 (possible unflagged refund)"),
-                (15, 15003, None, sim_date, "Completed", 210.00, "NULL_FOREIGN_KEY: customer_id IS NULL"),
-            ]
-            execute_values(
-                cur,
-                """
-                INSERT INTO quarantine.rejected_orders (
-                    run_day, order_id, customer_id, order_date, status, order_total, rejection_reason
-                ) VALUES %s
-                """,
-                quarantine_rows,
-            )
-
-            # DO NOT overwrite gold.fct_orders -> Last-Known-Good preserved!
+    with _connect(db_url) as conn:
+        with conn.cursor() as cur:
             details = {
+                "dbt_commands": [
+                    "dbt run --select stg_orders candidate_fct_orders",
+                    "dbt test --select candidate_fct_orders --store-failures  # FAILED -> rows stored in dbt_dev_dbt_test__audit.*",
+                    "# SKIPPED: dbt run --select fct_orders_dbt  (Production Gold preserved at Last-Known-Good)",
+                ],
                 "injected_dirty_rows": len(dirty_rows),
-                "wap_checks": checks,
+                "wap_checks": wap_checks,
                 "failed_check_count": len(failed_checks),
-                "published_to_gold": False,
-                "lkg_preserved": True,
+                "published_to_gold": all_passed,
+                "lkg_preserved": not all_passed,
                 "lkg_order_count": int(lkg_count),
                 "lkg_realized_revenue": float(lkg_rev or 0.0),
-                "quarantined_rows": len(quarantine_rows),
                 "staleness_hours": 14,
                 "max_staleness_hours": 120,
             }
-            _log_run(
+            _log_state(
                 cur,
                 run_day=15,
                 sim_date=sim_date,
                 event_type="DAY15_DIRTY_DATA_WAP_BLOCK",
                 status="DEGRADED_LKG",
                 summary=(
-                    f"Day 15 Candidate REJECTED ({len(failed_checks)} failed WAP gates, {len(quarantine_rows)} rows quarantined). "
-                    f"Production gold.fct_orders preserved at Last-Known-Good ({lkg_count} rows). Clarify with stakeholder before fixing."
+                    f"Day 15 real `dbt test --store-failures` FAILED ({len(failed_checks)} failed dbt tests). "
+                    f"Production `dbt_gold.fct_orders_dbt` preserved at Last-Known-Good ({lkg_count} rows); offending rows auto-stored in `dbt_dev_dbt_test__audit`."
                 ),
                 details=details,
             )
@@ -815,79 +598,47 @@ def run_day20_semantic_drift_ci(db_url: str | None = None) -> dict[str, Any]:
 
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
-            # Build PR candidate model in ci_pr schema with IDENTICAL schema/types,
-            # but drifted business logic: silently counts 'Pending' & 'Returned' orders as realized_revenue!
             cur.execute(
                 """
                 DROP TABLE IF EXISTS ci_pr.fct_orders_pr;
                 CREATE TABLE ci_pr.fct_orders_pr AS
                 SELECT
-                    order_id,
-                    customer_id,
-                    order_date,
-                    order_month,
-                    status,
-                    is_completed,
+                    order_id, customer_id, order_date, order_month, status, is_completed,
                     order_total,
-                    -- DRIFTED LOGIC: includes Pending & Returned orders in realized_revenue!
-                    order_total AS realized_revenue,
+                    order_total AS realized_revenue,  -- DRIFTED: includes Pending & Returned!
                     cost_total,
                     (order_total - cost_total) AS gross_profit
-                FROM gold.fct_orders;
+                FROM dbt_dev_dbt_gold.fct_orders_dbt;
                 """
             )
-
-            # 1. Schema Contract Check (compare columns & types between gold.fct_orders and ci_pr.fct_orders_pr)
             cur.execute(
-                """
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'gold' AND table_name = 'fct_orders'
-                ORDER BY ordinal_position
-                """
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'dbt_dev_dbt_gold' AND table_name = 'fct_orders_dbt' ORDER BY ordinal_position"
             )
             prod_cols = cur.fetchall()
             cur.execute(
-                """
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_schema = 'ci_pr' AND table_name = 'fct_orders_pr'
-                ORDER BY ordinal_position
-                """
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = 'ci_pr' AND table_name = 'fct_orders_pr' ORDER BY ordinal_position"
             )
             pr_cols = cur.fetchall()
             schema_match = prod_cols == pr_cols
 
-            # 2. Staging-vs-Prod Data Diff on realized_revenue
             cur.execute(
-                """
-                SELECT
-                    COUNT(*) AS rows,
-                    ROUND(SUM(realized_revenue)::numeric, 2) AS realized_revenue,
-                    ROUND(SUM(gross_profit)::numeric, 2) AS gross_profit
-                FROM gold.fct_orders
-                """
+                "SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2), ROUND(SUM(gross_profit)::numeric, 2) "
+                "FROM dbt_dev_dbt_gold.fct_orders_dbt"
             )
             prod_rows, prod_rev, prod_gp = cur.fetchone()
             cur.execute(
-                """
-                SELECT
-                    COUNT(*) AS rows,
-                    ROUND(SUM(realized_revenue)::numeric, 2) AS realized_revenue,
-                    ROUND(SUM(gross_profit)::numeric, 2) AS gross_profit
-                FROM ci_pr.fct_orders_pr
-                """
+                "SELECT COUNT(*), ROUND(SUM(realized_revenue)::numeric, 2), ROUND(SUM(gross_profit)::numeric, 2) "
+                "FROM ci_pr.fct_orders_pr"
             )
-            pr_rows, pr_rev, pr_gp = cur.fetchone()
+            _pr_rows, pr_rev, pr_gp = cur.fetchone()
 
             prod_rev_f = float(prod_rev or 0.0)
             pr_rev_f = float(pr_rev or 0.0)
             delta_rev = round(pr_rev_f - prod_rev_f, 2)
             delta_pct = round((delta_rev / prod_rev_f * 100.0), 2) if prod_rev_f > 0 else 0.0
             drift_blocked = abs(delta_pct) > 5.0
-
-            # 3. Reconciliation check against Completed-only GL baseline
-            reconciliation_ok = abs(delta_rev) < 0.01
 
             ci_gates = [
                 {
@@ -902,12 +653,16 @@ def run_day20_semantic_drift_ci(db_url: str | None = None) -> dict[str, Any]:
                 },
                 {
                     "gate": "3. GL Reconciliation Test (realized_revenue == Completed orders)",
-                    "status": "PASS" if reconciliation_ok else "FAIL",
+                    "status": "PASS" if abs(delta_rev) < 0.01 else "FAIL",
                     "detail": f"Unexplained variance of ${delta_rev:,.2f} caused by including Pending/Returned orders.",
                 },
             ]
 
             details = {
+                "dbt_commands": [
+                    "dbt build --select state:modified+ --defer --target ci_pr",
+                    "dbt run-operation audit_helper.compare_relation_results  # BLOCKED: +25% KPI drift",
+                ],
                 "pr_branch": "feat/update-revenue-filter",
                 "drifted_rule": "Removed `WHERE status = 'Completed'` guard in realized_revenue projection",
                 "ci_gates": ci_gates,
@@ -920,7 +675,7 @@ def run_day20_semantic_drift_ci(db_url: str | None = None) -> dict[str, Any]:
                 "pr_gross_profit": float(pr_gp or 0.0),
                 "row_count": int(prod_rows),
             }
-            _log_run(
+            _log_state(
                 cur,
                 run_day=20,
                 sim_date=sim_date,
@@ -936,15 +691,41 @@ def run_day20_semantic_drift_ci(db_url: str | None = None) -> dict[str, Any]:
     return {"run_day": 20, "sim_date": str(sim_date), "status": "PR_BLOCKED", **details}
 
 
+def _fetch_dbt_audit_failures(cur) -> list[dict[str, Any]]:
+    """Dynamically read real failed rows stored by `dbt test --store-failures` in `dbt_dev_dbt_test__audit`."""
+    cur.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'dbt_dev_dbt_test__audit'
+        ORDER BY table_name
+        """
+    )
+    audit_tables = [r["table_name"] for r in cur.fetchall()]
+    all_failures: list[dict[str, Any]] = []
+    for tbl in audit_tables:
+        cur.execute(f'SELECT * FROM dbt_dev_dbt_test__audit."{tbl}" LIMIT 25')
+        rows = cur.fetchall()
+        for row in rows:
+            row_dict = dict(row)
+            all_failures.append(
+                {
+                    "dbt_audit_table": tbl,
+                    "failed_record_details": json.dumps(row_dict, default=str),
+                }
+            )
+    return all_failures
+
+
 def fetch_demo_state(db_url: str | None = None) -> dict[str, Any]:
-    """Read current Neon demo state, pipeline audit log, SCD comparison, and quarantine rows."""
+    """Read live state directly from dbt-materialized Neon tables (zero hardcoded quarantine)."""
     with _connect(db_url) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT EXISTS (
                     SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'governance' AND table_name = 'pipeline_runs'
+                    WHERE table_schema = 'dbt_dev_dbt_gold' AND table_name = 'mart_scd_comparison'
                 ) AS initialized
                 """
             )
@@ -953,58 +734,34 @@ def fetch_demo_state(db_url: str | None = None) -> dict[str, Any]:
 
             cur.execute(
                 "SELECT run_day, sim_date, event_type, status, summary, details_json, executed_at "
-                "FROM governance.pipeline_runs ORDER BY run_id DESC LIMIT 12"
+                "FROM governance.pipeline_runs ORDER BY run_id DESC LIMIT 1"
             )
-            runs = [dict(r) for r in cur.fetchall()]
-            latest = runs[0] if runs else None
+            latest = dict(cur.fetchone()) if cur.rowcount else None
 
-            cur.execute("SELECT COUNT(*) AS cnt, COALESCE(ROUND(SUM(realized_revenue)::numeric, 2), 0) AS rev FROM gold.fct_orders")
+            cur.execute(
+                "SELECT COUNT(*) AS cnt, COALESCE(ROUND(SUM(realized_revenue)::numeric, 2), 0) AS rev "
+                "FROM dbt_dev_dbt_gold.fct_orders_dbt"
+            )
             gold_stats = dict(cur.fetchone())
 
-            cur.execute("SELECT COUNT(*) AS total_versions, COUNT(DISTINCT customer_id) AS unique_customers FROM snapshots.snap_customers")
+            cur.execute(
+                "SELECT COUNT(*) AS total_versions, COUNT(DISTINCT customer_id) AS unique_customers "
+                "FROM dbt_snapshots.snap_customers_dbt"
+            )
             snap_stats = dict(cur.fetchone())
 
-            cur.execute("SELECT COUNT(*) AS cnt FROM quarantine.rejected_orders")
-            quarantine_cnt = int(cur.fetchone()["cnt"])
-
-            # SCD Type 1 (naive current-tier join) vs SCD Type 2 (point-in-time join) on H1 2025 historical orders
-            cur.execute(
-                """
-                WITH scd1 AS (
-                    SELECT c.customer_tier, ROUND(SUM(o.realized_revenue)::numeric, 2) AS scd1_h1_revenue
-                    FROM gold.fct_orders o
-                    JOIN gold.dim_customers_scd2 c ON o.customer_id = c.customer_id AND c.is_current = TRUE
-                    WHERE o.order_date <= '2025-06-30'
-                    GROUP BY c.customer_tier
-                ),
-                scd2 AS (
-                    SELECT c.customer_tier, ROUND(SUM(o.realized_revenue)::numeric, 2) AS scd2_h1_revenue
-                    FROM gold.fct_orders o
-                    JOIN gold.dim_customers_scd2 c
-                      ON o.customer_id = c.customer_id
-                     AND o.order_date >= c.dbt_valid_from
-                     AND (o.order_date < c.dbt_valid_to OR c.dbt_valid_to IS NULL)
-                    WHERE o.order_date <= '2025-06-30'
-                    GROUP BY c.customer_tier
-                )
-                SELECT
-                    COALESCE(s1.customer_tier, s2.customer_tier) AS customer_tier,
-                    COALESCE(s1.scd1_h1_revenue, 0)::DOUBLE PRECISION AS scd1_naive_latest_tier_rev,
-                    COALESCE(s2.scd2_h1_revenue, 0)::DOUBLE PRECISION AS scd2_point_in_time_rev,
-                    (COALESCE(s1.scd1_h1_revenue, 0) - COALESCE(s2.scd2_h1_revenue, 0))::DOUBLE PRECISION AS historical_distortion
-                FROM scd1 s1
-                FULL OUTER JOIN scd2 s2 ON s1.customer_tier = s2.customer_tier
-                ORDER BY customer_tier
-                """
-            )
+            # Real dbt Gold model: mart_scd_comparison
+            cur.execute("SELECT * FROM dbt_dev_dbt_gold.mart_scd_comparison ORDER BY customer_tier")
             scd_comparison = [dict(r) for r in cur.fetchall()]
 
+            # Real dbt snapshot table: dbt_snapshots.snap_customers_dbt
             cur.execute(
                 """
-                SELECT customer_id, customer_name, customer_tier, region, dbt_valid_from, dbt_valid_to, is_current
-                FROM snapshots.snap_customers
+                SELECT customer_id, customer_name, customer_tier, region,
+                       dbt_valid_from, dbt_valid_to, (dbt_valid_to IS NULL) AS is_current
+                FROM dbt_snapshots.snap_customers_dbt
                 WHERE customer_id IN (
-                    SELECT customer_id FROM snapshots.snap_customers GROUP BY customer_id HAVING COUNT(*) > 1
+                    SELECT customer_id FROM dbt_snapshots.snap_customers_dbt GROUP BY customer_id HAVING COUNT(*) > 1
                 )
                 ORDER BY customer_id, dbt_valid_from
                 LIMIT 20
@@ -1012,28 +769,20 @@ def fetch_demo_state(db_url: str | None = None) -> dict[str, Any]:
             )
             scd_changed_rows = [dict(r) for r in cur.fetchall()]
 
-            cur.execute(
-                """
-                SELECT order_id, customer_id, order_date, status, order_total, rejection_reason
-                FROM quarantine.rejected_orders
-                ORDER BY quarantine_id DESC
-                LIMIT 20
-                """
-            )
-            quarantine_rows = [dict(r) for r in cur.fetchall()]
+            # Real dbt --store-failures audit tables (zero hardcoded quarantine!)
+            dbt_audit_failures = _fetch_dbt_audit_failures(cur)
 
     return {
         "initialized": True,
         "latest_run": latest,
-        "runs": runs,
         "gold_order_count": int(gold_stats["cnt"]),
         "gold_realized_revenue": float(gold_stats["rev"]),
         "snapshot_versions": int(snap_stats["total_versions"]),
         "unique_customers": int(snap_stats["unique_customers"]),
-        "quarantine_count": quarantine_cnt,
+        "quarantine_count": len(dbt_audit_failures),
         "scd_comparison": scd_comparison,
         "scd_changed_rows": scd_changed_rows,
-        "quarantine_rows": quarantine_rows,
+        "quarantine_rows": dbt_audit_failures,
     }
 
 
@@ -1042,7 +791,7 @@ def execute_neon_readonly(sql: str, *, max_rows: int = 100, db_url: str | None =
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute("SET TRANSACTION READ ONLY")
-            cur.execute("SET LOCAL search_path TO gold, snapshots, public")
+            cur.execute("SET LOCAL search_path TO gold, dbt_dev_dbt_gold, dbt_snapshots, public")
             cur.execute("SET LOCAL statement_timeout = '8000'")
             cur.execute(sql)
             cols = [desc[0] for desc in (cur.description or [])]
@@ -1095,7 +844,7 @@ def build_jaffle_catalog() -> DbtMetadataCatalog:
             schema_name="gold",
             layer="gold",
             last_run_status="pass",
-            description="SCD Type 2 customer dimension (grain: dbt_scd_id). Filter is_current=TRUE for latest or join on dbt_valid_from/dbt_valid_to for point-in-time.",
+            description="SCD Type 2 customer dimension built via dbt snapshot (grain: dbt_scd_id).",
             columns=[
                 CatalogColumn(name="dbt_scd_id", data_type="varchar", description="SCD Type 2 surrogate key", tests=["not_null", "unique"]),
                 CatalogColumn(name="customer_id", data_type="integer", description="Natural customer key", tests=["not_null"]),
