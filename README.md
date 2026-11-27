@@ -1,17 +1,56 @@
-# Lakehouse Cockpit Core 🏛️⚡
+# Lakehouse Cockpit Core & AI Analytics Workbench 🏛️⚡
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python)](pyproject.toml)
+[![FastAPI](https://img.shields.io/badge/Control%20Plane-FastAPI-009688)](api/app.py)
+[![SQLGlot](https://img.shields.io/badge/SQL%20Guardrails-SQLGlot%20AST-2563EB)](services/sql_validator.py)
+[![dbt](https://img.shields.io/badge/Semantic%20%26%20Contracts-dbt%20%2B%20Lightdash-FF694B)](services/dbt_asset_builder.py)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B.svg?logo=streamlit)](https://streamlit.io)
-[![FastMCP](https://img.shields.io/badge/Agentic%20AI-FastMCP%20%2B%20Gemini-8B5CF6)](components/ai_drawer.py)
-[![Architecture](https://img.shields.io/badge/Architecture-Microkernel%20%2B%20Adapter%20Pattern-F59E0B)](#2-architecture-overview)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **A production-grade, reusable microkernel framework for Modern Medallion Lakehouse BI Analytics and FastMCP / Gemini AI Operations Copilots.**  
-> Decouple 85% of boilerplate UI, layout orchestration, FinOps guards, and SQL contract engines from your business domain models. Build and launch a new enterprise analytics cockpit in under 30 minutes.
+> **Governed Analytics Engineering Control Plane & Reusable Lakehouse Cockpit Microkernel.**  
+> Standardizes the workflow from **ad-hoc business exploration** to **governed data product proposals**—combining dbt-first metadata discovery, deterministic SQLGlot AST guardrails, read-only sandbox validation, and automated dbt Data Contract + BI Semantic YAML synthesis via Draft PRs.
+
+---
+
+## 0. AI Analytics Workbench (Control Plane)
+
+Rather than replacing enterprise BI platforms or pointing an unconstrained LLM at a raw warehouse, the **AI Analytics Workbench** acts as the **governance bridge** between exploratory analysis and production Analytics Engineering:
+
+```mermaid
+flowchart LR
+    A["1. Explore<br/>Ambiguous Business Question<br/>& Hypothesis Consultation"] --> B["2. Semantic Gap<br/>REUSE_EXISTING vs.<br/>NEW_SEMANTIC_METRIC / SOURCE_GAP"]
+    B --> C["3. Security Gate<br/>SQLGlot AST Validation<br/>Tenant RLS & 1:N Fanout Block<br/>+ spec_hash Confirmation"]
+    C --> D["4. Read-Only Sandbox<br/>PostgreSQL RLS / DuckDB<br/>Verified Preview"]
+    D --> E["5. Promote to Build<br/>Synthesize dbt Gold SQL,<br/>Enforced schema.yml &<br/>BI Semantic YAML"]
+    E --> F["6. Isolated Validation<br/>not_null & Grain Uniqueness<br/>→ Single Draft PR (AE Review)"]
+```
+
+### Core Engineering Principles
+- **Deterministic Validation over LLM Guessing**: SQL safety (single read-only `SELECT`, catalog allowlist, server-enforced `tenant_id` isolation, and 1:N join fanout detection) is enforced via **SQLGlot AST** parsing—never fragile regex or prompt-only instructions.
+- **Mandatory Fail-Loud Policy**: Missing metadata, out-of-domain prompts (`SOURCE_GAP`), or complex SQL exceeding the structured `QuerySpec` subset (`REQUIRES_AE_REVIEW`) explicitly halt and surface structured reasons—never silently fabricating fallback queries.
+- **Human-in-the-Loop Governance**: Every semantic change invalidates the canonical SHA-256 `spec_hash` and requires fresh confirmation. Promoted assets stay at `STAGING_LOCAL_ONLY` until bundled into a single **Draft PR** for Analytics Engineer review and CI/CD deployment.
+- **BI-Agnostic Semantic Output**: Currently emits dbt-native **Lightdash Semantic YAML** alongside enforced dbt contracts (`contract: {enforced: true}`); the same builder pattern adapts cleanly to **Power BI PBIP / TMDL** via Git Integration.
+
+### Quick Code Tour (Key Modules)
+
+| Capability | Module | What It Does |
+|---|---|---|
+| **Control Plane API** | [`api/app.py`](api/app.py) | FastAPI endpoints for consultation, AST validation, sandbox execution, isolated asset build, and Draft PR orchestration. |
+| **SQLGlot AST Gate & Reconciler** | [`services/sql_validator.py`](services/sql_validator.py) | Read-only enforcement, forbidden function blocklist, catalog allowlist, tenant isolation injection, 1:N join fanout gate, and bidirectional AST → `QuerySpec` reconciliation. |
+| **Versioned `QuerySpec` & Hashing** | [`services/query_spec.py`](services/query_spec.py) | Canonical SHA-256 `spec_hash`, deterministic SQL compiler, `AnalyticsAssetContract`, and automatic confirmation invalidation on drift. |
+| **Semantic Gap Detector** | [`services/semantic_gap_detector.py`](services/semantic_gap_detector.py) | Classifies requests against the dbt catalog (`REUSE_EXISTING`, `NEW_SEMANTIC_METRIC`, `SEMANTIC_AMBIGUITY`, `SOURCE_GAP`, `ACCESS_BLOCKED`). |
+| **dbt Contract & Semantic Builder** | [`services/dbt_asset_builder.py`](services/dbt_asset_builder.py) | Synthesizes minimal dbt Gold SQL (`{{ ref(...) }}`), enforced `schema.yml` (`not_null`, `unique` / `unique_combination_of_columns`), separate Lightdash YAML, and `BIAssetManifest`. |
+| **dbt Metadata Catalog** | [`services/dbt_catalog.py`](services/dbt_catalog.py) | Loads dbt models, MetricFlow semantic definitions, column metadata, and lineage as the single governed boundary. |
+| **Diagnostic Consultant** | [`services/consultant_service.py`](services/consultant_service.py) | Multi-turn business hypothesis framing and candidate query drafting with structured abstention. |
+| **Isolated Asset Validator** | [`services/dbt_validator.py`](services/dbt_validator.py) | Runs isolated read-only materialization, `not_null`, grain uniqueness, and optional reconciliation checks before PR submission. |
+| **BI & Observability Adapters** | [`integrations/lightdash_adapter.py`](integrations/lightdash_adapter.py), [`integrations/langfuse_adapter.py`](integrations/langfuse_adapter.py) | Lightdash staging/deploy status checks and Langfuse trace/evaluation logging. |
+
+> **Note on Hosting**: This repository contains the reusable, open-source **Control Plane & Core Microkernel**. In live demos, it is mounted behind a private ERP application (PostgreSQL with row-level `tenant_id` isolation + dbt Bronze/Silver/Gold + MetricFlow).
 
 ---
 
 ## Table of Contents
+- [0. AI Analytics Workbench (Control Plane)](#0-ai-analytics-workbench-control-plane)
 - [1. Why Lakehouse Cockpit Core?](#1-why-lakehouse-cockpit-core)
 - [2. Architecture Overview](#2-architecture-overview)
 - [3. Key Architectural Features](#3-key-architectural-features)
