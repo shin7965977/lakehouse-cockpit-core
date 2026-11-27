@@ -555,7 +555,13 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
     with st.container(border=True):
         h_left, h_right = st.columns([3, 1])
         with h_left:
-            st.markdown('<div class="erp-card-title">1. Business Consultation & Intent Framing</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="erp-card-title" '
+                'title="探索與商業假設對齊階段：先與 AI 商業顧問對話並執行 0–2 條唯讀 Query Evidence（直接查 Neon 真實資料），確認業務問題與口徑後再收斂成正式候選 SQL。" '
+                'style="cursor:help;">1. Business Consultation & Intent Framing '
+                '<span style="color:#64748b;font-size:0.85rem;">ⓘ</span></div>',
+                unsafe_allow_html=True,
+            )
             st.markdown(
                 '<div class="erp-card-sub">Align on business hypotheses with live Neon Query Evidence before drafting governed SQL.</div>',
                 unsafe_allow_html=True,
@@ -862,7 +868,10 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             top_l, top_r = st.columns([2.2, 1.8])
             with top_l:
                 st.markdown(
-                    f'<div class="erp-card-title">Candidate Governed Query &nbsp;{_pill(f"v{cand.version}", "blue")}</div>'
+                    f'<div class="erp-card-title" '
+                    f'title="定稿候選 SQL 階段：將前一步探索對話收斂為唯一 1 條單一 Grain（顆粒度）的標準 SQL，附上白話說明、前提假設與初步 AST 驗證，支援多輪微調（v1 → v2）後再送入 Security Gate。" '
+                    f'style="cursor:help;">Candidate Governed Query '
+                    f'<span style="color:#64748b;font-size:0.85rem;">ⓘ</span> &nbsp;{_pill(f"v{cand.version}", "blue")}</div>'
                     f'<div class="erp-card-sub">{html.escape(cand.title or "Governed Analytical Candidate")}</div>',
                     unsafe_allow_html=True,
                 )
@@ -917,7 +926,13 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
         if gap is not None:
             with st.container(border=True):
                 gl, gr = st.columns([3, 1])
-                gl.markdown('<div class="erp-card-title">Semantic Gap Classification</div>', unsafe_allow_html=True)
+                gl.markdown(
+                    '<div class="erp-card-title" '
+                    'title="語意缺口自動分類（7 種治理狀態）：依據 dbt Metadata Catalog 與 SQL AST，自動判斷此查詢屬於重用既有指標 (REUSE_EXISTING)、新增語意指標 (NEW_SEMANTIC_METRIC)、新建 dbt Model (NEW_DBT_MODEL) 或缺少資料源 (SOURCE_GAP)，決定後續 Promote to Build 或 dlt 提案路徑。" '
+                    'style="cursor:help;">Semantic Gap Classification '
+                    '<span style="color:#64748b;font-size:0.85rem;">ⓘ</span></div>',
+                    unsafe_allow_html=True,
+                )
                 gl.caption(gap.reason)
                 g_val = gap.classification.value
                 g_var = "green" if g_val == "REUSE_EXISTING" else ("red" if g_val in ("SOURCE_GAP", "ACCESS_BLOCKED") else "amber")

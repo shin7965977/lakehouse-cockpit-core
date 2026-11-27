@@ -207,3 +207,72 @@ def test_propose_source_ingestion_exposes_dlt_scaffold_py() -> None:
     assert prop.status == "PROPOSED"
     assert prop.dlt_scaffold_py
     assert "@dlt.resource" in prop.dlt_scaffold_py
+
+
+def test_sql_validator_flags_average_of_averages_risk() -> None:
+    """Regression test: AVG(average_order_value) must NOT pass as VALID; must flag AVERAGE_OF_AVERAGES_RISK."""
+    bad_sql = (
+        'SELECT "mart_customer_value"."customer_name", "mart_customer_value"."customer_tier", '
+        'SUM("mart_customer_value"."total_revenue") AS "total_revenue", '
+        'AVG("mart_customer_value"."average_order_value") AS "aov", '
+        'MAX("mart_customer_value"."max_order_amount") AS "max_order_size", '
+        'SUM("mart_customer_value"."order_count") AS "order_count" '
+        'FROM "mart_customer_value" '
+        'GROUP BY "mart_customer_value"."customer_name", "mart_customer_value"."customer_tier" '
+        'ORDER BY "total_revenue" DESC LIMIT 20'
+    )
+    base_spec = QuerySpec(
+        spec_id="qs_test_avg_of_avg",
+        question="Is our revenue mainly driven by high AOV from a few key customers?",
+        dialect="postgres",
+        raw_sql_override=bad_sql,
+    )
+    res = validate_and_reconcile_sql(
+        bad_sql,
+        base_spec,
+        allowed_relations={"mart_customer_value"},
+    )
+    assert res.status == "REQUIRES_AE_REVIEW"
+    assert "AVERAGE_OF_AVERAGES_RISK" in res.reason_codes
+
+
+def test_dbt_asset_builder_strips_outer_order_by_and_limit_keeps_window() -> None:
+    """Regression test: dbt Gold SQL must strip outer ORDER BY and LIMIT while preserving window OVER (ORDER BY)."""
+    sql_with_order_limit = (
+        'SELECT "customer_id", "customer_name", "total_revenue", '
+        'SUM("total_revenue") OVER (ORDER BY "total_revenue" DESC) AS "running_rev" '
+        'FROM "mart_customer_value" '
+        'ORDER BY "total_revenue" DESC LIMIT 20'
+    )
+    spec = QuerySpec(
+        spec_id="qs_test_order_strip",
+        question="Customer revenue share",
+        dialect="postgres",
+        raw_sql_override=sql_with_order_limit,
+    )
+    bundle = build_dbt_and_lightdash_bundle(
+        query_spec=spec,
+        model_name="mart_customer_revenue_share",
+        grain=["customer_id"],
+    )
+    body_after_config = bundle.dbt_sql.split("}}", 1)[-1]
+    assert "LIMIT 20" not in body_after_config.upper()
+    assert "OVER (ORDER BY" in body_after_config.upper()
+    # Ensure no trailing outer ORDER BY remains outside OVER(...)
+    tail_after_from = body_after_config.upper().split("FROM", 1)[-1]
+    assert "ORDER BY" not in tail_after_from
+
+
+def test_workbench_demo_tab2_cards_have_hover_tooltips() -> None:
+    """Ensure key Tab 2 workflow headers provide hover tooltips (HTML title attribute)."""
+    src = WORKBENCH_PATH.read_text(encoding="utf-8")
+    for heading in (
+        ">1. Business Consultation & Intent Framing",
+        ">Candidate Governed Query",
+        ">Semantic Gap Classification",
+    ):
+        idx = src.find(heading)
+        assert idx != -1, f"Card heading '{heading}' not found in workbench_demo.py"
+        window = src[max(0, idx - 320) : idx + 120]
+        assert "title=" in window, f"Card heading '{heading}' is missing a hover tooltip (title=...)"
+

@@ -467,6 +467,35 @@ def _try_reconcile_simple_select(
     )
 
 
+_AVG_OF_AVG_EXACT = {"aov", "average", "avg", "rate", "ratio", "pct", "percent"}
+_AVG_OF_AVG_PREFIXES = ("average_", "avg_", "mean_")
+_AVG_OF_AVG_SUFFIXES = ("_avg", "_average", "_aov", "_rate", "_ratio", "_pct", "_percent")
+
+
+def _check_average_of_averages(tree: exp.Expression) -> tuple[bool, str]:
+    """Flag AVG(...) applied to pre-computed average/ratio/rate columns (average-of-averages trap)."""
+    offenders: list[str] = []
+    for avg_node in tree.find_all(exp.Avg):
+        for col in avg_node.find_all(exp.Column):
+            cname = (col.name or "").strip().lower()
+            if (
+                cname in _AVG_OF_AVG_EXACT
+                or cname.startswith(_AVG_OF_AVG_PREFIXES)
+                or cname.endswith(_AVG_OF_AVG_SUFFIXES)
+            ):
+                if col.name not in offenders:
+                    offenders.append(col.name)
+    if offenders:
+        cols_str = ", ".join(offenders)
+        return (
+            False,
+            f"Average-of-averages risk detected: AVG({cols_str}) re-aggregates pre-computed average/ratio column(s). "
+            "Compute a weighted ratio (SUM(numerator) / NULLIF(SUM(denominator), 0)) or select directly from the "
+            "pre-aggregated mart at its native grain without redundant GROUP BY.",
+        )
+    return True, ""
+
+
 def validate_and_reconcile_sql(
     sql: str,
     base_spec: QuerySpec,
@@ -571,6 +600,21 @@ def validate_and_reconcile_sql(
 
     # Bidirectional AST -> QuerySpec Reconciliation
     reconciled = _try_reconcile_simple_select(tree, base_spec, referenced_tables, scoped_sql=exec_sql)
+
+    # Average-of-Averages Analytical Quality Gate
+    avg_ok, avg_msg = _check_average_of_averages(tree)
+    if not avg_ok:
+        override_spec = reconciled or base_spec.with_updates(raw_sql_override=raw_sql)
+        return SqlValidationResult(
+            status="REQUIRES_AE_REVIEW",
+            reason_codes=["AVERAGE_OF_AVERAGES_RISK"],
+            messages=[avg_msg],
+            reconciled_spec=override_spec,
+            executable_sql=exec_sql,
+            sql_diff=patch,
+            reconciled_from_ast=reconciled is not None,
+        )
+
     if reconciled is not None:
         return SqlValidationResult(
             status="VALID",

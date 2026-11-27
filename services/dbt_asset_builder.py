@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+import sqlglot
+from sqlglot import exp
 import yaml
 from pydantic import BaseModel, Field
 
@@ -95,9 +97,19 @@ def build_dbt_and_lightdash_bundle(
         )
     )
 
-    # 1. Strip trailing LIMIT so materialized Gold Mart is complete, then replace FROM/JOIN upstream tables with {{ ref(...) }}
+    # 1. Strip outer LIMIT and ORDER BY via SQLGlot AST (preserving Window OVER (ORDER BY ...))
+    #    so materialized Gold Mart is complete, then replace FROM/JOIN upstream tables with {{ ref(...) }}
     raw_sql = query_spec.compile_sql()
-    unbounded_sql = re.sub(r"\s+LIMIT\s+\d+\s*$", "", raw_sql.strip().rstrip(";"), flags=re.IGNORECASE)
+    cleaned_raw = raw_sql.strip().rstrip(";")
+    sql_dialect = "postgres" if query_spec.dialect == "postgres" else "duckdb"
+    try:
+        parsed_ast = sqlglot.parse_one(cleaned_raw, read=sql_dialect)
+        if isinstance(parsed_ast, (exp.Select, exp.Union)):
+            parsed_ast.set("limit", None)
+            parsed_ast.set("order", None)
+        unbounded_sql = parsed_ast.sql(dialect=sql_dialect)
+    except Exception:
+        unbounded_sql = re.sub(r"\s+LIMIT\s+\d+\s*$", "", cleaned_raw, flags=re.IGNORECASE)
     dbt_body = unbounded_sql
     for rel in upstream_relations:
         # Only replace table references in FROM/JOIN clauses so qualified column prefixes like
