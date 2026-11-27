@@ -417,7 +417,7 @@ def answer_consultant_turn(
         "state that honestly and NEVER fabricate numbers.\n"
         + structure_rule
         + f"RecentConversationHistory: {json.dumps([t.model_dump() for t in recent_turns], ensure_ascii=False)}\n"
-        f"SanitizedQueryOutcomes: {json.dumps(sanitized_outcomes, ensure_ascii=False)}\n"
+        f"SanitizedQueryOutcomes: {json.dumps(sanitized_outcomes, ensure_ascii=False, default=str)}\n"
         f"LatestUserMessage (RESPOND TO THIS MESSAGE): {message}\n"
     )
 

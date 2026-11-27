@@ -28,9 +28,15 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
-from services.consultant_service import draft_candidate_query
+from services.consultant_service import (
+    ConsultantQueryOutcome,
+    EvidenceQuerySummary,
+    answer_consultant_turn,
+    draft_candidate_query,
+    propose_consultant_turn,
+)
 from services.dbt_asset_builder import build_dbt_and_lightdash_bundle
-from services.duckdb_executor import generate_gemini_structured, generate_gemini_text
+from services.duckdb_executor import generate_gemini_structured
 from services.intent_clarifier import ClarificationTurn
 from services.neon_demo_engine import (
     JAFFLE_ONE_TO_MANY_JOINS,
@@ -47,7 +53,7 @@ from services.query_spec import DataSourceRef, OutputSpec, QuerySpec
 from services.semantic_gap_detector import classify_sql_semantic_gap
 from services.sql_validator import validate_and_reconcile_sql
 
-MAX_LLM_CALLS_PER_SESSION = 10
+MAX_LLM_CALLS_PER_SESSION = 20
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
 
@@ -162,6 +168,7 @@ def _init_session_state() -> None:
     defaults: dict[str, Any] = {
         "llm_calls": 0,
         "chat_messages": [],
+        "evidence_history": [],
         "candidate_bundle": None,
         "sent_to_gate": False,
         "editor_sql": "",
@@ -178,33 +185,10 @@ def _init_session_state() -> None:
             st.session_state[k] = v
 
 
-def _make_llm_callable(api_key: str):
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is required for live AI consultation. "
-            "Configure GEMINI_API_KEY in Streamlit Secrets or enter one in the sidebar."
-        )
-    if st.session_state["llm_calls"] >= MAX_LLM_CALLS_PER_SESSION:
-        raise RuntimeError(
-            f"Demo rate limit reached ({MAX_LLM_CALLS_PER_SESSION} LLM calls per session). "
-            "Refresh the page to start a new session."
-        )
-
-    def _call(prompt: str) -> str:
-        st.session_state["llm_calls"] += 1
-        return generate_gemini_text(
-            prompt=prompt,
-            api_key=api_key,
-            model=DEFAULT_GEMINI_MODEL,
-        )
-
-    return _call
-
-
 def _make_structured_llm_callable(api_key: str):
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is required to draft governed SQL. "
+            "GEMINI_API_KEY is required for AI consultation and SQL drafting. "
             "Configure GEMINI_API_KEY in Streamlit Secrets or enter one in the sidebar."
         )
     if st.session_state["llm_calls"] >= MAX_LLM_CALLS_PER_SESSION:
@@ -217,23 +201,12 @@ def _make_structured_llm_callable(api_key: str):
         st.session_state["llm_calls"] += 1
         return generate_gemini_structured(
             prompt=prompt,
-            response_schema=schema_cls,
+            response_model=schema_cls,
             api_key=api_key,
             model=DEFAULT_GEMINI_MODEL,
         )
 
     return _call_structured
-
-
-def _format_catalog_summary(catalog) -> str:
-    lines = ["Available Gold Relations:"]
-    for rel in catalog.relations:
-        cols = ", ".join(c.name for c in rel.columns)
-        lines.append(f"- {rel.name}: {rel.description} | columns=[{cols}]")
-    lines.append("Certified Metrics:")
-    for m in catalog.metrics:
-        lines.append(f"- {m.name} ({m.label}): {m.measure_agg.upper()}({m.measure_expr}) on {m.source_relation}")
-    return "\n".join(lines)
 
 
 def _ensure_neon_initialized(db_url: str) -> dict[str, Any]:
@@ -447,6 +420,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 help="清空目前對話、候選查詢與 Security Gate 狀態，開始全新分析。",
             ):
                 st.session_state["chat_messages"] = []
+                st.session_state["evidence_history"] = []
                 st.session_state["candidate_bundle"] = None
                 st.session_state["sent_to_gate"] = False
                 st.session_state["editor_sql"] = ""
@@ -506,6 +480,25 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
         for msg in st.session_state["chat_messages"]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                ev_list = msg.get("evidence") or []
+                if ev_list:
+                    total_rows = sum(int(e.get("row_count", 0)) for e in ev_list)
+                    with st.expander(
+                        f"📊 Query Evidence ({len(ev_list)} read-only quer{'y' if len(ev_list) == 1 else 'ies'} · {total_rows} rows)",
+                        expanded=True,
+                    ):
+                        for ev in ev_list:
+                            status_icon = "✅" if ev.get("status") == "SUCCEEDED" else "❌"
+                            st.markdown(
+                                f"{status_icon} **{ev.get('title', 'Read-only Evidence Query')}** "
+                                f"(`{ev.get('row_count', 0)} rows` · `{str(ev.get('spec_hash', ''))[:8]}`)"
+                            )
+                            if ev.get("sql"):
+                                st.code(ev["sql"], language="sql")
+                            if ev.get("error"):
+                                st.error(ev["error"])
+                            elif ev.get("rows"):
+                                st.dataframe(pd.DataFrame(ev["rows"]), use_container_width=True, hide_index=True)
 
         user_q = st.text_input(
             "Ask a business question (or follow-up refinement):",
@@ -518,27 +511,98 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             "💬 Ask AI Consultant",
             type="primary",
             use_container_width=True,
-            help="呼叫 Gemini 顧問先拆解商業假設（So What + Hypotheses），不直接亂吐未審核 SQL。",
+            help="執行兩段式證據諮詢（跟 ERP 相同）：先由顧問提議唯讀 SQL → 實查 Neon 拿真實數據 → 結合數據給出假設並於下方展示 Query Evidence。",
         ) or preset_question:
             q_text = (preset_question or user_q).strip()
             if not q_text:
                 st.warning("Please enter a business question first.")
             else:
                 try:
-                    llm_fn = _make_llm_callable(api_key)
+                    structured_fn = _make_structured_llm_callable(api_key)
+                    prior_history = [
+                        ClarificationTurn(role=m["role"], content=m["content"])
+                        for m in st.session_state["chat_messages"]
+                    ]
                     st.session_state["chat_messages"].append({"role": "user", "content": q_text})
-                    prompt = (
-                        "You are a senior Analytics Engineer & Management Consultant advising on Jaffle Shop e-commerce data.\n"
-                        f"{_format_catalog_summary(catalog)}\n\n"
-                        f"Business Question: {q_text}\n\n"
-                        "Respond concisely with:\n"
-                        "1. **Key Finding / Framing (So What?)**\n"
-                        "2. **2 Concrete Business Hypotheses**\n"
-                        "3. **Recommended Next Step** (remind the user they can click 'Draft Governed Query')."
+                    allowed_rels = {r.name for r in catalog.relations}
+
+                    with st.spinner("Step 1/2: Proposing read-only evidence queries & querying Neon..."):
+                        proposal = propose_consultant_turn(
+                            message=q_text,
+                            catalog=catalog,
+                            history=prior_history,
+                            dialect="postgres",
+                            structured_llm_fn=structured_fn,
+                        )
+
+                    evidence_cards: list[dict[str, Any]] = []
+                    outcomes: list[ConsultantQueryOutcome] = []
+
+                    if proposal.needs_data and proposal.proposed_queries:
+                        for pq in proposal.proposed_queries[:2]:
+                            raw_sql = pq.compiled_sql or (pq.query_spec.compile_sql() if pq.query_spec else "")
+                            val_ev = validate_and_reconcile_sql(
+                                raw_sql,
+                                pq.query_spec or QuerySpec(spec_id="qs_ev", dialect="postgres"),
+                                allowed_relations=allowed_rels,
+                                server_tenant_id=None,
+                                one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                            )
+                            if val_ev.status == "BLOCKED":
+                                outcome = ConsultantQueryOutcome(
+                                    title=pq.title,
+                                    sql=raw_sql,
+                                    spec_hash=pq.spec_hash,
+                                    status="FAILED",
+                                    error=f"AST Gate Blocked: {'; '.join(val_ev.messages)}",
+                                )
+                            else:
+                                try:
+                                    exec_sql = val_ev.executable_sql or raw_sql
+                                    df_ev = execute_neon_readonly(exec_sql, max_rows=20, db_url=db_url)
+                                    rows_dict = json.loads(df_ev.to_json(orient="records", date_format="iso"))
+                                    outcome = ConsultantQueryOutcome(
+                                        title=pq.title,
+                                        sql=exec_sql,
+                                        spec_hash=pq.spec_hash,
+                                        status="SUCCEEDED",
+                                        row_count=len(df_ev),
+                                        columns=list(df_ev.columns),
+                                        rows=rows_dict,
+                                    )
+                                    st.session_state["evidence_history"].append(
+                                        EvidenceQuerySummary(
+                                            title=pq.title,
+                                            sql=exec_sql,
+                                            row_count=len(df_ev),
+                                            columns=list(df_ev.columns),
+                                        )
+                                    )
+                                except Exception as q_exc:
+                                    outcome = ConsultantQueryOutcome(
+                                        title=pq.title,
+                                        sql=raw_sql,
+                                        spec_hash=pq.spec_hash,
+                                        status="FAILED",
+                                        error=str(q_exc),
+                                    )
+                            outcomes.append(outcome)
+                            evidence_cards.append(outcome.model_dump())
+
+                        with st.spinner("Step 2/2: Synthesizing data-backed hypotheses from Neon evidence..."):
+                            ans = answer_consultant_turn(
+                                message=q_text,
+                                query_outcomes=outcomes,
+                                history=prior_history,
+                                structured_llm_fn=structured_fn,
+                            )
+                            reply_text = ans.reply
+                    else:
+                        reply_text = proposal.direct_reply or "Please specify which metric or dimension you want to explore."
+
+                    st.session_state["chat_messages"].append(
+                        {"role": "assistant", "content": reply_text, "evidence": evidence_cards}
                     )
-                    with st.spinner("Consulting dbt catalog & formulating business hypotheses..."):
-                        reply_text = llm_fn(prompt)
-                    st.session_state["chat_messages"].append({"role": "assistant", "content": reply_text})
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Fail-Loud Halt: {exc}")
@@ -546,7 +610,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
         if a2.button(
             "📝 Draft Governed Query",
             use_container_width=True,
-            help="根據對話起草候選 SQL、自動判斷語意缺口（REUSE_EXISTING / NEW_SEMANTIC_METRIC）並產生 Candidate Governed Query 審核卡片。",
+            help="根據對話與證據查詢起草候選 SQL、自動判斷語意缺口（REUSE_EXISTING / NEW_SEMANTIC_METRIC）並產生 Candidate Governed Query 審核卡片。",
         ):
             if not st.session_state["chat_messages"] and not user_q.strip():
                 st.warning("Ask a business question first before drafting a governed query.")
@@ -563,6 +627,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                         cand = draft_candidate_query(
                             history=history,
                             catalog=catalog,
+                            evidence_queries=st.session_state.get("evidence_history") or None,
                             dialect="postgres",
                             tenant_id=None,
                             structured_llm_fn=structured_fn,
