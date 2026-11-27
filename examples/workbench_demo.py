@@ -27,13 +27,10 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
-from services.consultant_service import (
-    ConsultantMessage,
-    consult_freeform,
-    draft_candidate_query,
-)
+from services.consultant_service import draft_candidate_query
 from services.dbt_asset_builder import build_dbt_and_lightdash_bundle
-from services.duckdb_executor import generate_gemini_text
+from services.duckdb_executor import generate_gemini_structured, generate_gemini_text
+from services.intent_clarifier import ClarificationTurn
 from services.neon_demo_engine import (
     JAFFLE_ONE_TO_MANY_JOINS,
     build_jaffle_catalog,
@@ -104,6 +101,41 @@ def _make_llm_callable(api_key: str):
         )
 
     return _call
+
+
+def _make_structured_llm_callable(api_key: str):
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is required to draft governed SQL. "
+            "Enter a Gemini API Key in the sidebar (or configure Streamlit Secrets)."
+        )
+    if st.session_state["llm_calls"] >= MAX_LLM_CALLS_PER_SESSION:
+        raise RuntimeError(
+            f"Demo rate limit reached ({MAX_LLM_CALLS_PER_SESSION} LLM calls per session). "
+            "Refresh the page to start a new session."
+        )
+
+    def _call_structured(prompt: str, schema_cls: type[Any]) -> Any:
+        st.session_state["llm_calls"] += 1
+        return generate_gemini_structured(
+            prompt=prompt,
+            response_schema=schema_cls,
+            api_key=api_key,
+            model=DEFAULT_GEMINI_MODEL,
+        )
+
+    return _call_structured
+
+
+def _format_catalog_summary(catalog) -> str:
+    lines = ["Available Gold Relations:"]
+    for rel in catalog.relations:
+        cols = ", ".join(c.name for c in rel.columns)
+        lines.append(f"- {rel.name}: {rel.description} | columns=[{cols}]")
+    lines.append("Certified Metrics:")
+    for m in catalog.metrics:
+        lines.append(f"- {m.name} ({m.label}): {m.measure_agg.upper()}({m.measure_expr}) on {m.source_relation}")
+    return "\n".join(lines)
 
 
 def _ensure_neon_initialized(db_url: str) -> dict[str, Any]:
@@ -322,14 +354,18 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             try:
                 llm_fn = _make_llm_callable(api_key)
                 st.session_state["chat_messages"].append({"role": "user", "content": q_text})
-                history = [ConsultantMessage(**m) for m in st.session_state["chat_messages"]]
+                prompt = (
+                    "You are a senior Analytics Engineer & Management Consultant advising on Jaffle Shop e-commerce data.\n"
+                    f"{_format_catalog_summary(catalog)}\n\n"
+                    f"Business Question: {q_text}\n\n"
+                    "Respond concisely with:\n"
+                    "1. **Key Finding / Framing (So What?)**\n"
+                    "2. **2 Concrete Business Hypotheses**\n"
+                    "3. **Recommended Governed Metric / Next Step** (remind the user they can click 'Draft Governed Query')."
+                )
                 with st.spinner("Consulting dbt catalog & formulating business hypotheses..."):
-                    reply = consult_freeform(
-                        messages=history,
-                        catalog=catalog,
-                        llm_callable=llm_fn,
-                    )
-                st.session_state["chat_messages"].append({"role": "assistant", "content": reply.reply})
+                    reply_text = llm_fn(prompt)
+                st.session_state["chat_messages"].append({"role": "assistant", "content": reply_text})
             except Exception as exc:
                 st.error(f"Fail-Loud Halt: {exc}")
 
@@ -338,39 +374,51 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             st.warning("Ask a question first before drafting a governed query.")
         else:
             try:
-                llm_fn = _make_llm_callable(api_key)
+                structured_fn = _make_structured_llm_callable(api_key)
                 if not st.session_state["chat_messages"] and user_q.strip():
                     st.session_state["chat_messages"].append({"role": "user", "content": user_q.strip()})
-                history = [ConsultantMessage(**m) for m in st.session_state["chat_messages"]]
+                history = [
+                    ClarificationTurn(role=m["role"], content=m["content"])
+                    for m in st.session_state["chat_messages"]
+                ]
                 with st.spinner("Synthesizing governed SQL candidate & running AST check..."):
                     cand = draft_candidate_query(
-                        messages=history,
+                        history=history,
                         catalog=catalog,
                         dialect="postgres",
-                        server_tenant_id=None,
-                        one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
-                        llm_callable=llm_fn,
+                        tenant_id=None,
+                        structured_llm_fn=structured_fn,
                     )
                 st.session_state["candidate_bundle"] = cand
-                st.session_state["editor_sql"] = cand.sql
-                base_spec = QuerySpec(
+                if cand.sql:
+                    st.session_state["editor_sql"] = cand.sql
+                base_spec = cand.query_spec or QuerySpec(
                     spec_id=f"qs_demo_{cand.version}",
                     question=st.session_state["chat_messages"][0]["content"],
                     dialect="postgres",
                     output=OutputSpec(max_rows=50, certification="VALIDATED_EXPLORATORY"),
                 )
-                val = validate_and_reconcile_sql(
-                    cand.sql,
-                    base_spec,
-                    allowed_relations={r.name for r in catalog.relations},
-                    server_tenant_id=None,
-                    one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
-                )
-                st.session_state["last_validation"] = val
-                st.session_state["active_spec"] = val.reconciled_spec or base_spec
-                st.session_state["last_gap"] = classify_sql_semantic_gap(
-                    cand.sql, catalog, is_authorized=True
-                )
+                if cand.sql:
+                    val = validate_and_reconcile_sql(
+                        cand.sql,
+                        base_spec,
+                        allowed_relations={r.name for r in catalog.relations},
+                        server_tenant_id=None,
+                        one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                    )
+                    st.session_state["last_validation"] = val
+                    st.session_state["active_spec"] = val.reconciled_spec or base_spec
+                else:
+                    st.session_state["last_validation"] = cand.validation
+                    st.session_state["active_spec"] = base_spec
+                st.session_state["last_gap"] = cand.gap
+                if cand.plain_language_explanation:
+                    st.session_state["chat_messages"].append(
+                        {
+                            "role": "assistant",
+                            "content": f"**Drafted Candidate (v{cand.version} · {cand.title})**: {cand.plain_language_explanation}",
+                        }
+                    )
             except Exception as exc:
                 st.error(f"Fail-Loud Halt: {exc}")
 
