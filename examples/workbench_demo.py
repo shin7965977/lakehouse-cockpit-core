@@ -1,8 +1,13 @@
 """Standalone Public Streamlit Demo: AI Analytics Workbench & Data Governance Lab (Neon PostgreSQL).
 
-Matches the ERP AI Analytics Workbench visual layout & button progression (Candidate Governed Query
--> Approve & Send to Security Gate -> Confirm spec_hash -> Execute Read-Only -> Promote to Build)
-while adding the interactive Neon PostgreSQL Day 0/5/10/15/20 Governance Lab and live Elementary report.
+Full ERP-parity workflow in a single-company public Streamlit Cloud app:
+  1. Governance Timeline (Day 0/5/10/15/20 on Live Neon: WAP, SCD Type 2, Quarantine/LKG, CI Semantic Drift)
+  2. Explore & Security Gate (2-step Query Evidence, v1->v2 Candidate Refinement, SQLGlot AST Gate,
+     Bounded Auto-Repair + SQL Diff, Live Catalog Search, 1-click Promote to Build)
+  3. Build (dbt Gold SQL + Enforced Data Contract + Isolated Validation)
+  4. Lightdash BI (Dedicated tab reading Lightdash Cloud Secrets or STAGING_LOCAL_ONLY manifest)
+  5. Review & Release (Draft PR Bundle Orchestrator, Promotion Candidates, dlt Missing-Source Proposal)
+  6. Elementary, dbt Docs & Live dbt Table Explorer (Neon)
 
 Run locally:
     streamlit run examples/workbench_demo.py
@@ -28,15 +33,17 @@ if str(ROOT) not in sys.path:
 
 load_dotenv(ROOT / ".env")
 
+from integrations.lightdash_adapter import LightdashAdapter
 from services.consultant_service import (
     ConsultantQueryOutcome,
     EvidenceQuerySummary,
+    PreviousCandidateDraft,
     answer_consultant_turn,
     draft_candidate_query,
     propose_consultant_turn,
 )
 from services.dbt_asset_builder import build_dbt_and_lightdash_bundle
-from services.duckdb_executor import generate_gemini_structured
+from services.duckdb_executor import generate_gemini_structured, generate_gemini_text
 from services.intent_clarifier import ClarificationTurn
 from services.neon_demo_engine import (
     JAFFLE_ONE_TO_MANY_JOINS,
@@ -50,21 +57,33 @@ from services.neon_demo_engine import (
     run_day20_semantic_drift_ci,
 )
 from services.query_spec import DataSourceRef, OutputSpec, QuerySpec
+from services.release_orchestrator import orchestrate_draft_pr
 from services.semantic_gap_detector import classify_sql_semantic_gap
+from services.source_ingestion import APPROVED_CONNECTOR_REGISTRY, propose_source_ingestion
+from services.sql_repair import repair_sql_bounded
 from services.sql_validator import validate_and_reconcile_sql
+from services.warehouse_adapters import ExecutionResult, WarehouseAdapter, WarehouseAdapterError
 
 MAX_LLM_CALLS_PER_SESSION = 20
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
+DBT_DOCS_STATIC_PATH = ROOT / "examples" / "demo_artifacts" / "dbt_docs_static.html"
+
+NAV_TABS = [
+    "1️⃣ Governance Timeline",
+    "2️⃣ Explore & Security Gate",
+    "3️⃣ Build (dbt + Contract)",
+    "4️⃣ Lightdash BI",
+    "5️⃣ Review & Release",
+    "6️⃣ Elementary, dbt Docs & Tables",
+]
 
 
 ERP_THEME_CSS = """
 <style>
-/* Clean ERP-style light canvas & card polish */
 .stApp {
     background-color: #f8fafc;
 }
-/* Override default red primary button to ERP Royal Blue (#2563EB) */
 div.stButton > button[kind="primary"] {
     background-color: #2563eb !important;
     border-color: #2563eb !important;
@@ -88,15 +107,6 @@ div.stButton > button[kind="secondary"]:hover {
     color: #1d4ed8 !important;
     background-color: #eff6ff !important;
 }
-/* Tab underline in ERP Blue */
-button[data-baseweb="tab"][aria-selected="true"] {
-    color: #2563eb !important;
-    font-weight: 600 !important;
-}
-div[data-baseweb="tab-highlight"] {
-    background-color: #2563eb !important;
-}
-/* Styled status pills matching ERP React UI */
 .erp-pill-row {
     display: flex;
     flex-wrap: wrap;
@@ -151,6 +161,38 @@ div[data-baseweb="tab-highlight"] {
 """
 
 
+class _NeonReadOnlyAdapter:
+    """Lightweight WarehouseAdapter backed by Neon READ ONLY transactions for bounded SQL Auto-Repair."""
+
+    dialect = "postgres"
+
+    def __init__(self, db_url: str) -> None:
+        self.db_url = db_url
+
+    def capabilities(self) -> dict[str, Any]:
+        return {"dialect": "postgres", "read_only": True, "provider": "neon"}
+
+    def explain(self, sql: str) -> str:
+        try:
+            df = execute_neon_readonly(f"EXPLAIN {sql}", max_rows=20, db_url=self.db_url)
+            return "\n".join(str(v) for v in df.iloc[:, 0].tolist()) if not df.empty else "EXPLAIN OK"
+        except Exception as exc:
+            raise WarehouseAdapterError("EXPLAIN_FAILED", str(exc)) from exc
+
+    def execute_readonly(self, sql: str, max_rows: int = 50) -> ExecutionResult:
+        try:
+            df = execute_neon_readonly(sql, max_rows=max_rows, db_url=self.db_url)
+            return ExecutionResult(
+                dialect="postgres",
+                row_count=len(df),
+                columns=list(df.columns),
+                rows=json.loads(df.to_json(orient="records", date_format="iso")),
+                source_label="neon_postgres_readonly",
+            )
+        except Exception as exc:
+            raise WarehouseAdapterError("EXECUTION_FAILED", str(exc)) from exc
+
+
 def _pill(text: str, variant: str = "slate") -> str:
     return f'<span class="erp-pill pill-{variant}">{html.escape(text)}</span>'
 
@@ -166,6 +208,7 @@ def _resolve_secret(key: str) -> str:
 
 def _init_session_state() -> None:
     defaults: dict[str, Any] = {
+        "active_tab": NAV_TABS[0],
         "llm_calls": 0,
         "chat_messages": [],
         "evidence_history": [],
@@ -174,15 +217,43 @@ def _init_session_state() -> None:
         "editor_sql": "",
         "active_spec": None,
         "last_validation": None,
+        "last_repair": None,
+        "last_exec_error": "",
         "last_preview_df": None,
         "last_gap": None,
+        "gap_events": [],
         "build_bundle": None,
         "build_validation_checks": None,
+        "draft_pr_result": None,
+        "ingestion_proposal": None,
         "last_timeline_result": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def _make_text_llm_callable(api_key: str):
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is required for bounded SQL auto-repair. "
+            "Configure GEMINI_API_KEY in Streamlit Secrets or enter one in the sidebar."
+        )
+    if st.session_state["llm_calls"] >= MAX_LLM_CALLS_PER_SESSION:
+        raise RuntimeError(
+            f"Demo rate limit reached ({MAX_LLM_CALLS_PER_SESSION} LLM calls per session). "
+            "Refresh the page to start a new session."
+        )
+
+    def _call_text(prompt: str) -> str:
+        st.session_state["llm_calls"] += 1
+        return generate_gemini_text(
+            prompt=prompt,
+            api_key=api_key,
+            model=DEFAULT_GEMINI_MODEL,
+        )
+
+    return _call_text
 
 
 def _make_structured_llm_callable(api_key: str):
@@ -217,6 +288,30 @@ def _ensure_neon_initialized(db_url: str) -> dict[str, Any]:
     return state
 
 
+def _get_lightdash_status() -> dict[str, Any]:
+    adapter = LightdashAdapter(
+        lightdash_url=_resolve_secret("LIGHTDASH_URL"),
+        api_key=_resolve_secret("LIGHTDASH_API_KEY"),
+        project_uuid=_resolve_secret("LIGHTDASH_PROJECT_UUID"),
+    )
+    return adapter.check_status()
+
+
+def _record_gap_event(question: str, gap) -> None:
+    if gap is None:
+        return
+    cls_val = gap.classification.value
+    if cls_val in ("NEW_SEMANTIC_METRIC", "NEW_DBT_MODEL", "TRANSFORMATION_GAP", "SOURCE_GAP"):
+        st.session_state["gap_events"].append(
+            {
+                "question": question,
+                "classification": cls_val,
+                "candidate_relations": list(gap.candidate_relations or []),
+                "rationale": gap.rationale,
+            }
+        )
+
+
 def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
     with st.sidebar:
         st.markdown("## 🏛️ AI Analytics Workbench")
@@ -231,7 +326,7 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
                 "Gemini API Key (for Tab 2 AI Chat)",
                 value="",
                 type="password",
-                help="Optional for deterministic Labs (Tab 1, AST Gate, Tab 3, Tab 4). Required for live AI chat in Tab 2.",
+                help="Optional for deterministic Labs (Tab 1, AST Gate, Tab 3-6). Required for live AI chat in Tab 2.",
             )
         st.caption(
             f"Session LLM quota: **{st.session_state['llm_calls']} / {MAX_LLM_CALLS_PER_SESSION}** · Model: `{DEFAULT_GEMINI_MODEL}`"
@@ -267,6 +362,22 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
             st.rerun()
 
     return api_key.strip()
+
+
+def _render_nav_bar() -> str:
+    cols = st.columns(len(NAV_TABS))
+    for idx, tab_name in enumerate(NAV_TABS):
+        is_active = st.session_state["active_tab"] == tab_name
+        if cols[idx].button(
+            tab_name,
+            key=f"nav_btn_{idx}",
+            type="primary" if is_active else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state["active_tab"] = tab_name
+            st.rerun()
+    st.divider()
+    return st.session_state["active_tab"]
 
 
 def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
@@ -374,9 +485,7 @@ def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
     with st.container(border=True):
         st.markdown("#### 🛡️ Quarantine Table (`quarantine.rejected_orders` — For Stakeholder Clarification)")
         if state["quarantine_rows"]:
-            st.caption(
-                "Offending rows are quarantined instead of silently deduplicated (`ROW_NUMBER() = 1`) or published to Gold."
-            )
+            st.caption("Offending rows are quarantined instead of silently deduplicated (`ROW_NUMBER() = 1`) or published to Gold.")
             st.dataframe(pd.DataFrame(state["quarantine_rows"]), use_container_width=True, hide_index=True)
         else:
             st.info("Quarantine is empty. Click **🛡️ Day 15 Dirty Data WAP** to inject duplicate PKs, negative amounts, and NULL FKs.")
@@ -398,26 +507,26 @@ def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
 
 
 def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
-    st.subheader("Explore → Candidate Governed Query → SQLGlot AST Security Gate")
+    st.subheader("Explore → Candidate Governed Query (v1 → v2) → SQLGlot AST Security Gate")
     st.caption(
-        "Follows the exact ERP workflow: Free Consultation → Draft Governed Query → Approve & Send to Security Gate → "
-        "Validate & Confirm `spec_hash` → Execute Read-Only (Neon) → Promote to Build."
+        "ERP-parity flow: Free Consultation (with Query Evidence) → Draft / Refine Candidate Query (v1 → v2) → "
+        "Approve & Send to Security Gate → Validate / Auto-Repair / Confirm `spec_hash` → Execute Read-Only → 1-Click Promote to Build."
     )
 
-    # ── Step 1: Consultation Card (ERP layout) ─────────────────────────────────
+    # ── Step 1: Consultation Card ──────────────────────────────────────────────
     with st.container(border=True):
         h_left, h_right = st.columns([3, 1])
         with h_left:
             st.markdown('<div class="erp-card-title">1. Business Consultation & Intent Framing</div>', unsafe_allow_html=True)
             st.markdown(
-                '<div class="erp-card-sub">Align on business hypotheses before drafting SQL. Pick a preset or ask your own question.</div>',
+                '<div class="erp-card-sub">Align on business hypotheses with live Neon Query Evidence before drafting governed SQL.</div>',
                 unsafe_allow_html=True,
             )
         with h_right:
             if st.button(
                 "✨ New Conversation",
                 use_container_width=True,
-                help="清空目前對話、候選查詢與 Security Gate 狀態，開始全新分析。",
+                help="清空目前對話、候選查詢（v1/v2）與 Security Gate 狀態，開始全新分析。",
             ):
                 st.session_state["chat_messages"] = []
                 st.session_state["evidence_history"] = []
@@ -426,6 +535,8 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 st.session_state["editor_sql"] = ""
                 st.session_state["active_spec"] = None
                 st.session_state["last_validation"] = None
+                st.session_state["last_repair"] = None
+                st.session_state["last_exec_error"] = ""
                 st.session_state["last_preview_df"] = None
                 st.session_state["last_gap"] = None
                 st.rerun()
@@ -435,7 +546,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
         if p1.button(
             "💡 Preset 1: Customer Value (NEW_SEMANTIC_METRIC)",
             use_container_width=True,
-            help="發問客單價與最大單筆金額集中度，觸發 AI 假設分析與 NEW_SEMANTIC_METRIC 語意缺口。",
+            help="發問客單價與最大單筆金額集中度，觸發兩段式 Query Evidence 實查 Neon 與 NEW_SEMANTIC_METRIC 語意缺口。",
         ):
             preset_question = (
                 "Is our revenue mainly driven by high average order value and max order size "
@@ -500,10 +611,20 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                             elif ev.get("rows"):
                                 st.dataframe(pd.DataFrame(ev["rows"]), use_container_width=True, hide_index=True)
 
+        existing_cand = st.session_state.get("candidate_bundle")
+        input_label = (
+            f"Refinement feedback for v{existing_cand.version} → v{existing_cand.version + 1} (or new question):"
+            if existing_cand is not None
+            else "Ask a business question:"
+        )
         user_q = st.text_input(
-            "Ask a business question (or follow-up refinement):",
+            input_label,
             value=preset_question or "",
-            placeholder="e.g., Is our revenue driven by high average order value or broad order volume?",
+            placeholder=(
+                "e.g., Group by region instead, or filter only Completed orders..."
+                if existing_cand is not None
+                else "e.g., Is our revenue driven by high average order value or broad order volume?"
+            ),
         )
 
         a1, a2 = st.columns(2)
@@ -511,7 +632,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             "💬 Ask AI Consultant",
             type="primary",
             use_container_width=True,
-            help="執行兩段式證據諮詢（跟 ERP 相同）：先由顧問提議唯讀 SQL → 實查 Neon 拿真實數據 → 結合數據給出假設並於下方展示 Query Evidence。",
+            help="執行兩段式證據諮詢（與 ERP 相同）：顧問提議唯讀 SQL → 實查 Neon → 結合真實數據提出商業假設並顯示 Query Evidence。",
         ) or preset_question:
             q_text = (preset_question or user_q).strip()
             if not q_text:
@@ -607,18 +728,40 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 except Exception as exc:
                     st.error(f"Fail-Loud Halt: {exc}")
 
+        draft_btn_label = (
+            f"📝 Refine Candidate (v{existing_cand.version} → v{existing_cand.version + 1})"
+            if existing_cand is not None
+            else "📝 Draft Governed Query"
+        )
         if a2.button(
-            "📝 Draft Governed Query",
+            draft_btn_label,
             use_container_width=True,
-            help="根據對話與證據查詢起草候選 SQL、自動判斷語意缺口（REUSE_EXISTING / NEW_SEMANTIC_METRIC）並產生 Candidate Governed Query 審核卡片。",
+            help="起草或迭代微調候選 SQL（已有 v1 時輸入修改意見即可帶入 previous_candidate 升級成 v2），並自動偵測語意缺口。",
         ):
             if not st.session_state["chat_messages"] and not user_q.strip():
                 st.warning("Ask a business question first before drafting a governed query.")
             else:
                 try:
                     structured_fn = _make_structured_llm_callable(api_key)
-                    if not st.session_state["chat_messages"] and user_q.strip():
-                        st.session_state["chat_messages"].append({"role": "user", "content": user_q.strip()})
+                    clean_input = user_q.strip()
+                    prev_draft: PreviousCandidateDraft | None = None
+                    refinement = ""
+
+                    if existing_cand is not None:
+                        prev_draft = PreviousCandidateDraft(
+                            version=existing_cand.version,
+                            title=existing_cand.title,
+                            sql=existing_cand.sql,
+                            plain_language_explanation=existing_cand.plain_language_explanation,
+                            assumptions=list(existing_cand.assumptions or []),
+                            group_by=list(existing_cand.group_by or []),
+                        )
+                        refinement = clean_input or "Refine and improve clarity of the previous candidate query."
+                        if clean_input:
+                            st.session_state["chat_messages"].append({"role": "user", "content": clean_input})
+                    elif not st.session_state["chat_messages"] and clean_input:
+                        st.session_state["chat_messages"].append({"role": "user", "content": clean_input})
+
                     history = [
                         ClarificationTurn(role=m["role"], content=m["content"])
                         for m in st.session_state["chat_messages"]
@@ -628,19 +771,26 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                             history=history,
                             catalog=catalog,
                             evidence_queries=st.session_state.get("evidence_history") or None,
+                            previous_candidate=prev_draft,
+                            refinement_feedback=refinement,
                             dialect="postgres",
                             tenant_id=None,
                             structured_llm_fn=structured_fn,
                         )
                     st.session_state["candidate_bundle"] = cand
                     st.session_state["sent_to_gate"] = False
+                    st.session_state["last_repair"] = None
+                    st.session_state["last_exec_error"] = ""
                     if cand.sql:
                         st.session_state["editor_sql"] = cand.sql
-                    base_spec = cand.query_spec or QuerySpec(
-                        spec_id=f"qs_demo_v{cand.version}",
-                        question=st.session_state["chat_messages"][0]["content"],
-                        dialect="postgres",
-                        output=OutputSpec(max_rows=50, certification="VALIDATED_EXPLORATORY"),
+
+                    # Preserve original business question for downstream dbt description (avoid overwriting with refinement text)
+                    original_q = next(
+                        (m["content"] for m in st.session_state["chat_messages"] if m["role"] == "user"),
+                        cand.title or "Governed analytical model",
+                    )
+                    base_spec = (cand.query_spec or QuerySpec(spec_id=f"qs_demo_v{cand.version}", dialect="postgres")).model_copy(
+                        update={"question": original_q}
                     )
                     if cand.sql:
                         val = validate_and_reconcile_sql(
@@ -651,16 +801,19 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                             one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
                         )
                         st.session_state["last_validation"] = val
-                        st.session_state["active_spec"] = val.reconciled_spec or base_spec
+                        st.session_state["active_spec"] = (val.reconciled_spec or base_spec).model_copy(
+                            update={"question": original_q}
+                        )
                     else:
                         st.session_state["last_validation"] = cand.validation
                         st.session_state["active_spec"] = base_spec
                     st.session_state["last_gap"] = cand.gap
+                    _record_gap_event(original_q, cand.gap)
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Fail-Loud Halt: {exc}")
 
-    # ── Step 2: Candidate Governed Query Card (ERP signature card!) ────────────
+    # ── Step 2: Candidate Governed Query Card (v1 / v2) ────────────────────────
     cand = st.session_state.get("candidate_bundle")
     val = st.session_state.get("last_validation")
     spec: QuerySpec | None = st.session_state.get("active_spec")
@@ -706,9 +859,9 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             if btn_l.button(
                 "Continue Free Consultation",
                 use_container_width=True,
-                help="先不送進 Security Gate，繼續在上方聊天框微調需求。",
+                help="先不送進 Security Gate，繼續在上方輸入框微調需求（按 Refine Candidate 會升級成下一版本）。",
             ):
-                st.info("Type your follow-up refinement in the consultation input box above and click Draft Governed Query again.")
+                st.info("Type your refinement in the input box above and click **Refine Candidate** to upgrade to the next version.")
 
             sent_label = "✅ Sent to Security Gate" if st.session_state["sent_to_gate"] else "Approve & Send to Security Gate →"
             if btn_r.button(
@@ -721,7 +874,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 st.session_state["sent_to_gate"] = True
                 st.rerun()
 
-    # ── Step 3: Semantic Gap + Advanced SQL Editor & Security Gate ─────────────
+    # ── Step 3: Semantic Gap + Security Gate + Auto-Repair + SQL Diff ──────────
     if st.session_state["sent_to_gate"] or (val is not None and cand is None):
         if gap is not None:
             with st.container(border=True):
@@ -735,7 +888,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
         with st.container(border=True):
             sl, sr = st.columns([2.2, 1.8])
             sl.markdown(
-                '<div class="erp-card-title">Advanced SQL Editor & Security Gate (AST / Fanout)</div>',
+                '<div class="erp-card-title">Advanced SQL Editor & Security Gate (AST / Fanout / Auto-Repair)</div>',
                 unsafe_allow_html=True,
             )
             hash_short = spec.compute_spec_hash()[:12] if spec else "unverified"
@@ -753,11 +906,11 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             )
             st.session_state["editor_sql"] = sql_text
 
-            g1, g2, g3 = st.columns(3)
+            g1, g2, g3, g4 = st.columns(4)
             if g1.button(
                 "🛡️ Validate & AST Reconcile",
                 use_container_width=True,
-                help="用 SQLGlot 解析語法樹：驗證唯讀 SELECT、授權白名單、1:N Join Fanout，並把修改後的 SQL 反向同步回 QuerySpec 與 spec_hash。",
+                help="用 SQLGlot 解析語法樹：驗證唯讀 SELECT、授權白名單、1:N Join Fanout，並產生 SQL Diff 與重算 spec_hash。",
             ):
                 base_spec = st.session_state.get("active_spec") or QuerySpec(
                     spec_id="qs_manual_001",
@@ -777,12 +930,58 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 st.session_state["last_validation"] = val
                 st.session_state["active_spec"] = val.reconciled_spec or base_spec
                 st.session_state["last_gap"] = classify_sql_semantic_gap(sql_text, catalog, is_authorized=True)
+                st.session_state["last_exec_error"] = ""
                 st.rerun()
 
             if g2.button(
+                "🔧 Auto-Repair (Bounded)",
+                use_container_width=True,
+                help="有界自動修復（最多 2 次嘗試）：當 SQL 驗證或執行報錯時，呼叫 Gemini 修復並自動重過 AST 安全閘門與 Neon EXPLAIN，顯示修復前後 SQL Diff。",
+            ):
+                err_ctx = st.session_state.get("last_exec_error") or (
+                    "; ".join(val.messages) if (val is not None and val.messages) else "Syntax or schema error in SQL"
+                )
+                try:
+                    llm_text_fn = _make_text_llm_callable(api_key)
+                    base_spec = st.session_state.get("active_spec") or QuerySpec(
+                        spec_id="qs_repair_001", dialect="postgres"
+                    )
+                    schema_hint = "; ".join(
+                        f"{r.name}({', '.join(c.name for c in r.columns)})" for r in catalog.relations
+                    )
+                    with st.spinner("Running bounded SQL Auto-Repair (max 2 attempts) + Neon EXPLAIN..."):
+                        rep = repair_sql_bounded(
+                            sql_text,
+                            err_ctx,
+                            base_spec=base_spec,
+                            allowed_relations={r.name for r in catalog.relations},
+                            adapter=_NeonReadOnlyAdapter(db_url),
+                            server_tenant_id=None,
+                            one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                            schema_hint=schema_hint,
+                            llm_callable=llm_text_fn,
+                            max_attempts=2,
+                        )
+                    st.session_state["last_repair"] = rep
+                    if rep.repaired and rep.repaired_sql:
+                        st.session_state["editor_sql"] = rep.repaired_sql
+                        st.session_state["active_spec"] = rep.reconciled_spec or base_spec
+                        st.session_state["last_validation"] = validate_and_reconcile_sql(
+                            rep.repaired_sql,
+                            st.session_state["active_spec"],
+                            allowed_relations={r.name for r in catalog.relations},
+                            server_tenant_id=None,
+                            one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                        )
+                        st.session_state["last_exec_error"] = ""
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Auto-Repair Fail-Loud Halt: {exc}")
+
+            if g3.button(
                 "✅ Confirm spec_hash",
                 use_container_width=True,
-                help="Human-in-the-Loop 確認：將目前驗證通過的語意指紋 spec_hash 鎖定核准，允許唯讀執行。",
+                help="Human-in-the-Loop 確認：鎖定核准目前驗證通過的 spec_hash，允許唯讀執行。",
             ):
                 if spec is None or val is None or val.status == "BLOCKED":
                     st.error("Run Validate & AST Reconcile first (must not be BLOCKED).")
@@ -790,7 +989,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                     st.session_state["active_spec"] = spec.confirm_intent(confirmed_by="analytics_engineer")
                     st.rerun()
 
-            if g3.button(
+            if g4.button(
                 "▶️ Execute Read-Only (Neon)",
                 type="primary",
                 use_container_width=True,
@@ -808,10 +1007,22 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                             st.warning("Query returned 0 rows (Fail-Loud: no dummy rows substituted).")
                         else:
                             st.session_state["last_preview_df"] = df
+                            st.session_state["last_exec_error"] = ""
                     except Exception as exc:
-                        st.error(f"Neon Read-Only Execution Failed: {exc}")
+                        st.session_state["last_exec_error"] = str(exc)
+                        st.error(f"Neon Read-Only Execution Failed (try **🔧 Auto-Repair**): {exc}")
 
+            # Validation & Repair Status + SQL Diff
             val = st.session_state.get("last_validation")
+            rep = st.session_state.get("last_repair")
+            if rep is not None:
+                if rep.repaired:
+                    st.success(f"🔧 **Auto-Repair Succeeded** in {rep.attempts} attempt(s) — please re-confirm `spec_hash`.")
+                    if rep.sql_diff:
+                        st.code(rep.sql_diff, language="diff")
+                else:
+                    st.error(f"🔧 **Auto-Repair Stopped** ({', '.join(rep.failure_codes)}): {'; '.join(rep.messages)}")
+
             if val is not None:
                 if val.status == "BLOCKED":
                     st.error(f"**Validation Status: BLOCKED (`{', '.join(val.reason_codes)}`)** — {'; '.join(val.messages)}")
@@ -819,18 +1030,71 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                     st.warning(f"**Validation Status: REQUIRES_AE_REVIEW (`{', '.join(val.reason_codes)}`)** — {'; '.join(val.messages)}")
                 else:
                     st.success("**Validation Status: VALID** — Passed read-only, allowlist, and 1:N join fanout AST gates.")
+                if val.sql_diff:
+                    with st.expander("View SQL Diff (vs. prior QuerySpec)", expanded=True):
+                        st.code(val.sql_diff, language="diff")
 
+        # Live Preview + 1-Click Promote to Build!
         preview_df = st.session_state.get("last_preview_df")
         if isinstance(preview_df, pd.DataFrame) and not preview_df.empty:
             with st.container(border=True):
-                pl, pr = st.columns([3, 1])
+                pl, pr = st.columns([2.5, 1.5])
                 pl.caption(f"Provenance: `neon_postgres_readonly` (postgres) · **{len(preview_df)} rows**")
-                pr.markdown(
-                    f'<div class="erp-pill-row">{_pill(f"Sandbox Verified ({len(preview_df)} rows)", "green")}</div>',
-                    unsafe_allow_html=True,
-                )
+                if pr.button(
+                    "🚀 Promote to Build →",
+                    type="primary",
+                    use_container_width=True,
+                    help="一鍵帶著已驗證的 QuerySpec、spec_hash 與預覽結果自動切換到 3️⃣ Build 頁籤升格成 dbt Gold 資產！",
+                ):
+                    st.session_state["active_tab"] = NAV_TABS[2]
+                    st.rerun()
                 st.dataframe(preview_df, use_container_width=True, hide_index=True)
-                st.info("👉 Ready to promote? Click **3️⃣ Promote to Build (dbt + Contract + BI)** tab above to synthesize governed dbt & Lightdash artifacts.")
+
+    # ── Step 4: Live Catalog Search Cards (ERP parity) ─────────────────────────
+    with st.container(border=True):
+        st.markdown('<div class="erp-card-title">🔍 Live dbt Metadata Catalog Search</div>', unsafe_allow_html=True)
+        default_search = (
+            st.session_state["chat_messages"][-1]["content"]
+            if st.session_state["chat_messages"]
+            else "revenue"
+        )
+        search_q = st.text_input(
+            "Search certified metrics & governed Gold tables:",
+            value=default_search[:80],
+            key="catalog_search_box",
+        )
+        search_res = catalog.search(search_q)
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            st.markdown(f"**Matched Certified Metrics ({len(search_res.metrics)})**")
+            if search_res.metrics:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"metric": m.name, "label": m.label, "table": m.source_relation, "agg": f"{m.measure_agg}({m.measure_expr})"}
+                            for m in search_res.metrics
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("No exact certified metric matched — candidate for `NEW_SEMANTIC_METRIC`.")
+        with mc2:
+            st.markdown(f"**Related Governed Tables ({len(search_res.relations)})**")
+            if search_res.relations:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"relation": r.name, "layer": r.layer, "columns": len(r.columns), "description": r.description}
+                            for r in search_res.relations
+                        ]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("No matching table in governed catalog.")
 
 
 def _render_tab3_build() -> None:
@@ -841,12 +1105,14 @@ def _render_tab3_build() -> None:
 
     if spec is None or preview_df is None or preview_df.empty:
         st.info(
-            "Complete **Tab 2: Explore & AST Security Gate** (Draft → Approve → Confirm `spec_hash` → Execute Read-Only) "
-            "first, then come here to promote the verified query into governed dbt & BI artifacts."
+            "Complete **2️⃣ Explore & Security Gate** (Draft → Approve → Confirm `spec_hash` → Execute Read-Only → Promote to Build) "
+            "first, then return here to synthesize dbt Gold SQL & Data Contracts."
         )
+        if st.button("← Go to Explore & Security Gate", type="primary"):
+            st.session_state["active_tab"] = NAV_TABS[1]
+            st.rerun()
         return
 
-    # ── ERP Linked Explore Query Summary Card ──────────────────────────────────
     with st.container(border=True):
         ll, lr = st.columns([2, 2])
         title_txt = cand.title if (cand and cand.title) else (spec.question[:70] or "Governed Analytical Model")
@@ -867,7 +1133,6 @@ def _render_tab3_build() -> None:
         with st.expander("View Synced SQL from Explore", expanded=False):
             st.code(st.session_state.get("editor_sql") or spec.compile_sql(), language="sql")
 
-    # ── ERP Synthesize Card ────────────────────────────────────────────────────
     with st.container(border=True):
         st.markdown(
             '<div class="erp-card-title">Synthesize dbt Gold Model, Enforced Data Contract & Standalone Lightdash YAML</div>',
@@ -881,7 +1146,7 @@ def _render_tab3_build() -> None:
         if st.button(
             "Build dbt / Data Contract / Lightdash & Run Isolated Validation",
             type="primary",
-            help="同步產出 dbt Gold SQL（自動轉 {{ ref(...) }}）、Enforced Data Contract (schema.yml)、Lightdash Semantic YAML，並對沙盒資料執行 not_null 與主鍵唯一性契約驗證。",
+            help="同步產出 dbt Gold SQL（自動轉 {{ ref(...) }}）、Enforced Data Contract (schema.yml)、Lightdash Semantic YAML，並執行隔離契約測試。",
         ):
             grain_cols = [g.strip() for g in grain_input.split(",") if g.strip()]
             if not grain_cols:
@@ -938,6 +1203,7 @@ def _render_tab3_build() -> None:
             ]
             st.session_state["build_bundle"] = bundle
             st.session_state["build_validation_checks"] = checks
+            st.session_state["draft_pr_result"] = None
 
     bundle = st.session_state.get("build_bundle")
     checks = st.session_state.get("build_validation_checks")
@@ -955,7 +1221,6 @@ def _render_tab3_build() -> None:
             )
         else:
             st.error("❌ **Isolated Sandbox Validation: FAILED** — Fix grain/null violations before opening Draft PR.")
-            st.dataframe(pd.DataFrame(checks), use_container_width=True, hide_index=True)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -967,60 +1232,233 @@ def _render_tab3_build() -> None:
                 st.markdown('<div class="erp-card-title">Enforced Data Contract (schema.yml)</div>', unsafe_allow_html=True)
                 st.code(bundle.schema_yaml, language="yaml")
 
-        with st.container(border=True):
-            bl, br = st.columns([3, 1])
-            bl.markdown('<div class="erp-card-title">Lightdash Semantic Status & BI Asset Manifest</div>', unsafe_allow_html=True)
-            bl.caption("Bundled into a single Draft PR alongside dbt SQL & Data Contract. For Power BI, the same builder outputs PBIP TMDL.")
-            br.markdown(f'<div class="erp-pill-row">{_pill("STAGING_LOCAL_ONLY", "amber")}</div>', unsafe_allow_html=True)
-            st.code(bundle.lightdash_yaml, language="yaml")
+        n1, n2 = st.columns(2)
+        if n1.button("Inspect in 4️⃣ Lightdash BI →", use_container_width=True):
+            st.session_state["active_tab"] = NAV_TABS[3]
+            st.rerun()
+        if n2.button("Submit Draft PR in 5️⃣ Review & Release →", type="primary", use_container_width=True):
+            st.session_state["active_tab"] = NAV_TABS[4]
+            st.rerun()
 
 
-def _render_tab4_elementary_catalog(catalog) -> None:
+def _render_tab4_lightdash() -> None:
+    ld_status = _get_lightdash_status()
+    bundle = st.session_state.get("build_bundle")
+
     with st.container(border=True):
-        st.markdown('<div class="erp-card-title">Elementary Data Observability Report (Generated Live from Neon PostgreSQL)</div>', unsafe_allow_html=True)
-        if ELEMENTARY_REPORT_PATH.exists():
-            st.caption(
-                f"Real interactive HTML report (`{ELEMENTARY_REPORT_PATH.name}`, "
-                f"{ELEMENTARY_REPORT_PATH.stat().st_size / 1024:.0f} KB) built via `dbt build` + `dbt snapshot` + `edr report` against Neon."
-            )
-            html_content = ELEMENTARY_REPORT_PATH.read_text(encoding="utf-8", errors="ignore")
-            components.html(html_content, height=820, scrolling=True)
-        else:
-            st.warning(f"Elementary report not found at `{ELEMENTARY_REPORT_PATH}`.")
+        hl, hr = st.columns([2.5, 1.5])
+        hl.markdown('<div class="erp-card-title">Lightdash Semantic Status & BI Asset Manifest</div>', unsafe_allow_html=True)
+        hl.caption(ld_status["message"])
 
-    c1, c2 = st.columns(2)
-    with c1:
+        status_label = ld_status["lightdash_status"]
+        pill_var = "green" if ld_status.get("connected") else "amber"
+        hr.markdown(f'<div class="erp-pill-row">{_pill(status_label, pill_var)}</div>', unsafe_allow_html=True)
+
+        if ld_status.get("connected") and ld_status.get("explore_base_url"):
+            st.link_button("Open Live Lightdash BI →", ld_status["explore_base_url"], type="primary")
+        else:
+            with st.expander("⚙️ How to connect Lightdash Cloud to this Streamlit Demo"):
+                st.markdown(
+                    "1. Create a **Lightdash Cloud** project connected to the same **Neon PostgreSQL** database and `examples/jaffle_dbt` repo.\n"
+                    "2. Add these 3 keys to **Streamlit Cloud → Settings → Secrets**:\n"
+                    "```toml\n"
+                    'LIGHTDASH_URL = "https://app.lightdash.cloud"\n'
+                    'LIGHTDASH_API_KEY = "ldpat_your_token"\n'
+                    'LIGHTDASH_PROJECT_UUID = "your-project-uuid"\n'
+                    "```\n"
+                    "3. Refresh the app — the badge automatically switches to **`DEPLOYED`** and enables **`Open Live Lightdash BI →`**."
+                )
+
+    if bundle is not None:
+        c1, c2 = st.columns([1.2, 1.8])
+        with c1:
+            with st.container(border=True):
+                st.markdown('<div class="erp-card-title">BI Asset Manifest</div>', unsafe_allow_html=True)
+                st.json(bundle.bi_asset_manifest.model_dump())
+        with c2:
+            with st.container(border=True):
+                st.markdown('<div class="erp-card-title">Generated Lightdash Semantic YAML</div>', unsafe_allow_html=True)
+                st.caption("Decoupled from `schema.yml`. For Power BI (PBIP), the same builder outputs `.tmdl` definitions.")
+                st.code(bundle.lightdash_yaml, language="yaml")
+    else:
+        st.info("Build a model in **3️⃣ Build (dbt + Contract)** first to preview its generated Lightdash Semantic YAML & BI Asset Manifest.")
+
+
+def _render_tab5_review_release() -> None:
+    st.subheader("Review & Release: Draft PR Bundle · Semantic Promotions · dlt Source Ingestion")
+    bundle = st.session_state.get("build_bundle")
+    checks = st.session_state.get("build_validation_checks")
+    ld_status = _get_lightdash_status()
+
+    # ── 1. Draft PR Bundle Orchestrator ────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown('<div class="erp-card-title">1. Governed Draft PR Bundle (Atomic Change)</div>', unsafe_allow_html=True)
+        st.caption(
+            "Bundles `dbt SQL`, `schema.yml` (Enforced Data Contract), and `lightdash.yml` into a single Draft PR "
+            "for Analytics Engineer + Business Owner review. Never merges automatically."
+        )
+        if bundle is None:
+            st.info("Build & validate a model in **3️⃣ Build (dbt + Contract)** first to generate a Draft PR Bundle.")
+        else:
+            m_name = bundle.contract.model_name
+            if st.button(
+                "📦 Generate / Submit Draft PR Bundle",
+                type="primary",
+                help="打包三份檔案成單一 Draft PR（若 Secrets 有設 GITHUB_TOKEN 與 AE_GITHUB_REPO 則實際開出 GitHub Draft PR，否則產生完整 DRY_RUN_BUNDLE 預覽）。",
+            ):
+                val_summary = "\n".join(
+                    f"- {'PASS' if c['passed'] else 'FAIL'} `{c['check']}`: {c['detail']}" for c in (checks or [])
+                )
+                files_map = {
+                    f"models/gold/{m_name}.sql": bundle.dbt_sql,
+                    f"models/gold/{m_name}_schema.yml": bundle.schema_yaml,
+                    f"models/gold/{m_name}_lightdash.yml": bundle.lightdash_yaml,
+                }
+                pr_res = orchestrate_draft_pr(
+                    model_name=m_name,
+                    question=bundle.contract.query_spec.question or m_name,
+                    files=files_map,
+                    validation_summary=val_summary or "Isolated Neon validation passed.",
+                    lightdash_status=ld_status["lightdash_status"],
+                    github_token=_resolve_secret("GITHUB_TOKEN"),
+                    github_repo=_resolve_secret("AE_GITHUB_REPO"),
+                )
+                st.session_state["draft_pr_result"] = pr_res
+
+            pr_res = st.session_state.get("draft_pr_result")
+            if pr_res is not None:
+                pill_v = "green" if pr_res.pr_mode == "DRAFT_PR_CREATED" else "amber"
+                st.markdown(
+                    f'{_pill(pr_res.pr_mode, pill_v)} &nbsp; **Branch:** `{pr_res.branch_name}` · **Title:** `{pr_res.title}`',
+                    unsafe_allow_html=True,
+                )
+                if pr_res.pr_url:
+                    st.link_button("Open Draft PR on GitHub →", pr_res.pr_url, type="primary")
+                else:
+                    st.caption(pr_res.message)
+                with st.expander("Preview Draft PR Markdown Body", expanded=True):
+                    st.markdown(pr_res.body_markdown)
+
+    # ── 2. Semantic Promotion Candidates ───────────────────────────────────────
+    col_p, col_i = st.columns(2)
+    with col_p:
         with st.container(border=True):
-            st.markdown('<div class="erp-card-title">Certified Metrics (Single Source of Truth)</div>', unsafe_allow_html=True)
-            metrics_df = pd.DataFrame(
-                [
-                    {
-                        "metric": m.name,
-                        "label": m.label,
-                        "source_relation": m.source_relation,
-                        "expr": f"{m.measure_agg.upper()}({m.measure_expr})" if m.measure_agg else m.measure_expr,
-                        "dimensions": ", ".join(m.dimensions),
-                    }
-                    for m in catalog.metrics
-                ]
-            )
-            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-    with c2:
+            st.markdown('<div class="erp-card-title">2. Semantic Gap Backlog & Promotion Queue</div>', unsafe_allow_html=True)
+            st.caption("Tracks unresolved `NEW_SEMANTIC_METRIC` / `SOURCE_GAP` queries from Explore into governed asset proposals.")
+            gaps = st.session_state.get("gap_events") or []
+            if gaps:
+                st.dataframe(pd.DataFrame(gaps), use_container_width=True, hide_index=True)
+            else:
+                st.info("No semantic gap events recorded in this session yet. Draft a `NEW_SEMANTIC_METRIC` query in Tab 2 to populate.")
+
+    # ── 3. Missing Source dlt Ingestion Proposal ───────────────────────────────
+    with col_i:
         with st.container(border=True):
-            st.markdown('<div class="erp-card-title">Governed Gold Relations & Grains</div>', unsafe_allow_html=True)
-            rels_df = pd.DataFrame(
-                [
-                    {
-                        "relation": r.name,
-                        "layer": r.layer,
-                        "schema": r.schema_name,
-                        "columns": len(r.columns),
-                        "description": r.description,
-                    }
-                    for r in catalog.relations
-                ]
+            st.markdown('<div class="erp-card-title">3. Missing Source `dlt` Ingestion Proposal</div>', unsafe_allow_html=True)
+            st.caption("When Explore hits a `SOURCE_GAP`, propose an allowlisted `dlt` connector + Bronze schema contract instead of fabricating SQL.")
+            src_type = st.selectbox(
+                "Connector Type (try `unapproved_scraper` to test Fail-Loud block)",
+                options=[*sorted(APPROVED_CONNECTOR_REGISTRY), "unapproved_scraper"],
             )
-            st.dataframe(rels_df, use_container_width=True, hide_index=True)
+            src_locator = st.text_input("Source Locator", value="s3://jaffle-raw/marketing_campaigns_2025.parquet")
+            target_tbl = st.text_input("Target Bronze Table", value="bronze_marketing_campaigns")
+            if st.button(
+                "🔌 Propose dlt Ingestion Contract",
+                use_container_width=True,
+                help="檢查連接器是否在白名單中；合法則生成宣告式 dlt Python scaffold 與 Bronze 資料契約，非法則 Fail-Loud 攔截。",
+            ):
+                prop = propose_source_ingestion(
+                    source_type=src_type,
+                    source_locator=src_locator,
+                    target_bronze_table=target_tbl,
+                )
+                st.session_state["ingestion_proposal"] = prop
+
+            prop = st.session_state.get("ingestion_proposal")
+            if prop is not None:
+                if prop.status == "BLOCKED":
+                    st.error(f"🚫 **BLOCKED (`{', '.join(prop.reason_codes)}`)**: {'; '.join(prop.messages)}")
+                else:
+                    st.success(f"✅ **{prop.status}** — Target: `raw.{prop.target_bronze_table}`")
+                    if prop.dlt_pipeline_code:
+                        with st.expander("View Generated dlt Pipeline Scaffold"):
+                            st.code(prop.dlt_pipeline_code, language="python")
+
+
+def _render_tab6_observability(db_url: str, catalog) -> None:
+    view_mode = st.radio(
+        "Select Observability / Documentation Surface:",
+        options=[
+            "📊 Elementary Data Observability Report",
+            "🗺️ dbt Docs & Lineage DAG (Static)",
+            "🗄️ Live dbt Table Explorer (Neon)",
+        ],
+        horizontal=True,
+    )
+
+    if view_mode.startswith("📊"):
+        with st.container(border=True):
+            st.markdown('<div class="erp-card-title">Elementary Data Observability Report (Generated Live from Neon PostgreSQL)</div>', unsafe_allow_html=True)
+            if ELEMENTARY_REPORT_PATH.exists():
+                st.caption(
+                    f"Real interactive HTML report (`{ELEMENTARY_REPORT_PATH.name}`, "
+                    f"{ELEMENTARY_REPORT_PATH.stat().st_size / 1024:.0f} KB) built via `dbt build` + `dbt snapshot` + `edr report` against Neon."
+                )
+                components.html(ELEMENTARY_REPORT_PATH.read_text(encoding="utf-8", errors="ignore"), height=840, scrolling=True)
+            else:
+                st.warning(f"Elementary report not found at `{ELEMENTARY_REPORT_PATH}`.")
+
+    elif view_mode.startswith("🗺️"):
+        with st.container(border=True):
+            st.markdown('<div class="erp-card-title">dbt Docs & Interactive Lineage DAG (Generated from Neon)</div>', unsafe_allow_html=True)
+            if DBT_DOCS_STATIC_PATH.exists():
+                st.caption(
+                    f"Real static `dbt docs` site (`{DBT_DOCS_STATIC_PATH.name}`, "
+                    f"{DBT_DOCS_STATIC_PATH.stat().st_size / 1024:.0f} KB). Click the bottom-right teal icon inside the frame to expand the Lineage Graph!"
+                )
+                components.html(DBT_DOCS_STATIC_PATH.read_text(encoding="utf-8", errors="ignore"), height=840, scrolling=True)
+            else:
+                st.warning(f"Static dbt docs not found at `{DBT_DOCS_STATIC_PATH}`.")
+
+    else:
+        with st.container(border=True):
+            st.markdown('<div class="erp-card-title">🗄️ Live dbt & Medallion Table Explorer (Neon PostgreSQL)</div>', unsafe_allow_html=True)
+            st.caption("Inspect live schemas, row counts, column types, and top 25 rows directly from Neon.")
+            try:
+                tbls_df = execute_neon_readonly(
+                    """
+                    SELECT table_schema, table_name, table_type
+                    FROM information_schema.tables
+                    WHERE table_schema IN ('raw', 'snapshots', 'gold', 'dbt_dev_dbt_silver', 'dbt_dev_dbt_gold', 'dbt_snapshots', 'quarantine', 'ci_pr')
+                    ORDER BY table_schema, table_name
+                    """,
+                    max_rows=100,
+                    db_url=db_url,
+                )
+                if tbls_df.empty:
+                    st.info("No tables found in Neon demo schemas.")
+                else:
+                    options = [f"{r['table_schema']}.{r['table_name']}" for _, r in tbls_df.iterrows()]
+                    chosen = st.selectbox("Select Neon Table / View to inspect:", options=options)
+                    schema_n, table_n = chosen.split(".", 1)
+                    c_meta, c_prev = st.columns([1, 2])
+                    with c_meta:
+                        cols_df = execute_neon_readonly(
+                            f"SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                            f"WHERE table_schema = '{schema_n}' AND table_name = '{table_n}' ORDER BY ordinal_position",
+                            max_rows=100,
+                            db_url=db_url,
+                        )
+                        st.markdown(f"**Schema (`{chosen}`)**")
+                        st.dataframe(cols_df, use_container_width=True, hide_index=True)
+                    with c_prev:
+                        cnt_df = execute_neon_readonly(f'SELECT COUNT(*) AS row_count FROM "{schema_n}"."{table_n}"', max_rows=1, db_url=db_url)
+                        row_cnt = int(cnt_df.iloc[0]["row_count"])
+                        st.markdown(f"**Live Data Preview ({row_cnt:,} total rows · showing top 25)**")
+                        data_df = execute_neon_readonly(f'SELECT * FROM "{schema_n}"."{table_n}" LIMIT 25', max_rows=25, db_url=db_url)
+                        st.dataframe(data_df, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Table Explorer query failed: {exc}")
 
 
 def main() -> None:
@@ -1052,26 +1490,22 @@ def main() -> None:
     st.title("🏛️ AI Analytics Workbench & Data Governance Lab")
     st.caption(
         "Standardizing the workflow from ad-hoc exploration to governed dbt Data Contracts, "
-        "SCD Type 2 snapshots, Write-Audit-Publish quality gates, and CI Semantic Drift protection."
+        "SCD Type 2 snapshots, Write-Audit-Publish quality gates, CI Semantic Drift protection, and Draft PR release."
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        [
-            "1️⃣ Governance Timeline (Day 5/10/15/20)",
-            "2️⃣ Explore & AST Security Gate",
-            "3️⃣ Promote to Build (dbt + Contract + BI)",
-            "4️⃣ Elementary Observability & Catalog",
-        ]
-    )
-
-    with tab1:
+    active = _render_nav_bar()
+    if active == NAV_TABS[0]:
         _render_tab1_timeline(db_url, state)
-    with tab2:
+    elif active == NAV_TABS[1]:
         _render_tab2_explore(db_url, api_key, catalog)
-    with tab3:
+    elif active == NAV_TABS[2]:
         _render_tab3_build()
-    with tab4:
-        _render_tab4_elementary_catalog(catalog)
+    elif active == NAV_TABS[3]:
+        _render_tab4_lightdash()
+    elif active == NAV_TABS[4]:
+        _render_tab5_review_release()
+    else:
+        _render_tab6_observability(db_url, catalog)
 
 
 if __name__ == "__main__":
