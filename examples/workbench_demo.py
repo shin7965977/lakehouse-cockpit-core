@@ -151,13 +151,17 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
         st.markdown("## 🏛️ AI Analytics Workbench")
         st.caption("Single-Company Jaffle Shop · Neon PostgreSQL · dbt + Elementary")
 
-        default_key = _resolve_secret("GEMINI_API_KEY")
-        api_key = st.text_input(
-            "Gemini API Key (for Tab 2 AI Chat)",
-            value=default_key,
-            type="password",
-            help="Optional for Labs (Tab 1, AST Gate, Tab 3, Tab 4). Required for live AI consultation in Tab 2.",
-        )
+        server_key = _resolve_secret("GEMINI_API_KEY")
+        if server_key:
+            st.success("🔐 Gemini AI: Connected (Server Secret)")
+            api_key = server_key
+        else:
+            api_key = st.text_input(
+                "Gemini API Key (for Tab 2 AI Chat)",
+                value="",
+                type="password",
+                help="Optional for Labs (Tab 1, AST Gate, Tab 3, Tab 4). Required for live AI consultation in Tab 2.",
+            )
         st.caption(
             f"Session LLM quota: **{st.session_state['llm_calls']} / {MAX_LLM_CALLS_PER_SESSION}** · Model: `{DEFAULT_GEMINI_MODEL}`"
         )
