@@ -264,14 +264,17 @@ def _check_join_fanout(
 
     from_clause = tree.args.get("from_") or tree.args.get("from")
     base_tbl = ""
+    alias_to_table: dict[str, str] = {}
     if from_clause and isinstance(from_clause.this, exp.Table):
         base_tbl = from_clause.this.name.lower()
+        alias_to_table[from_clause.this.alias_or_name.lower()] = base_tbl
 
     pair_set = {(a.lower(), b.lower()) for a, b in one_to_many_joins}
     fanout_parents: set[str] = set()
     for j in joins:
         if isinstance(j.this, exp.Table):
             right_tbl = j.this.name.lower()
+            alias_to_table[j.this.alias_or_name.lower()] = right_tbl
             if (base_tbl, right_tbl) in pair_set:
                 fanout_parents.add(base_tbl)
             elif (right_tbl, base_tbl) in pair_set:
@@ -282,7 +285,8 @@ def _check_join_fanout(
 
     for agg in tree.find_all(exp.Sum, exp.Avg):
         for col in agg.find_all(exp.Column):
-            tbl_ref = (col.table or "").lower()
+            raw_ref = (col.table or "").lower()
+            tbl_ref = alias_to_table.get(raw_ref, raw_ref)
             if tbl_ref in fanout_parents or (not tbl_ref and base_tbl in fanout_parents):
                 return (
                     False,

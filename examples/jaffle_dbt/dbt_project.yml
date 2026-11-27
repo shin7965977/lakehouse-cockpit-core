@@ -1,0 +1,21 @@
+name: 'jaffle_governance_demo'
+version: '1.0.0'
+config-version: 2
+
+profile: 'jaffle_neon'
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  jaffle_governance_demo:
+    silver:
+      +materialized: view
+      +schema: dbt_silver
+    gold:
+      +materialized: table
+      +schema: dbt_gold
+  elementary:
+    +schema: elementary
