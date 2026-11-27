@@ -1390,7 +1390,7 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
         "Select Observability / Documentation Surface:",
         options=[
             "📊 Elementary Data Observability (Live Neon)",
-            "🗺️ dbt Lineage DAG & Docs",
+            "🗺️ dbt Lineage DAG & Model Catalog",
             "🗄️ Live dbt Table Explorer (Neon)",
         ],
         horizontal=True,
@@ -1399,29 +1399,29 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
     if view_mode.startswith("📊"):
         with st.container(border=True):
             hl, hr = st.columns([2.5, 1.5])
-            hl.markdown(
-                '<div class="erp-card-title">Elementary Data Observability Dashboard (Live from Neon `dbt_dev_elementary`)</div>',
-                unsafe_allow_html=True,
-            )
+            hl.markdown('<div class="erp-card-title">Elementary Data Observability Dashboard (Live from Neon `dbt_dev_elementary`)</div>', unsafe_allow_html=True)
             hl.caption(
-                "Queried live from Neon PostgreSQL `dbt_dev_elementary` tables populated by `dbt build` + `dbt snapshot`. "
-                "(Note: Browsers block 5 MB React SPAs inside sandboxed `srcdoc` iframes, so we render live native telemetry + full HTML download.)"
+                "Queried live from Elementary's PostgreSQL metadata tables populated by `dbt build` + `dbt snapshot` + `edr report`."
             )
             if ELEMENTARY_REPORT_PATH.exists():
                 hr.download_button(
-                    "⬇️ Download Full elementary_report.html (5.1 MB)",
+                    "⬇️ Download Full Elementary HTML (5 MB)",
                     data=ELEMENTARY_REPORT_PATH.read_bytes(),
                     file_name="elementary_report.html",
                     mime="text/html",
-                    type="primary",
                     use_container_width=True,
-                    help="下載完整的 5.1 MB 互動式 Elementary HTML 報表，在本機瀏覽器打開即可操作完整原版 UI。",
+                    help="下載完整版互動式 Elementary HTML 報表（本機瀏覽器開啟不受 iframe 沙盒限制）。",
                 )
 
             try:
                 tests_df = execute_neon_readonly(
                     """
-                    SELECT table_name, column_name, test_type, test_sub_type, status, detected_at
+                    SELECT
+                        table_name,
+                        COALESCE(column_name, '-') AS column_name,
+                        test_unique_id,
+                        status,
+                        detected_at
                     FROM dbt_dev_elementary.elementary_test_results
                     ORDER BY detected_at DESC
                     LIMIT 50
@@ -1431,7 +1431,12 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
                 )
                 runs_df = execute_neon_readonly(
                     """
-                    SELECT name, resource_type, status, ROUND(execution_time::numeric, 3) AS exec_sec, generated_at
+                    SELECT
+                        name,
+                        resource_type,
+                        status,
+                        ROUND(execution_time::numeric, 2) AS exec_sec,
+                        generated_at
                     FROM dbt_dev_elementary.dbt_run_results
                     WHERE unique_id LIKE '%.jaffle_governance_demo.%'
                     ORDER BY generated_at DESC
@@ -1440,144 +1445,80 @@ def _render_tab6_observability(db_url: str, catalog) -> None:
                     max_rows=50,
                     db_url=db_url,
                 )
-                models_df = execute_neon_readonly(
-                    """
-                    SELECT name, schema_name, materialization, description
-                    FROM dbt_dev_elementary.dbt_models
-                    WHERE package_name = 'jaffle_governance_demo'
-                    ORDER BY schema_name, name
-                    """,
-                    max_rows=50,
-                    db_url=db_url,
-                )
+                total_tests = len(tests_df)
+                passed_tests = int((tests_df["status"].str.lower() == "pass").sum()) if not tests_df.empty else 0
+                pass_rate = f"{(passed_tests / total_tests * 100):.0f}%" if total_tests > 0 else "N/A"
+                avg_sec = float(runs_df["exec_sec"].astype(float).mean()) if not runs_df.empty else 0.0
 
-                total_t = len(tests_df)
-                passed_t = int((tests_df["status"].str.lower() == "pass").sum()) if not tests_df.empty else 0
-                pass_rate = (passed_t / total_t * 100.0) if total_t else 100.0
                 k1, k2, k3, k4 = st.columns(4)
-                k1.metric("dbt Tests Executed", f"{total_t}")
-                k2.metric("Tests Passed", f"{passed_t} / {total_t}")
-                k3.metric("Test Pass Rate", f"{pass_rate:.0f}%")
-                k4.metric("Governed dbt Models", f"{len(models_df)}")
+                k1.metric("dbt Data Tests Executed", f"{total_tests}")
+                k2.metric("Test Pass Rate", pass_rate)
+                k3.metric("Jaffle dbt Invocations", f"{len(runs_df)}")
+                k4.metric("Avg Execution Time", f"{avg_sec:.2f}s")
 
                 st.markdown("#### ✅ Live Elementary Test Results (`dbt_dev_elementary.elementary_test_results`)")
                 if not tests_df.empty:
                     st.dataframe(tests_df, use_container_width=True, hide_index=True)
                 else:
-                    st.info("No test results recorded in `dbt_dev_elementary.elementary_test_results` yet.")
+                    st.info("No test results recorded yet.")
 
-                c_m, c_r = st.columns(2)
-                with c_m:
-                    st.markdown("#### 📦 dbt Models Registered (`dbt_models`)")
-                    st.dataframe(models_df, use_container_width=True, hide_index=True)
-                with c_r:
-                    st.markdown("#### ⏱️ Recent dbt Run Results (`dbt_run_results`)")
+                st.markdown("#### ⏱️ dbt Build & Snapshot Run History (`dbt_dev_elementary.dbt_run_results`)")
+                if not runs_df.empty:
                     st.dataframe(runs_df, use_container_width=True, hide_index=True)
             except Exception as exc:
-                st.error(f"Failed to query live Elementary tables from Neon: {exc}")
+                st.error(f"Could not query `dbt_dev_elementary` tables: {exc}")
 
     elif view_mode.startswith("🗺️"):
         with st.container(border=True):
             dl, dr = st.columns([2.5, 1.5])
-            dl.markdown('<div class="erp-card-title">Medallion & SCD Type 2 dbt Lineage DAG</div>', unsafe_allow_html=True)
-            dl.caption("Visualizes the full Bronze → Silver → SCD2 Snapshot → Gold → Semantic Layer lineage built in Neon.")
+            dl.markdown('<div class="erp-card-title">dbt Lineage DAG & Model Catalog (Neon PostgreSQL)</div>', unsafe_allow_html=True)
+            dl.caption("Interactive Medallion + SCD Type 2 lineage graph & live dbt model metadata from Neon.")
             if DBT_DOCS_STATIC_PATH.exists():
                 dr.download_button(
-                    "⬇️ Download Static dbt_docs_static.html (3.9 MB)",
+                    "⬇️ Download Static dbt Docs HTML (3.9 MB)",
                     data=DBT_DOCS_STATIC_PATH.read_bytes(),
                     file_name="dbt_docs_static.html",
                     mime="text/html",
-                    type="primary",
                     use_container_width=True,
-                    help="下載完整的 3.9 MB 靜態 dbt docs 網站，在本機瀏覽器開啟可操作完整原版 DAG。",
+                    help="下載完整版靜態 dbt docs 網站（本機瀏覽器開啟可互動探索完整血緣圖）。",
                 )
 
-            lineage_html = """
-            <div style="background:#ffffff;padding:12px;border-radius:8px;">
-              <pre class="mermaid">
-              flowchart LR
-                subgraph RAW["🥉 Raw (Neon raw.*)"]
-                  R1["raw_orders"]
-                  R2["raw_customers"]
-                  R3["raw_order_items"]
-                  R4["raw_products"]
-                end
-                subgraph SILVER["🥈 Silver & Snapshot"]
-                  S1["stg_orders (view)"]
-                  S2["stg_customers (view)"]
-                  SN["snap_customers_dbt (SCD Type 2)"]
-                end
-                subgraph GOLD["🥇 Gold (Kimball Star Schema)"]
-                  G1["fct_orders_dbt (enforced contract)"]
-                  G2["dim_customers_dbt (SCD2)"]
-                  G3["fct_order_items"]
-                  G4["dim_products"]
-                  G5["mart_customer_value"]
-                end
-                subgraph SEM["📊 Semantic & BI"]
-                  B1["Lightdash Cloud / PBIP TMDL"]
-                  B2["AI Analytics Workbench"]
-                  B3["Elementary Observability"]
-                end
-                R1 --> S1 --> G1
-                R2 --> S2 --> SN --> G2
-                R3 --> G3
-                R4 --> G4
-                G1 --> G5
-                G2 --> G5
-                G1 --> B1
-                G2 --> B1
-                G5 --> B2
-                G1 -.-> B3
-                G2 -.-> B3
-              </pre>
-            </div>
-            <script type="module">
-              import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-              mermaid.initialize({ startOnLoad: true, theme: 'default' });
-            </script>
-            """
-            components.html(lineage_html, height=420, scrolling=True)
+            st.graphviz_chart(
+                """
+                digraph dbt_lineage {
+                    rankdir=LR;
+                    node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];
+                    raw_orders [label="raw.raw_orders\n(Source)", fillcolor="#e2e8f0", color="#64748b"];
+                    raw_customers [label="raw.raw_customers\n(Source)", fillcolor="#e2e8f0", color="#64748b"];
+                    stg_orders [label="dbt_silver.stg_orders\n(Silver View)", fillcolor="#dbeafe", color="#2563eb"];
+                    stg_customers [label="dbt_silver.stg_customers\n(Silver View)", fillcolor="#dbeafe", color="#2563eb"];
+                    snap_customers [label="dbt_snapshots.snap_customers_dbt\n(SCD Type 2 Snapshot)", fillcolor="#fef3c7", color="#d97706"];
+                    fct_orders [label="dbt_gold.fct_orders_dbt\n(Gold Fact · Enforced Contract)", fillcolor="#dcfce7", color="#16a34a"];
+                    dim_customers [label="dbt_gold.dim_customers_dbt\n(Gold SCD2 Dim)", fillcolor="#dcfce7", color="#16a34a"];
+                    lightdash [label="Lightdash BI & AI Workbench\n(Semantic Layer)", fillcolor="#ede9fe", color="#7c3aed"];
 
-        c1, c2 = st.columns(2)
-        with c1:
-            with st.container(border=True):
-                st.markdown('<div class="erp-card-title">Certified Metrics (Single Source of Truth)</div>', unsafe_allow_html=True)
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            {
-                                "metric": m.name,
-                                "label": m.label,
-                                "source_relation": m.source_relation,
-                                "expr": f"{m.measure_agg.upper()}({m.measure_expr})" if m.measure_agg else m.measure_expr,
-                                "dimensions": ", ".join(m.dimensions),
-                            }
-                            for m in catalog.metrics
-                        ]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
+                    raw_orders -> stg_orders -> fct_orders -> lightdash;
+                    raw_customers -> stg_customers -> snap_customers -> dim_customers -> lightdash;
+                }
+                """,
+                use_container_width=True,
+            )
+
+            try:
+                models_df = execute_neon_readonly(
+                    """
+                    SELECT alias AS model_name, schema_name, materialization, description, depends_on_nodes
+                    FROM dbt_dev_elementary.dbt_models
+                    WHERE unique_id LIKE 'model.jaffle_governance_demo.%'
+                    ORDER BY schema_name, alias
+                    """,
+                    max_rows=50,
+                    db_url=db_url,
                 )
-        with c2:
-            with st.container(border=True):
-                st.markdown('<div class="erp-card-title">Governed Gold Relations & Grains</div>', unsafe_allow_html=True)
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            {
-                                "relation": r.name,
-                                "layer": r.layer,
-                                "schema": r.schema_name,
-                                "columns": len(r.columns),
-                                "description": r.description,
-                            }
-                            for r in catalog.relations
-                        ]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.markdown("#### 📚 Registered dbt Models (`dbt_dev_elementary.dbt_models`)")
+                st.dataframe(models_df, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Could not query dbt models metadata: {exc}")
 
     else:
         with st.container(border=True):
