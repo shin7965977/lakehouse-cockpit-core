@@ -110,8 +110,24 @@ def _set_dbt_env(db_url: str | None = None) -> None:
     os.environ["NEON_DB"] = (parsed.path or "/neondb").lstrip("/")
 
 
-def _invoke_dbt(args: list[str], db_url: str | None = None) -> tuple[bool, list[dict[str, Any]]]:
-    """Execute a real dbt command in-process via dbtRunner against Neon PostgreSQL."""
+_FAST_DBT_VARS = json.dumps(
+    {
+        "disable_run_results": True,
+        "disable_tests_results": True,
+        "disable_dbt_artifacts_autoupload": True,
+        "disable_dbt_invocation_autoupload": True,
+        "disable_freshness_results": True,
+    }
+)
+
+
+def _invoke_dbt(
+    args: list[str],
+    db_url: str | None = None,
+    *,
+    tests_only: bool = False,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Execute a real dbt command in-process via dbtRunner against Neon PostgreSQL (fast interactive mode)."""
     _set_dbt_env(db_url)
     runner = dbtRunner()
     common = ["--project-dir", str(DBT_PROJECT_DIR), "--profiles-dir", str(DBT_PROJECT_DIR)]
@@ -121,11 +137,15 @@ def _invoke_dbt(args: list[str], db_url: str | None = None) -> tuple[bool, list[
         if not deps_res.success:
             raise RuntimeError(f"dbt deps failed: {deps_res.exception}")
 
-    res = runner.invoke([*args, *common])
+    extra_vars = ["--vars", _FAST_DBT_VARS] if args[0] != "deps" else []
+    res = runner.invoke([*args, *common, *extra_vars])
     node_results: list[dict[str, Any]] = []
     if res.result is not None and hasattr(res.result, "results"):
         for r in res.result.results:
             node = getattr(r, "node", None)
+            rtype = str(getattr(node, "resource_type", "")).lower()
+            if tests_only and "test" not in rtype:
+                continue
             node_name = getattr(node, "name", "") or getattr(node, "unique_id", "")
             status_val = str(getattr(r, "status", ""))
             failures = getattr(r, "failures", 0)
@@ -346,16 +366,24 @@ def reset_demo(db_url: str | None = None) -> dict[str, Any]:
             execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", seed["order_items"])
         conn.commit()
 
-    # Run REAL dbt snapshot + run + test
-    ok_silver, _ = _invoke_dbt(["run", "--select", "stg_orders", "stg_customers"], db_url)
-    ok_snap, _ = _invoke_dbt(["snapshot"], db_url)
-    ok_cand, _ = _invoke_dbt(["run", "--select", "candidate_fct_orders", "dim_customers_dbt"], db_url)
-    ok_test, test_rows = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
-    if not (ok_silver and ok_snap and ok_cand and ok_test):
-        raise RuntimeError(f"Day 0 dbt baseline failed: {test_rows}")
-    ok_gold, _ = _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
-    if not ok_gold:
-        raise RuntimeError("Day 0 dbt Gold materialization failed.")
+    # Single consolidated `dbt build` (replaces 5 separate invocations!)
+    ok_all, test_rows = _invoke_dbt(
+        [
+            "build",
+            "--select",
+            "stg_orders",
+            "stg_customers",
+            "snap_customers_dbt",
+            "candidate_fct_orders",
+            "dim_customers_dbt",
+            "fct_orders_dbt",
+            "mart_scd_comparison",
+            "--store-failures",
+        ],
+        db_url,
+    )
+    if not ok_all:
+        raise RuntimeError(f"Day 0 dbt build failed: {test_rows}")
 
     with _connect(db_url) as conn:
         with conn.cursor() as cur:
@@ -366,10 +394,7 @@ def reset_demo(db_url: str | None = None) -> dict[str, Any]:
             snap_cnt = int(cur.fetchone()[0])
             details = {
                 "dbt_commands": [
-                    "dbt snapshot",
-                    "dbt run --select stg_orders stg_customers candidate_fct_orders dim_customers_dbt",
-                    "dbt test --select candidate_fct_orders --store-failures",
-                    "dbt run --select fct_orders_dbt mart_scd_comparison",
+                    "dbt build --select stg_orders stg_customers snap_customers_dbt candidate_fct_orders dim_customers_dbt fct_orders_dbt mart_scd_comparison --store-failures",
                 ],
                 "customers": len(seed["customers"]),
                 "orders": int(order_cnt),
@@ -417,9 +442,12 @@ def run_day5_normal_refresh(db_url: str | None = None) -> dict[str, Any]:
             execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", new_items)
         conn.commit()
 
-    # Real dbt Write-Audit-Publish
-    _invoke_dbt(["run", "--select", "stg_orders", "candidate_fct_orders"], db_url)
-    all_passed, wap_checks = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    # Real dbt Write-Audit-Publish (1 build call for candidate+tests, 1 run call to publish Gold)
+    all_passed, wap_checks = _invoke_dbt(
+        ["build", "--select", "candidate_fct_orders", "--store-failures"],
+        db_url,
+        tests_only=True,
+    )
     if all_passed:
         _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
 
@@ -493,10 +521,12 @@ def run_day10_scd_type2(db_url: str | None = None) -> dict[str, Any]:
             execute_values(cur, "INSERT INTO raw.raw_order_items VALUES %s", post_items)
         conn.commit()
 
-    # Run REAL dbt snapshot + candidate WAP + Gold SCD comparison mart
-    _invoke_dbt(["snapshot"], db_url)
-    _invoke_dbt(["run", "--select", "dim_customers_dbt", "candidate_fct_orders"], db_url)
-    all_passed, _ = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    # Consolidated real dbt snapshot + candidate WAP + Gold SCD comparison mart
+    all_passed, _ = _invoke_dbt(
+        ["build", "--select", "snap_customers_dbt", "dim_customers_dbt", "candidate_fct_orders", "--store-failures"],
+        db_url,
+        tests_only=True,
+    )
     if all_passed:
         _invoke_dbt(["run", "--select", "fct_orders_dbt", "mart_scd_comparison"], db_url)
     else:
@@ -553,9 +583,12 @@ def run_day15_dirty_data_wap(db_url: str | None = None) -> dict[str, Any]:
             execute_values(cur, "INSERT INTO raw.raw_orders VALUES %s", dirty_rows)
         conn.commit()
 
-    # Real dbt WAP: build candidate -> test with --store-failures -> DO NOT publish Gold!
-    _invoke_dbt(["run", "--select", "stg_orders", "candidate_fct_orders"], db_url)
-    all_passed, wap_checks = _invoke_dbt(["test", "--select", "candidate_fct_orders", "--store-failures"], db_url)
+    # Single real dbt WAP call: build candidate + test --store-failures -> DO NOT publish Gold!
+    all_passed, wap_checks = _invoke_dbt(
+        ["build", "--select", "candidate_fct_orders", "--store-failures"],
+        db_url,
+        tests_only=True,
+    )
     failed_checks = [c for c in wap_checks if not c["passed"]]
 
     with _connect(db_url) as conn:
