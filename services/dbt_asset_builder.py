@@ -171,6 +171,7 @@ def build_dbt_and_lightdash_bundle(
     freshness_sla: str = "24h",
     schema_name: str = "gold",
     tenant_policy: str = "server_session_tenant_id",
+    lightdash_status: LightdashStatus = "STAGING_LOCAL_ONLY",
 ) -> DbtAndLightdashBundle:
     """Synthesize minimal dbt SQL, enforced schema.yml, separate Lightdash YAML, and BI Asset Manifest."""
     safe_model = _sanitize_model_name(model_name)
@@ -357,7 +358,7 @@ def build_dbt_and_lightdash_bundle(
         measures=measure_cols,
         upstream_models=upstream_relations,
         lightdash_explore=safe_model,
-        lightdash_status="STAGING_LOCAL_ONLY",
+        lightdash_status=lightdash_status,
         certification_status="PROPOSED_ASSET",
         owner=business_owner,
         tenant_policy=tenant_policy,

@@ -351,6 +351,42 @@ def _get_lightdash_status() -> dict[str, Any]:
     )
 
 
+def _infer_sql_column_types(df: pd.DataFrame) -> dict[str, str]:
+    """Infer PostgreSQL / dbt contract column types from a pandas DataFrame (including psycopg2 Decimal objects)."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    inferred: dict[str, str] = {}
+    for col in df.columns:
+        dtype_str = str(df[col].dtype).lower()
+        if "bool" in dtype_str:
+            inferred[col] = "boolean"
+        elif "int" in dtype_str:
+            inferred[col] = "integer"
+        elif "float" in dtype_str or "double" in dtype_str:
+            inferred[col] = "double precision"
+        elif "datetime" in dtype_str:
+            inferred[col] = "timestamp"
+        else:
+            non_null = df[col].dropna()
+            sample = non_null.iloc[0] if len(non_null) > 0 else None
+            if isinstance(sample, Decimal):
+                inferred[col] = "numeric"
+            elif isinstance(sample, bool):
+                inferred[col] = "boolean"
+            elif isinstance(sample, int):
+                inferred[col] = "integer"
+            elif isinstance(sample, float):
+                inferred[col] = "double precision"
+            elif isinstance(sample, datetime):
+                inferred[col] = "timestamp"
+            elif isinstance(sample, date):
+                inferred[col] = "date"
+            else:
+                inferred[col] = "varchar"
+    return inferred
+
+
 def _record_gap_event(question: str, gap: GapDetectionResult | None) -> None:
     if gap is None:
         return
@@ -1305,17 +1341,8 @@ def _render_tab3_build() -> None:
                 st.error("Primary Key Grain cannot be empty.")
                 return
 
-            inferred_types: dict[str, str] = {}
-            for col in preview_df.columns:
-                dtype_str = str(preview_df[col].dtype).lower()
-                if "int" in dtype_str:
-                    inferred_types[col] = "integer"
-                elif "float" in dtype_str or "double" in dtype_str:
-                    inferred_types[col] = "double precision"
-                elif "bool" in dtype_str:
-                    inferred_types[col] = "boolean"
-                else:
-                    inferred_types[col] = "varchar"
+            inferred_types = _infer_sql_column_types(preview_df)
+            ld_status = _get_lightdash_status()
 
             bundle = build_dbt_and_lightdash_bundle(
                 query_spec=spec,
@@ -1324,6 +1351,7 @@ def _render_tab3_build() -> None:
                 column_types=inferred_types,
                 business_owner="analytics-engineering@jaffle.shop",
                 tenant_policy="single_company_public_demo",
+                lightdash_status=ld_status["lightdash_status"],
             )
 
             missing_grain = [g for g in grain_cols if g not in preview_df.columns]
@@ -1513,7 +1541,7 @@ def _render_tab5_review_release() -> None:
                 "Connector Type (try `unapproved_scraper` to test Fail-Loud block)",
                 options=[*sorted(APPROVED_CONNECTOR_REGISTRY), "unapproved_scraper"],
             )
-            src_locator = st.text_input("Source Locator", value="s3://jaffle-raw/marketing_campaigns_2025.parquet")
+            src_locator = st.text_input("Source Locator", value="data/marketing_campaigns_2025.csv")
             target_tbl = st.text_input("Target Bronze Table", value="bronze_marketing_campaigns")
             if st.button(
                 "🔌 Propose dlt Ingestion Contract",

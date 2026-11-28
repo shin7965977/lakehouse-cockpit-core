@@ -431,5 +431,51 @@ def test_dbt_asset_builder_complex_sql_extracts_refs_all_columns_and_measures() 
         assert "metrics" in ld_cols[m], f"Lightdash YAML missing metrics for measure '{m}'"
 
 
+def test_infer_sql_column_types_handles_postgres_decimal_objects() -> None:
+    """TDD regression: psycopg2 returns SUM(int) & ROUND(numeric) as decimal.Decimal (object dtype);
+    must infer 'numeric' instead of falling back to 'varchar'.
+    """
+    from decimal import Decimal
+    import pandas as pd
+
+    mod = _load_workbench_module()
+    df = pd.DataFrame(
+        {
+            "customer_tier": ["VIP", "Silver"],
+            "customer_count": [27, 28],
+            "total_revenue": [37363.5, 5691.0],
+            "total_orders": [Decimal("271"), Decimal("142")],
+            "orders_per_customer": [Decimal("10.04"), Decimal("5.07")],
+            "is_active": [True, False],
+        }
+    )
+    inferred = mod._infer_sql_column_types(df)
+    assert inferred["customer_tier"] == "varchar"
+    assert inferred["customer_count"] == "integer"
+    assert inferred["total_revenue"] == "double precision"
+    assert inferred["total_orders"] == "numeric"
+    assert inferred["orders_per_customer"] == "numeric"
+    assert inferred["is_active"] == "boolean"
+
+
+def test_dbt_asset_builder_propagates_lightdash_status() -> None:
+    """TDD regression: BIAssetManifest.lightdash_status must honor passed live lightdash_status."""
+    spec = QuerySpec(
+        spec_id="qs_ld_status",
+        question="Tier revenue",
+        dialect="postgres",
+        raw_sql_override='SELECT "customer_tier", SUM("total_revenue") AS "total_revenue" FROM "mart_customer_value" GROUP BY "customer_tier"',
+    )
+    bundle = build_dbt_and_lightdash_bundle(
+        query_spec=spec,
+        model_name="mart_tier_rev",
+        grain=["customer_tier"],
+        lightdash_status="DEPLOYED",
+        tenant_policy="single_company_public_demo",
+    )
+    assert bundle.bi_asset_manifest.lightdash_status == "DEPLOYED"
+
+
+
 
 
