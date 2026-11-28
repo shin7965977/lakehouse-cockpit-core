@@ -332,3 +332,32 @@ def test_workbench_demo_service_call_signatures() -> None:
     )
 
 
+def test_prebuilt_timeline_snapshots_artifact_integrity() -> None:
+    """Verify pre-built real-dbt snapshots JSON exists and covers Day 0/5/10/15/20 with authentic dbt outputs."""
+    import json
+
+    snap_path = ROOT / "examples" / "demo_artifacts" / "timeline_snapshots.json"
+    assert snap_path.exists(), "Pre-built timeline_snapshots.json is missing."
+    payload = json.loads(snap_path.read_text(encoding="utf-8"))
+    days = payload.get("days", {})
+    for d in ("0", "5", "10", "15", "20"):
+        assert d in days, f"Missing Day {d} in timeline_snapshots.json"
+        assert days[d]["initialized"] is True
+
+    # Day 10 must capture real dbt snapshot SCD Type 2 distortion
+    day10 = days["10"]
+    assert day10["snapshot_versions"] >= 135
+    assert any(abs(float(r.get("historical_distortion", 0))) > 0 for r in day10["scd_comparison"])
+
+    # Day 15 must capture real dbt --store-failures quarantine rows and preserve LKG Gold orders
+    day15 = days["15"]
+    assert day15["quarantine_count"] >= 5
+    assert len(day15["quarantine_rows"]) >= 5
+    assert day15["gold_order_count"] == day10["gold_order_count"]
+
+    # Day 20 must capture CI PR BLOCKED status
+    day20 = days["20"]
+    assert day20["latest_run"]["status"] == "PR_BLOCKED"
+
+
+

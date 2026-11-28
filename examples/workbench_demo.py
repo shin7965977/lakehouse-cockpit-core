@@ -68,6 +68,7 @@ MAX_LLM_CALLS_PER_SESSION = 20
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
 DBT_DOCS_STATIC_PATH = ROOT / "examples" / "demo_artifacts" / "dbt_docs_static.html"
+TIMELINE_SNAPSHOTS_PATH = ROOT / "examples" / "demo_artifacts" / "timeline_snapshots.json"
 GH_PAGES_BASE = "https://shin7965977.github.io/lakehouse-cockpit-core"
 ELEMENTARY_PAGES_URL = f"{GH_PAGES_BASE}/elementary_report.html"
 DBT_DOCS_PAGES_URL = f"{GH_PAGES_BASE}/dbt_docs_static.html"
@@ -230,6 +231,9 @@ def _init_session_state() -> None:
         "draft_pr_result": None,
         "ingestion_proposal": None,
         "last_timeline_result": None,
+        "timeline_view_day": "10",
+        "timeline_view_mode": "SNAPSHOT",
+        "timeline_live_state": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -283,6 +287,21 @@ def _make_structured_llm_callable(api_key: str):
     return _call_structured
 
 
+@st.cache_data(show_spinner=False)
+def _load_timeline_snapshots() -> dict[str, Any]:
+    if not TIMELINE_SNAPSHOTS_PATH.exists():
+        return {}
+    try:
+        return json.loads(TIMELINE_SNAPSHOTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+@st.cache_data(show_spinner=False)
+def _cached_jaffle_catalog():
+    return build_jaffle_catalog()
+
+
 def _ensure_neon_initialized(db_url: str) -> dict[str, Any]:
     state = fetch_demo_state(db_url)
     if not state.get("initialized"):
@@ -291,13 +310,45 @@ def _ensure_neon_initialized(db_url: str) -> dict[str, Any]:
     return state
 
 
-def _get_lightdash_status() -> dict[str, Any]:
+def _resolve_active_timeline_state(db_url: str) -> dict[str, Any]:
+    """Return instant pre-built real-dbt snapshot or session-cached live Neon state (zero DB hit on tab switch)."""
+    if (
+        st.session_state.get("timeline_view_mode") == "LIVE"
+        and st.session_state.get("timeline_live_state") is not None
+    ):
+        return st.session_state["timeline_live_state"]
+
+    snaps = _load_timeline_snapshots()
+    days_map = snaps.get("days") if isinstance(snaps, dict) else None
+    if isinstance(days_map, dict) and days_map:
+        day_key = str(st.session_state.get("timeline_view_day") or snaps.get("default_day") or "10")
+        if day_key not in days_map:
+            day_key = next(iter(days_map.keys()))
+            st.session_state["timeline_view_day"] = day_key
+        return days_map[day_key]
+
+    if st.session_state.get("timeline_live_state") is None:
+        st.session_state["timeline_live_state"] = _ensure_neon_initialized(db_url)
+        st.session_state["timeline_view_mode"] = "LIVE"
+    return st.session_state["timeline_live_state"]
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lightdash_status(lightdash_url: str, api_key: str, project_uuid: str) -> dict[str, Any]:
     adapter = LightdashAdapter(
-        lightdash_url=_resolve_secret("LIGHTDASH_URL"),
-        api_key=_resolve_secret("LIGHTDASH_API_KEY"),
-        project_uuid=_resolve_secret("LIGHTDASH_PROJECT_UUID"),
+        lightdash_url=lightdash_url,
+        api_key=api_key,
+        project_uuid=project_uuid,
     )
     return adapter.check_status()
+
+
+def _get_lightdash_status() -> dict[str, Any]:
+    return _cached_lightdash_status(
+        _resolve_secret("LIGHTDASH_URL"),
+        _resolve_secret("LIGHTDASH_API_KEY"),
+        _resolve_secret("LIGHTDASH_PROJECT_UUID"),
+    )
 
 
 def _record_gap_event(question: str, gap: GapDetectionResult | None) -> None:
@@ -354,13 +405,16 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
 
         st.divider()
         if st.button(
-            "🔄 Reset Demo Sandbox (Day 0)",
+            "🔄 Reset Live Neon (Day 0)",
             use_container_width=True,
-            help="清空並還原 Neon 所有測試表回 Day 0 初始狀態（120 位客戶、520 筆訂單、初始 SCD2 快照），清除隔離表與髒資料。",
+            help="清空並還原 Neon 雲端測試表回 Day 0 初始狀態（120 位客戶、520 筆訂單、初始 SCD2 快照），清除隔離表與髒資料。",
         ):
             with st.spinner("Resetting Neon schemas to clean Day 0 baseline..."):
                 res = reset_demo(db_url)
                 st.session_state["last_timeline_result"] = res
+                st.session_state["timeline_view_day"] = "0"
+                st.session_state["timeline_view_mode"] = "LIVE"
+                st.session_state["timeline_live_state"] = fetch_demo_state(db_url)
             st.success("Reset to Day 0 baseline!")
             st.rerun()
 
@@ -418,58 +472,99 @@ SCENARIO_NARRATIVES: dict[int, dict[str, str]] = {
 
 
 def _render_tab1_timeline(db_url: str, state: dict[str, Any]) -> None:
-    st.subheader("Interactive Real-dbt Governance & SCD Type 2 Lab (Live Neon PostgreSQL)")
+    st.subheader("Interactive Real-dbt Governance & SCD Type 2 Lab (Neon PostgreSQL)")
     st.caption(
-        "Every button triggers **real dbt Core (`dbtRunner`)** commands against Neon PostgreSQL: "
-        "`dbt snapshot` (SCD Type 2), `dbt test --store-failures` (native audit quarantine), and `mart_scd_comparison`."
+        "Click any Day below for **instant switching** across pre-built real dbt Core snapshots (zero multi-user collision), "
+        "or click **▶ Live Re-run on Neon** to execute `dbt build` / `dbt snapshot` / `dbt test --store-failures` live against Neon."
     )
 
-    with st.container(border=True):
-        b0, b5, b10, b15, b20 = st.columns(5)
-        if b0.button(
+    day_specs = [
+        (
+            "0",
             "🔄 Day 0 Reset Baseline",
-            use_container_width=True,
-            help="【重置基準】重建 Neon raw 表，並跑真實 dbt snapshot + dbt run + dbt test 建立乾淨 Day 0 基線。",
-        ):
-            with st.spinner("Running real `dbt snapshot` + `dbt run` + `dbt test` on Neon (~8s)..."):
-                st.session_state["last_timeline_result"] = reset_demo(db_url)
-            st.rerun()
-
-        if b5.button(
+            "【重置基準】建立乾淨 Day 0 基線（120 位客戶、520 筆訂單、初始 SCD2 快照）。",
+            reset_demo,
+            "Running real `dbt build` (Day 0 baseline) on Neon (~10s)...",
+        ),
+        (
+            "5",
             "✅ Day 5 Normal Refresh",
-            use_container_width=True,
-            help="【正常刷新 · 真 dbt WAP】寫入 25 筆新訂單 → 跑 dbt run -s candidate_fct_orders → dbt test --store-failures 全綠 → 發布 fct_orders_dbt。",
-        ):
-            with st.spinner("Running real `dbt run -s candidate_fct_orders` & `dbt test --store-failures` on Neon..."):
-                st.session_state["last_timeline_result"] = run_day5_normal_refresh(db_url)
-            st.rerun()
-
-        if b10.button(
+            "【正常刷新 · 真 dbt WAP】寫入 25 筆新訂單 → dbt build + test 全綠 → 發布 fct_orders_dbt。",
+            run_day5_normal_refresh,
+            "Running real `dbt build -s candidate_fct_orders --store-failures` on Neon (~10s)...",
+        ),
+        (
+            "10",
             "🧬 Day 10 SCD Type 2",
-            use_container_width=True,
-            help="【客戶異動 · 真 dbt snapshot】15 位 Standard 客戶升級 VIP → 跑真實 dbt snapshot（SCD Type 2）並重建 mart_scd_comparison。",
-        ):
-            with st.spinner("Running real `dbt snapshot` (SCD Type 2) & rebuilding `mart_scd_comparison` on Neon..."):
-                st.session_state["last_timeline_result"] = run_day10_scd_type2(db_url)
-            st.rerun()
-
-        if b15.button(
+            "【客戶異動 · 真 dbt snapshot】15 位 Standard 客戶升級 VIP → dbt snapshot（SCD Type 2）並重建 mart_scd_comparison。",
+            run_day10_scd_type2,
+            "Running real `dbt snapshot` (SCD Type 2) & rebuilding `mart_scd_comparison` on Neon (~12s)...",
+        ),
+        (
+            "15",
             "🛡️ Day 15 Dirty Data WAP",
-            use_container_width=True,
-            help="【髒資料攔截 · 真 dbt --store-failures】注入 5 筆壞資料 → dbt test 失敗自動寫入 dbt_dev_dbt_test__audit 隔離表 → 拒絕覆蓋 Gold（保留 LKG）。",
-        ):
-            with st.spinner("Injecting dirty rows & running real `dbt test --store-failures` on Neon..."):
-                st.session_state["last_timeline_result"] = run_day15_dirty_data_wap(db_url)
-            st.rerun()
-
-        if b20.button(
+            "【髒資料攔截 · 真 dbt --store-failures】注入 5 筆壞資料 → dbt test 失敗自動寫入 dbt_dev_dbt_test__audit 隔離表 → 保留 LKG。",
+            run_day15_dirty_data_wap,
+            "Injecting dirty rows & running real `dbt build --store-failures` on Neon (~10s)...",
+        ),
+        (
+            "20",
             "🚨 Day 20 Semantic Drift CI",
-            use_container_width=True,
-            help="【CI 攔截語意飄移】在 ci_pr 模擬拿掉 Completed 過濾 → Schema Contract PASS，但 CI Data Diff（+25%）與對帳測試直接 BLOCK PR Merge。",
-        ):
-            with st.spinner("Running 3-layer CI Semantic Drift Gate on Neon..."):
-                st.session_state["last_timeline_result"] = run_day20_semantic_drift_ci(db_url)
-            st.rerun()
+            "【CI 攔截語意飄移】在 ci_pr 模擬拿掉 Completed 過濾 → Schema Contract PASS，但 CI Data Diff（+25%）直接 BLOCK PR Merge。",
+            run_day20_semantic_drift_ci,
+            "Running 3-layer CI Semantic Drift Gate on Neon (~4s)...",
+        ),
+    ]
+    day_spec_map = {d[0]: d for d in day_specs}
+    current_day = str(st.session_state.get("timeline_view_day") or "10")
+    if current_day not in day_spec_map:
+        current_day = "10"
+
+    with st.container(border=True):
+        cols = st.columns(5)
+        for idx, (d_key, d_label, d_help, _fn, _spin) in enumerate(day_specs):
+            is_sel = current_day == d_key
+            if cols[idx].button(
+                d_label,
+                key=f"timeline_day_btn_{d_key}",
+                type="primary" if is_sel else "secondary",
+                use_container_width=True,
+                help=d_help,
+            ):
+                st.session_state["timeline_view_day"] = d_key
+                st.session_state["timeline_view_mode"] = "SNAPSHOT"
+                st.rerun()
+
+        mode_l, mode_r = st.columns([2.6, 1.4])
+        is_live = st.session_state.get("timeline_view_mode") == "LIVE"
+        with mode_l:
+            if is_live:
+                st.markdown(
+                    f'<div class="erp-pill-row" style="justify-content:flex-start;margin:6px 0 8px 0;">'
+                    f'{_pill(f"🟢 Live Neon dbt Run Verified · Day {current_day}", "green")}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="erp-pill-row" style="justify-content:flex-start;margin:6px 0 8px 0;">'
+                    f'{_pill(f"⚡ Pre-built Real-dbt Snapshot · Day {current_day} (Instant View)", "blue")}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+        with mode_r:
+            _dk, _dl, _dh, live_fn, live_spinner = day_spec_map[current_day]
+            if st.button(
+                f"▶ Live Re-run Day {current_day} on Neon",
+                key=f"live_rerun_day_{current_day}",
+                use_container_width=True,
+                help="真的現場對 Neon PostgreSQL 執行一次 dbt Core（約 10 秒），驗證非靜態假資料。",
+            ):
+                with st.spinner(live_spinner):
+                    st.session_state["last_timeline_result"] = live_fn(db_url)
+                    st.session_state["timeline_live_state"] = fetch_demo_state(db_url)
+                    st.session_state["timeline_view_mode"] = "LIVE"
+                st.rerun()
 
         latest = state.get("latest_run")
         if latest:
@@ -1552,13 +1647,13 @@ def main() -> None:
         st.stop()
 
     try:
-        state = _ensure_neon_initialized(db_url)
+        state = _resolve_active_timeline_state(db_url)
     except Exception as exc:
         st.error(f"**Neon PostgreSQL Connection Error**: {exc}")
         st.stop()
 
     api_key = _render_sidebar(db_url, state)
-    catalog = build_jaffle_catalog()
+    catalog = _cached_jaffle_catalog()
 
     st.title("🏛️ AI Analytics Workbench & Data Governance Lab")
     st.caption(

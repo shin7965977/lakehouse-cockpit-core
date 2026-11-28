@@ -1,0 +1,797 @@
+{
+  "generated_at_utc": "2026-11-28T09:45:40.390990+00:00",
+  "source": "real_dbt_core_neon_postgresql",
+  "default_day": "10",
+  "days": {
+    "0": {
+      "initialized": true,
+      "latest_run": {
+        "run_day": 0,
+        "sim_date": "2025-06-30",
+        "event_type": "RESET_BASELINE",
+        "status": "HEALTHY",
+        "summary": "Day 0 real dbt baseline built: 520 orders, 120 initial dbt snapshot rows.",
+        "details_json": "{\"dbt_commands\": [\"dbt build --select stg_orders stg_customers snap_customers_dbt candidate_fct_orders dim_customers_dbt fct_orders_dbt mart_scd_comparison --store-failures\"], \"customers\": 120, \"orders\": 520, \"order_items\": 1320, \"realized_revenue\": 46954.0, \"snapshot_versions\": 120}",
+        "executed_at": "2026-11-28 09:44:42.299352"
+      },
+      "gold_order_count": 520,
+      "gold_realized_revenue": 46954.0,
+      "snapshot_versions": 120,
+      "unique_customers": 120,
+      "quarantine_count": 0,
+      "scd_comparison": [
+        {
+          "customer_tier": "Silver",
+          "scd1_naive_latest_tier_rev": 5599.0,
+          "scd2_point_in_time_rev": 5599.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "Standard",
+          "scd1_naive_latest_tier_rev": 13341.0,
+          "scd2_point_in_time_rev": 13341.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "VIP",
+          "scd1_naive_latest_tier_rev": 28014.0,
+          "scd2_point_in_time_rev": 28014.0,
+          "historical_distortion": 0.0
+        }
+      ],
+      "scd_changed_rows": [],
+      "quarantine_rows": [],
+      "snapshot_mode": "PREBUILT_REAL_DBT_SNAPSHOT",
+      "snapshot_day": 0
+    },
+    "5": {
+      "initialized": true,
+      "latest_run": {
+        "run_day": 5,
+        "sim_date": "2025-07-05",
+        "event_type": "DAY5_NORMAL_REFRESH",
+        "status": "HEALTHY",
+        "summary": "Day 5 real dbt WAP PASSED (5/5 tests): +25 orders published to dbt_gold.fct_orders_dbt.",
+        "details_json": "{\"dbt_commands\": [\"dbt run --select stg_orders candidate_fct_orders\", \"dbt test --select candidate_fct_orders --store-failures\", \"dbt run --select fct_orders_dbt mart_scd_comparison\"], \"new_orders_added\": 25, \"wap_checks\": [{\"test_or_model\": \"not_null_candidate_fct_orders_order_id\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"not_null_candidate_fct_orders_order_id\\\"\"}, {\"test_or_model\": \"not_null_candidate_fct_orders_customer_id\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"not_null_candidate_fct_orders_customer_id\\\"\"}, {\"test_or_model\": \"relationships_candidate_fct_orders_customer_id__customer_id__ref_stg_customers_\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"relationships_candidate_fct_or_0acf19bfd116f4dfb61081abbd857d83\\\"\"}, {\"test_or_model\": \"dbt_utils_expression_is_true_candidate_fct_orders_order_total_0_and_cost_total_0\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb\\\"\"}, {\"test_or_model\": \"unique_candidate_fct_orders_order_id\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"unique_candidate_fct_orders_order_id\\\"\"}], \"published_to_gold\": true, \"gold_order_count\": 545, \"gold_realized_revenue\": 47294.0}",
+        "executed_at": "2026-11-28 09:44:52.977037"
+      },
+      "gold_order_count": 545,
+      "gold_realized_revenue": 47294.0,
+      "snapshot_versions": 120,
+      "unique_customers": 120,
+      "quarantine_count": 0,
+      "scd_comparison": [
+        {
+          "customer_tier": "Silver",
+          "scd1_naive_latest_tier_rev": 5599.0,
+          "scd2_point_in_time_rev": 5599.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "Standard",
+          "scd1_naive_latest_tier_rev": 13341.0,
+          "scd2_point_in_time_rev": 13341.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "VIP",
+          "scd1_naive_latest_tier_rev": 28014.0,
+          "scd2_point_in_time_rev": 28014.0,
+          "historical_distortion": 0.0
+        }
+      ],
+      "scd_changed_rows": [],
+      "quarantine_rows": [],
+      "snapshot_mode": "PREBUILT_REAL_DBT_SNAPSHOT",
+      "snapshot_day": 5
+    },
+    "10": {
+      "initialized": true,
+      "latest_run": {
+        "run_day": 10,
+        "sim_date": "2025-07-10",
+        "event_type": "DAY10_SCD_TYPE2_SNAPSHOT",
+        "status": "HEALTHY",
+        "summary": "Day 10 real `dbt snapshot` executed: 15 Standard customers upgraded to VIP (135 total SCD2 rows in dbt_snapshots.snap_customers_dbt).",
+        "details_json": "{\"dbt_commands\": [\"dbt snapshot\", \"dbt run --select dim_customers_dbt candidate_fct_orders\", \"dbt test --select candidate_fct_orders --store-failures\", \"dbt run --select fct_orders_dbt mart_scd_comparison\"], \"upgraded_customers\": 15, \"total_snapshot_rows\": 135, \"post_upgrade_orders_added\": 15}",
+        "executed_at": "2026-11-28 09:45:03.887209"
+      },
+      "gold_order_count": 560,
+      "gold_realized_revenue": 49112.0,
+      "snapshot_versions": 135,
+      "unique_customers": 120,
+      "quarantine_count": 0,
+      "scd_comparison": [
+        {
+          "customer_tier": "Silver",
+          "scd1_naive_latest_tier_rev": 5599.0,
+          "scd2_point_in_time_rev": 5599.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "Standard",
+          "scd1_naive_latest_tier_rev": 5866.5,
+          "scd2_point_in_time_rev": 13341.0,
+          "historical_distortion": -7474.5
+        },
+        {
+          "customer_tier": "VIP",
+          "scd1_naive_latest_tier_rev": 35488.5,
+          "scd2_point_in_time_rev": 28014.0,
+          "historical_distortion": 7474.5
+        }
+      ],
+      "scd_changed_rows": [
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        }
+      ],
+      "quarantine_rows": [],
+      "snapshot_mode": "PREBUILT_REAL_DBT_SNAPSHOT",
+      "snapshot_day": 10
+    },
+    "15": {
+      "initialized": true,
+      "latest_run": {
+        "run_day": 15,
+        "sim_date": "2025-07-15",
+        "event_type": "DAY15_DIRTY_DATA_WAP_BLOCK",
+        "status": "DEGRADED_LKG",
+        "summary": "Day 15 real `dbt test --store-failures` FAILED (3 failed dbt tests). Production `dbt_gold.fct_orders_dbt` preserved at Last-Known-Good (560 rows); offending rows auto-stored in `dbt_dev_dbt_test__audit`.",
+        "details_json": "{\"dbt_commands\": [\"dbt run --select stg_orders candidate_fct_orders\", \"dbt test --select candidate_fct_orders --store-failures  # FAILED -> rows stored in dbt_dev_dbt_test__audit.*\", \"# SKIPPED: dbt run --select fct_orders_dbt  (Production Gold preserved at Last-Known-Good)\"], \"injected_dirty_rows\": 5, \"wap_checks\": [{\"test_or_model\": \"relationships_candidate_fct_orders_customer_id__customer_id__ref_stg_customers_\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"relationships_candidate_fct_or_0acf19bfd116f4dfb61081abbd857d83\\\"\"}, {\"test_or_model\": \"not_null_candidate_fct_orders_customer_id\", \"status\": \"fail\", \"passed\": false, \"violations\": 1, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"not_null_candidate_fct_orders_customer_id\\\"\"}, {\"test_or_model\": \"not_null_candidate_fct_orders_order_id\", \"status\": \"pass\", \"passed\": true, \"violations\": 0, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"not_null_candidate_fct_orders_order_id\\\"\"}, {\"test_or_model\": \"dbt_utils_expression_is_true_candidate_fct_orders_order_total_0_and_cost_total_0\", \"status\": \"fail\", \"passed\": false, \"violations\": 2, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb\\\"\"}, {\"test_or_model\": \"unique_candidate_fct_orders_order_id\", \"status\": \"fail\", \"passed\": false, \"violations\": 2, \"audit_table\": \"\\\"neondb\\\".\\\"dbt_dev_dbt_test__audit\\\".\\\"unique_candidate_fct_orders_order_id\\\"\"}], \"failed_check_count\": 3, \"published_to_gold\": false, \"lkg_preserved\": true, \"lkg_order_count\": 560, \"lkg_realized_revenue\": 49112.0, \"staleness_hours\": 14, \"max_staleness_hours\": 120}",
+        "executed_at": "2026-11-28 09:45:09.907525"
+      },
+      "gold_order_count": 560,
+      "gold_realized_revenue": 49112.0,
+      "snapshot_versions": 135,
+      "unique_customers": 120,
+      "quarantine_count": 5,
+      "scd_comparison": [
+        {
+          "customer_tier": "Silver",
+          "scd1_naive_latest_tier_rev": 5599.0,
+          "scd2_point_in_time_rev": 5599.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "Standard",
+          "scd1_naive_latest_tier_rev": 5866.5,
+          "scd2_point_in_time_rev": 13341.0,
+          "historical_distortion": -7474.5
+        },
+        {
+          "customer_tier": "VIP",
+          "scd1_naive_latest_tier_rev": 35488.5,
+          "scd2_point_in_time_rev": 28014.0,
+          "historical_distortion": 7474.5
+        }
+      ],
+      "scd_changed_rows": [
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        }
+      ],
+      "quarantine_rows": [
+        {
+          "dbt_audit_table": "dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb",
+          "failed_record_details": "{\"order_id\": 15001, \"customer_id\": 12, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": -350.0, \"realized_revenue\": -350.0, \"cost_total\": 50.0, \"gross_profit\": -400.0}"
+        },
+        {
+          "dbt_audit_table": "dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb",
+          "failed_record_details": "{\"order_id\": 15002, \"customer_id\": 19, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": -95.0, \"realized_revenue\": -95.0, \"cost_total\": 20.0, \"gross_profit\": -115.0}"
+        },
+        {
+          "dbt_audit_table": "not_null_candidate_fct_orders_customer_id",
+          "failed_record_details": "{\"order_id\": 15003, \"customer_id\": null, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": 210.0, \"realized_revenue\": 210.0, \"cost_total\": 70.0, \"gross_profit\": 140.0}"
+        },
+        {
+          "dbt_audit_table": "unique_candidate_fct_orders_order_id",
+          "failed_record_details": "{\"unique_field\": 1002, \"n_records\": 2}"
+        },
+        {
+          "dbt_audit_table": "unique_candidate_fct_orders_order_id",
+          "failed_record_details": "{\"unique_field\": 1001, \"n_records\": 2}"
+        }
+      ],
+      "snapshot_mode": "PREBUILT_REAL_DBT_SNAPSHOT",
+      "snapshot_day": 15
+    },
+    "20": {
+      "initialized": true,
+      "latest_run": {
+        "run_day": 20,
+        "sim_date": "2025-07-20",
+        "event_type": "DAY20_SEMANTIC_DRIFT_CI_BLOCK",
+        "status": "PR_BLOCKED",
+        "summary": "Day 20 CI BLOCKED PR merge: Schema Contract PASSED, but Data Diff caught +25.03% semantic drift (+$12,293.00) on realized_revenue.",
+        "details_json": "{\"dbt_commands\": [\"dbt build --select state:modified+ --defer --target ci_pr\", \"dbt run-operation audit_helper.compare_relation_results  # BLOCKED: +25% KPI drift\"], \"pr_branch\": \"feat/update-revenue-filter\", \"drifted_rule\": \"Removed `WHERE status = 'Completed'` guard in realized_revenue projection\", \"ci_gates\": [{\"gate\": \"1. dbt Schema Contract (columns & data_types)\", \"status\": \"PASS\", \"detail\": \"10/10 columns match exact types \\u2014 proves Schema Contracts alone CANNOT catch semantic drift!\"}, {\"gate\": \"2. CI Data Diff (Staging vs. Prod KPI <= 5% threshold)\", \"status\": \"BLOCKED\", \"detail\": \"realized_revenue drifted by +25.03% (+$12,293.00): Prod=$49,112.00 vs PR=$61,405.00.\"}, {\"gate\": \"3. GL Reconciliation Test (realized_revenue == Completed orders)\", \"status\": \"FAIL\", \"detail\": \"Unexplained variance of $12,293.00 caused by including Pending/Returned orders.\"}], \"merge_allowed\": false, \"prod_revenue\": 49112.0, \"pr_revenue\": 61405.0, \"delta_revenue\": 12293.0, \"delta_pct\": 25.03, \"prod_gross_profit\": 31718.35, \"pr_gross_profit\": 39634.4, \"row_count\": 560}",
+        "executed_at": "2026-11-28 09:45:11.127385"
+      },
+      "gold_order_count": 560,
+      "gold_realized_revenue": 49112.0,
+      "snapshot_versions": 135,
+      "unique_customers": 120,
+      "quarantine_count": 5,
+      "scd_comparison": [
+        {
+          "customer_tier": "Silver",
+          "scd1_naive_latest_tier_rev": 5599.0,
+          "scd2_point_in_time_rev": 5599.0,
+          "historical_distortion": 0.0
+        },
+        {
+          "customer_tier": "Standard",
+          "scd1_naive_latest_tier_rev": 5866.5,
+          "scd2_point_in_time_rev": 13341.0,
+          "historical_distortion": -7474.5
+        },
+        {
+          "customer_tier": "VIP",
+          "scd1_naive_latest_tier_rev": 35488.5,
+          "scd2_point_in_time_rev": 28014.0,
+          "historical_distortion": 7474.5
+        }
+      ],
+      "scd_changed_rows": [
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 41,
+          "customer_name": "Lea Hoffmann",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 42,
+          "customer_name": "Mia De Vries",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 43,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 44,
+          "customer_name": "Tiago Bergstrom",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 45,
+          "customer_name": "Emma Silva",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 46,
+          "customer_name": "Hannah Hoffmann",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "Standard",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 47,
+          "customer_name": "Hannah Silva",
+          "customer_tier": "VIP",
+          "region": "Southern EU",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "Standard",
+          "region": "DACH",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 48,
+          "customer_name": "Finn Schaefer",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "Standard",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 49,
+          "customer_name": "Felix Becker",
+          "customer_tier": "VIP",
+          "region": "Benelux",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "Standard",
+          "region": "Nordics",
+          "dbt_valid_from": "2025-01-01",
+          "dbt_valid_to": "2025-07-10",
+          "is_current": false
+        },
+        {
+          "customer_id": 50,
+          "customer_name": "Maximilian Silva",
+          "customer_tier": "VIP",
+          "region": "DACH",
+          "dbt_valid_from": "2025-07-10",
+          "dbt_valid_to": null,
+          "is_current": true
+        }
+      ],
+      "quarantine_rows": [
+        {
+          "dbt_audit_table": "dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb",
+          "failed_record_details": "{\"order_id\": 15001, \"customer_id\": 12, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": -350.0, \"realized_revenue\": -350.0, \"cost_total\": 50.0, \"gross_profit\": -400.0}"
+        },
+        {
+          "dbt_audit_table": "dbt_utils_expression_is_true_c_e155f58e19077fc8fb66a16b0c0179bb",
+          "failed_record_details": "{\"order_id\": 15002, \"customer_id\": 19, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": -95.0, \"realized_revenue\": -95.0, \"cost_total\": 20.0, \"gross_profit\": -115.0}"
+        },
+        {
+          "dbt_audit_table": "not_null_candidate_fct_orders_customer_id",
+          "failed_record_details": "{\"order_id\": 15003, \"customer_id\": null, \"order_date\": \"2025-07-15\", \"order_month\": \"2025-07\", \"status\": \"Completed\", \"is_completed\": true, \"order_total\": 210.0, \"realized_revenue\": 210.0, \"cost_total\": 70.0, \"gross_profit\": 140.0}"
+        },
+        {
+          "dbt_audit_table": "unique_candidate_fct_orders_order_id",
+          "failed_record_details": "{\"unique_field\": 1002, \"n_records\": 2}"
+        },
+        {
+          "dbt_audit_table": "unique_candidate_fct_orders_order_id",
+          "failed_record_details": "{\"unique_field\": 1001, \"n_records\": 2}"
+        }
+      ],
+      "snapshot_mode": "PREBUILT_REAL_DBT_SNAPSHOT",
+      "snapshot_day": 20
+    }
+  }
+}
