@@ -77,6 +77,90 @@ def _lightdash_dim_type(col_name: str, data_type: str) -> str:
     return "string"
 
 
+def _infer_measure_agg_from_expr(inner: exp.Expression, col_name: str) -> str:
+    """Infer a sensible Lightdash aggregation type for an AST measure expression."""
+    if isinstance(inner, exp.Count):
+        return "COUNT_DISTINCT" if isinstance(inner.this, exp.Distinct) else "COUNT"
+    if isinstance(inner, exp.Avg):
+        return "AVG"
+    if isinstance(inner, exp.Min):
+        return "MIN"
+    if isinstance(inner, exp.Max):
+        return "MAX"
+    low = col_name.lower()
+    if (
+        inner.find(exp.Div) is not None
+        or any(tok in low for tok in ("_pct", "_rate", "_ratio", "_avg", "average_", "_per_", "aov"))
+    ):
+        return "AVG"
+    return "SUM"
+
+
+def _extract_ast_tables_and_columns(
+    parsed_ast: exp.Expression | None,
+    grain: list[str],
+    col_types: dict[str, str],
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Extract (upstream_tables, ast_dim_cols, ast_agg_map) from a SQLGlot AST."""
+    if parsed_ast is None:
+        return [], [], {}
+
+    cte_names = {cte.alias.lower() for cte in parsed_ast.find_all(exp.CTE) if cte.alias}
+    upstream_tables = list(
+        dict.fromkeys(
+            tbl.name
+            for tbl in parsed_ast.find_all(exp.Table)
+            if tbl.name and tbl.name.lower() not in cte_names
+        )
+    )
+
+    select_node = parsed_ast if isinstance(parsed_ast, exp.Select) else parsed_ast.find(exp.Select)
+    if select_node is None:
+        return upstream_tables, [], {}
+
+    grain_set = set(grain)
+    ast_dims: list[str] = []
+    ast_aggs: dict[str, str] = {}
+
+    for expr in select_node.expressions:
+        if isinstance(expr, exp.Star):
+            continue
+        if isinstance(expr, exp.Alias):
+            out_name = (expr.alias or "").strip()
+            inner = expr.this
+        elif isinstance(expr, exp.Column):
+            out_name = (expr.name or "").strip()
+            inner = expr
+        else:
+            out_name = (expr.alias_or_name or "").strip()
+            inner = expr
+
+        if not out_name:
+            continue
+
+        if out_name in grain_set:
+            if out_name not in ast_dims:
+                ast_dims.append(out_name)
+            continue
+
+        is_computed_measure = (
+            isinstance(inner, (exp.AggFunc, exp.Window, exp.Div, exp.Mul, exp.Add, exp.Sub))
+            or inner.find(exp.AggFunc) is not None
+            or inner.find(exp.Window) is not None
+            or inner.find(exp.Div) is not None
+        )
+        if is_computed_measure:
+            ast_aggs[out_name] = _infer_measure_agg_from_expr(inner, out_name)
+        else:
+            dtype = (col_types.get(out_name) or "").lower()
+            if any(tok in dtype for tok in ("int", "double", "float", "numeric", "decimal")):
+                ast_aggs[out_name] = _infer_measure_agg_from_expr(inner, out_name)
+            elif out_name not in ast_dims:
+                ast_dims.append(out_name)
+
+    return upstream_tables, ast_dims, ast_aggs
+
+
 def build_dbt_and_lightdash_bundle(
     *,
     query_spec: QuerySpec,
@@ -86,22 +170,18 @@ def build_dbt_and_lightdash_bundle(
     column_types: dict[str, str] | None = None,
     freshness_sla: str = "24h",
     schema_name: str = "gold",
+    tenant_policy: str = "server_session_tenant_id",
 ) -> DbtAndLightdashBundle:
     """Synthesize minimal dbt SQL, enforced schema.yml, separate Lightdash YAML, and BI Asset Manifest."""
     safe_model = _sanitize_model_name(model_name)
     col_types = {k: v for k, v in (column_types or {}).items()}
-    upstream_relations = list(
-        dict.fromkeys(
-            [s.relation for s in query_spec.data_sources if s.relation]
-            + [j.right_relation for j in query_spec.joins if j.right_relation]
-        )
-    )
 
-    # 1. Strip outer LIMIT and ORDER BY via SQLGlot AST (preserving Window OVER (ORDER BY ...))
-    #    so materialized Gold Mart is complete, then replace FROM/JOIN upstream tables with {{ ref(...) }}
+    # 1. Parse SQL via SQLGlot AST, strip outer LIMIT and ORDER BY (preserving Window OVER (ORDER BY ...)),
+    #    and extract upstream tables + output columns even when query_spec uses raw_sql_override.
     raw_sql = query_spec.compile_sql()
     cleaned_raw = raw_sql.strip().rstrip(";")
     sql_dialect = "postgres" if query_spec.dialect == "postgres" else "duckdb"
+    parsed_ast: exp.Expression | None = None
     try:
         parsed_ast = sqlglot.parse_one(cleaned_raw, read=sql_dialect)
         if isinstance(parsed_ast, (exp.Select, exp.Union)):
@@ -110,6 +190,17 @@ def build_dbt_and_lightdash_bundle(
         unbounded_sql = parsed_ast.sql(dialect=sql_dialect)
     except Exception:
         unbounded_sql = re.sub(r"\s+LIMIT\s+\d+\s*$", "", cleaned_raw, flags=re.IGNORECASE)
+
+    ast_tables, ast_dims, ast_aggs = _extract_ast_tables_and_columns(parsed_ast, grain, col_types)
+
+    upstream_relations = list(
+        dict.fromkeys(
+            [s.relation for s in query_spec.data_sources if s.relation]
+            + [j.right_relation for j in query_spec.joins if j.right_relation]
+            + ast_tables
+        )
+    )
+
     dbt_body = unbounded_sql
     for rel in upstream_relations:
         # Only replace table references in FROM/JOIN clauses so qualified column prefixes like
@@ -127,12 +218,23 @@ def build_dbt_and_lightdash_bundle(
         f"{dbt_body}\n"
     )
 
-    # 2. Collect output columns (dimensions + measures)
-    dim_cols = list(dict.fromkeys(list(query_spec.projection) + list(grain)))
+    # 2. Collect output columns (dimensions + measures) from both structured QuerySpec and SQL AST
+    dim_cols = list(dict.fromkeys(list(query_spec.projection) + list(grain) + ast_dims))
     agg_map: dict[str, str] = {}
     for agg in query_spec.aggregations:
         alias = agg.alias or f"{agg.func.lower()}_{agg.field.split('.')[-1]}"
         agg_map[alias] = agg.func
+    for col, func in ast_aggs.items():
+        if col not in agg_map and col not in dim_cols:
+            agg_map[col] = func
+    # Include any extra columns present in preview column_types that weren't captured above
+    for col, dtype in col_types.items():
+        if col not in dim_cols and col not in agg_map:
+            low_t = (dtype or "").lower()
+            if any(tok in low_t for tok in ("int", "double", "float", "numeric", "decimal")):
+                agg_map[col] = "SUM"
+            else:
+                dim_cols.append(col)
     measure_cols = list(agg_map.keys())
     all_cols = list(dict.fromkeys(dim_cols + measure_cols))
 
@@ -258,6 +360,7 @@ def build_dbt_and_lightdash_bundle(
         lightdash_status="STAGING_LOCAL_ONLY",
         certification_status="PROPOSED_ASSET",
         owner=business_owner,
+        tenant_policy=tenant_policy,
     )
     return DbtAndLightdashBundle(
         contract=contract,

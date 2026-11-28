@@ -360,4 +360,76 @@ def test_prebuilt_timeline_snapshots_artifact_integrity() -> None:
     assert day20["latest_run"]["status"] == "PR_BLOCKED"
 
 
+def test_dbt_asset_builder_complex_sql_extracts_refs_all_columns_and_measures() -> None:
+    """TDD regression: complex SQL (raw_sql_override with OVER() & division) must still emit
+    {{ ref(...) }}, upstream_models, all 8 enforced schema.yml columns, Lightdash measures, and tenant_policy.
+    """
+    import yaml
+
+    complex_sql = (
+        'SELECT "customer_tier", '
+        'COUNT("customer_id") AS "total_customers", '
+        'SUM("total_revenue") AS "total_revenue", '
+        'ROUND(CAST(SUM("total_revenue") * 100.0 / NULLIF(SUM(SUM("total_revenue")) OVER (), 0) AS DECIMAL), 2) AS "revenue_share_pct", '
+        'SUM("order_count") AS "total_orders", '
+        'ROUND(CAST(SUM("order_count") AS DECIMAL) / NULLIF(COUNT("customer_id"), 0), 2) AS "orders_per_customer", '
+        'ROUND(CAST(SUM("total_revenue") AS DECIMAL) / NULLIF(SUM("order_count"), 0), 2) AS "average_basket_size", '
+        'SUM("total_gross_profit") AS "total_gross_profit" '
+        'FROM "mart_customer_value" '
+        'GROUP BY "customer_tier" '
+        'ORDER BY "total_revenue" DESC'
+    )
+    spec = QuerySpec(
+        spec_id="qs_complex_window_test",
+        question="Across our customer tiers, which segment drives the most revenue?",
+        dialect="postgres",
+        raw_sql_override=complex_sql,
+    )
+    col_types = {
+        "customer_tier": "varchar",
+        "total_customers": "integer",
+        "total_revenue": "double precision",
+        "revenue_share_pct": "double precision",
+        "total_orders": "integer",
+        "orders_per_customer": "double precision",
+        "average_basket_size": "double precision",
+        "total_gross_profit": "double precision",
+    }
+    bundle = build_dbt_and_lightdash_bundle(
+        query_spec=spec,
+        model_name="mart_customer_value_promoted",
+        grain=["customer_tier"],
+        column_types=col_types,
+        tenant_policy="single_company_public_demo",
+    )
+
+    assert "{{ ref('mart_customer_value') }}" in bundle.dbt_sql
+    assert "ORDER BY" not in bundle.dbt_sql.upper().split("FROM", 1)[-1]
+    assert bundle.bi_asset_manifest.upstream_models == ["mart_customer_value"]
+    assert bundle.bi_asset_manifest.tenant_policy == "single_company_public_demo"
+    assert bundle.bi_asset_manifest.dimensions == ["customer_tier"]
+
+    expected_measures = [
+        "total_customers",
+        "total_revenue",
+        "revenue_share_pct",
+        "total_orders",
+        "orders_per_customer",
+        "average_basket_size",
+        "total_gross_profit",
+    ]
+    assert bundle.bi_asset_manifest.measures == expected_measures
+
+    schema_doc = yaml.safe_load(bundle.schema_yaml)
+    schema_cols = [c["name"] for c in schema_doc["models"][0]["columns"]]
+    assert schema_cols == ["customer_tier", *expected_measures]
+
+    ld_doc = yaml.safe_load(bundle.lightdash_yaml)
+    ld_cols = {c["name"]: c["meta"] for c in ld_doc["models"][0]["columns"]}
+    assert set(ld_cols.keys()) == set(["customer_tier", *expected_measures])
+    for m in expected_measures:
+        assert "metrics" in ld_cols[m], f"Lightdash YAML missing metrics for measure '{m}'"
+
+
+
 

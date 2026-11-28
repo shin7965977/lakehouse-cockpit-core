@@ -1323,6 +1323,7 @@ def _render_tab3_build() -> None:
                 grain=grain_cols,
                 column_types=inferred_types,
                 business_owner="analytics-engineering@jaffle.shop",
+                tenant_policy="single_company_public_demo",
             )
 
             missing_grain = [g for g in grain_cols if g not in preview_df.columns]
