@@ -106,6 +106,39 @@ def _is_transient_gemini_error(exc: Exception) -> bool:
     return any(tok in msg for tok in ("503", "UNAVAILABLE", "HIGH DEMAND", "429", "RESOURCE_EXHAUSTED"))
 
 
+def _extract_gemini_usage(resp: Any) -> dict[str, int] | None:
+    um = getattr(resp, "usage_metadata", None)
+    if um is None:
+        return None
+    inp = getattr(um, "prompt_token_count", None)
+    out = getattr(um, "candidates_token_count", None)
+    tot = getattr(um, "total_token_count", None)
+    details: dict[str, int] = {}
+    if isinstance(inp, int):
+        details["input"] = inp
+    if isinstance(out, int):
+        details["output"] = out
+    if isinstance(tot, int):
+        details["total"] = tot
+    return details or None
+
+
+def _get_trace_generation():
+    try:
+        from .langfuse_tracer import trace_generation
+
+        return trace_generation
+    except (ImportError, ValueError):
+        try:
+            from services.langfuse_tracer import trace_generation
+
+            return trace_generation
+        except (ImportError, ValueError):
+            from cockpit_core.services.langfuse_tracer import trace_generation
+
+            return trace_generation
+
+
 def generate_gemini_text(
     api_key: str,
     prompt: str,
@@ -122,13 +155,15 @@ def generate_gemini_text(
     if not clean_key:
         raise ValueError("Gemini API Key is empty.")
 
-    def _invoke_once() -> str:
+    trace_generation = _get_trace_generation()
+
+    def _invoke_once() -> tuple[str, dict[str, int] | None]:
         try:
             from google import genai
 
             client = genai.Client(api_key=clean_key)
             resp = client.models.generate_content(model=model, contents=prompt)
-            return (resp.text or "").strip()
+            return (resp.text or "").strip(), _extract_gemini_usage(resp)
         except ImportError:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
             payload = json.dumps(
@@ -151,19 +186,22 @@ def generate_gemini_text(
             if not candidates:
                 raise RuntimeError(f"Gemini returned no candidates: {body}")
             parts = candidates[0].get("content", {}).get("parts") or []
-            return "".join(str(p.get("text", "")) for p in parts).strip()
+            return "".join(str(p.get("text", "")) for p in parts).strip(), None
 
     attempts = max(1, int(max_retries) + 1)
     last_exc: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return _invoke_once()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < attempts - 1 and _is_transient_gemini_error(exc):
-                time.sleep(retry_base_delay_s * (2 ** attempt))
-                continue
-            raise
+    with trace_generation(name="gemini_text", model=model, prompt_text=prompt) as gen:
+        for attempt in range(attempts):
+            try:
+                text_out, usage = _invoke_once()
+                gen.update(output=text_out, usage_details=usage)
+                return text_out
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts - 1 and _is_transient_gemini_error(exc):
+                    time.sleep(retry_base_delay_s * (2 ** attempt))
+                    continue
+                raise
     assert last_exc is not None
     raise last_exc
 
@@ -186,7 +224,10 @@ def generate_gemini_structured(
     if not clean_key:
         raise ValueError("Gemini API Key is empty.")
 
-    def _invoke_once() -> Any:
+    trace_generation = _get_trace_generation()
+    schema_name = getattr(response_model, "__name__", "StructuredOutput")
+
+    def _invoke_once() -> tuple[Any, dict[str, int] | None]:
         try:
             from google import genai
             from google.genai import types
@@ -200,13 +241,14 @@ def generate_gemini_structured(
                     response_schema=response_model,
                 ),
             )
+            usage = _extract_gemini_usage(resp)
             parsed = getattr(resp, "parsed", None)
             if parsed is not None:
-                return response_model.model_validate(parsed)
+                return response_model.model_validate(parsed), usage
             raw_text = (resp.text or "").strip()
             if not raw_text:
                 raise RuntimeError("Gemini returned empty structured response.")
-            return response_model.model_validate_json(raw_text)
+            return response_model.model_validate_json(raw_text), usage
         except ImportError:
             schema_hint = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
             raw = generate_gemini_text(
@@ -216,18 +258,27 @@ def generate_gemini_structured(
                 max_retries=0,
             )
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
-            return response_model.model_validate_json(cleaned)
+            return response_model.model_validate_json(cleaned), None
 
     attempts = max(1, int(max_retries) + 1)
     last_exc: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return _invoke_once()
-        except Exception as exc:
-            last_exc = exc
-            if attempt < attempts - 1 and _is_transient_gemini_error(exc):
-                time.sleep(retry_base_delay_s * (2 ** attempt))
-                continue
-            raise
+    with trace_generation(
+        name=f"gemini_structured:{schema_name}",
+        model=model,
+        prompt_text=prompt,
+        metadata={"response_model": schema_name},
+    ) as gen:
+        for attempt in range(attempts):
+            try:
+                validated, usage = _invoke_once()
+                out_payload = validated.model_dump() if hasattr(validated, "model_dump") else str(validated)
+                gen.update(output=out_payload, usage_details=usage)
+                return validated
+            except Exception as exc:
+                last_exc = exc
+                if attempt < attempts - 1 and _is_transient_gemini_error(exc):
+                    time.sleep(retry_base_delay_s * (2 ** attempt))
+                    continue
+                raise
     assert last_exc is not None
     raise last_exc

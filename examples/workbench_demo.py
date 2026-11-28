@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
+import uuid
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -45,6 +46,13 @@ from services.consultant_service import (
 from services.dbt_asset_builder import build_dbt_and_lightdash_bundle
 from services.duckdb_executor import generate_gemini_structured, generate_gemini_text
 from services.intent_clarifier import ClarificationTurn
+from services.langfuse_tracer import (
+    get_langfuse_status,
+    record_trace_score,
+    sync_langfuse_env,
+    trace_span,
+    trace_turn,
+)
 from services.neon_demo_engine import (
     JAFFLE_ONE_TO_MANY_JOINS,
     build_jaffle_catalog,
@@ -234,6 +242,7 @@ def _init_session_state() -> None:
         "timeline_view_day": "10",
         "timeline_view_mode": "SNAPSHOT",
         "timeline_live_state": None,
+        "trace_session_id": f"wb_{uuid.uuid4().hex[:10]}",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -351,6 +360,12 @@ def _get_lightdash_status() -> dict[str, Any]:
     )
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_langfuse_status(pub_key_present: bool, base_url: str) -> dict[str, Any]:
+    _ = (pub_key_present, base_url)
+    return get_langfuse_status()
+
+
 def _infer_sql_column_types(df: pd.DataFrame) -> dict[str, str]:
     """Infer PostgreSQL / dbt contract column types from a pandas DataFrame (including psycopg2 Decimal objects)."""
     from datetime import date, datetime
@@ -421,6 +436,16 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
         st.caption(
             f"Session LLM quota: **{st.session_state['llm_calls']} / {MAX_LLM_CALLS_PER_SESSION}** · Model: `{DEFAULT_GEMINI_MODEL}`"
         )
+        lf_st = _cached_langfuse_status(
+            bool(_resolve_secret("LANGFUSE_PUBLIC_KEY")),
+            _resolve_secret("LANGFUSE_BASE_URL") or _resolve_secret("LANGFUSE_HOST"),
+        )
+        if lf_st["status"] == "CONNECTED":
+            st.caption(f"🟢 **Langfuse Tracing**: Connected ([Open Cloud ↗]({lf_st['base_url']}))")
+        elif lf_st["status"] == "DEGRADED":
+            st.caption(f"🟡 **Langfuse Tracing**: Degraded ({lf_st['message']})")
+        else:
+            st.caption("⚪ **Langfuse Tracing**: Not Configured")
 
         st.divider()
         latest = state.get("latest_run") or {}
@@ -823,80 +848,113 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                     ]
                     st.session_state["chat_messages"].append({"role": "user", "content": q_text})
                     allowed_rels = {r.name for r in catalog.relations}
+                    sess_id = st.session_state["trace_session_id"]
 
-                    with st.spinner("Step 1/2: Proposing read-only evidence queries & querying Neon..."):
-                        proposal = propose_consultant_turn(
-                            message=q_text,
-                            catalog=catalog,
-                            history=prior_history,
-                            dialect="postgres",
-                            structured_llm_fn=structured_fn,
-                        )
-
-                    evidence_cards: list[dict[str, Any]] = []
-                    outcomes: list[ConsultantQueryOutcome] = []
-
-                    if proposal.needs_data and proposal.proposed_queries:
-                        for pq in proposal.proposed_queries[:2]:
-                            raw_sql = pq.compiled_sql or (pq.query_spec.compile_sql() if pq.query_spec else "")
-                            val_ev = validate_and_reconcile_sql(
-                                raw_sql,
-                                pq.query_spec or QuerySpec(spec_id="qs_ev", dialect="postgres"),
-                                allowed_relations=allowed_rels,
-                                server_tenant_id=None,
-                                one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                    with trace_turn(
+                        name="workbench_consult_turn",
+                        session_id=sess_id,
+                        input_data={"question": q_text},
+                        metadata={"model": DEFAULT_GEMINI_MODEL, "tab": "tab2_explore"},
+                        tags=["tab2_consult", DEFAULT_GEMINI_MODEL],
+                    ) as root_obs:
+                        with st.spinner("Step 1/2: Proposing read-only evidence queries & querying Neon..."):
+                            proposal = propose_consultant_turn(
+                                message=q_text,
+                                catalog=catalog,
+                                history=prior_history,
+                                dialect="postgres",
+                                structured_llm_fn=structured_fn,
                             )
-                            if val_ev.status == "BLOCKED":
-                                outcome = ConsultantQueryOutcome(
-                                    title=pq.title,
-                                    sql=raw_sql,
-                                    spec_hash=pq.spec_hash,
-                                    status="FAILED",
-                                    error=f"AST Gate Blocked: {'; '.join(val_ev.messages)}",
-                                )
-                            else:
-                                try:
-                                    exec_sql = val_ev.executable_sql or raw_sql
-                                    df_ev = execute_neon_readonly(exec_sql, max_rows=20, db_url=db_url)
-                                    rows_dict = json.loads(df_ev.to_json(orient="records", date_format="iso"))
-                                    outcome = ConsultantQueryOutcome(
-                                        title=pq.title,
-                                        sql=exec_sql,
-                                        spec_hash=pq.spec_hash,
-                                        status="SUCCEEDED",
-                                        row_count=len(df_ev),
-                                        columns=list(df_ev.columns),
-                                        rows=rows_dict,
+
+                        evidence_cards: list[dict[str, Any]] = []
+                        outcomes: list[ConsultantQueryOutcome] = []
+
+                        if proposal.needs_data and proposal.proposed_queries:
+                            for pq in proposal.proposed_queries[:2]:
+                                raw_sql = pq.compiled_sql or (pq.query_spec.compile_sql() if pq.query_spec else "")
+                                with trace_span(
+                                    name="ast_gate_evidence",
+                                    as_type="guardrail",
+                                    input_data={"sql": raw_sql},
+                                ) as g_span:
+                                    val_ev = validate_and_reconcile_sql(
+                                        raw_sql,
+                                        pq.query_spec or QuerySpec(spec_id="qs_ev", dialect="postgres"),
+                                        allowed_relations=allowed_rels,
+                                        server_tenant_id=None,
+                                        one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
                                     )
-                                    st.session_state["evidence_history"].append(
-                                        EvidenceQuerySummary(
-                                            title=pq.title,
-                                            sql=exec_sql,
-                                            row_count=len(df_ev),
-                                            columns=list(df_ev.columns),
-                                        )
-                                    )
-                                except Exception as q_exc:
+                                    g_span.update(output={"status": val_ev.status, "reason_codes": val_ev.reason_codes})
+                                if val_ev.status == "BLOCKED":
                                     outcome = ConsultantQueryOutcome(
                                         title=pq.title,
                                         sql=raw_sql,
                                         spec_hash=pq.spec_hash,
                                         status="FAILED",
-                                        error=str(q_exc),
+                                        error=f"AST Gate Blocked: {'; '.join(val_ev.messages)}",
                                     )
-                            outcomes.append(outcome)
-                            evidence_cards.append(outcome.model_dump())
+                                else:
+                                    try:
+                                        exec_sql = val_ev.executable_sql or raw_sql
+                                        with trace_span(
+                                            name="neon_readonly_evidence",
+                                            as_type="tool",
+                                            input_data={"sql": exec_sql},
+                                        ) as db_span:
+                                            df_ev = execute_neon_readonly(exec_sql, max_rows=20, db_url=db_url)
+                                            db_span.update(output={"row_count": len(df_ev), "columns": list(df_ev.columns)})
+                                        rows_dict = json.loads(df_ev.to_json(orient="records", date_format="iso"))
+                                        outcome = ConsultantQueryOutcome(
+                                            title=pq.title,
+                                            sql=exec_sql,
+                                            spec_hash=pq.spec_hash,
+                                            status="SUCCEEDED",
+                                            row_count=len(df_ev),
+                                            columns=list(df_ev.columns),
+                                            rows=rows_dict,
+                                        )
+                                        st.session_state["evidence_history"].append(
+                                            EvidenceQuerySummary(
+                                                title=pq.title,
+                                                sql=exec_sql,
+                                                row_count=len(df_ev),
+                                                columns=list(df_ev.columns),
+                                            )
+                                        )
+                                    except Exception as q_exc:
+                                        outcome = ConsultantQueryOutcome(
+                                            title=pq.title,
+                                            sql=raw_sql,
+                                            spec_hash=pq.spec_hash,
+                                            status="FAILED",
+                                            error=str(q_exc),
+                                        )
+                                outcomes.append(outcome)
+                                evidence_cards.append(outcome.model_dump())
 
-                        with st.spinner("Step 2/2: Synthesizing data-backed hypotheses from Neon evidence..."):
-                            ans = answer_consultant_turn(
-                                message=q_text,
-                                query_outcomes=outcomes,
-                                history=prior_history,
-                                structured_llm_fn=structured_fn,
-                            )
-                            reply_text = ans.reply
-                    else:
-                        reply_text = proposal.direct_reply or "Please specify which metric or dimension you want to explore."
+                            with st.spinner("Step 2/2: Synthesizing data-backed hypotheses from Neon evidence..."):
+                                ans = answer_consultant_turn(
+                                    message=q_text,
+                                    query_outcomes=outcomes,
+                                    history=prior_history,
+                                    structured_llm_fn=structured_fn,
+                                )
+                                reply_text = ans.reply
+                        else:
+                            reply_text = proposal.direct_reply or "Please specify which metric or dimension you want to explore."
+
+                        root_obs.update(
+                            output={
+                                "evidence_query_count": len(outcomes),
+                                "succeeded_queries": sum(1 for o in outcomes if o.status == "SUCCEEDED"),
+                            }
+                        )
+                        record_trace_score(
+                            name="consult_evidence_query_count",
+                            value=len(outcomes),
+                            data_type="NUMERIC",
+                            comment=f"proposed_queries={len(proposal.proposed_queries)}",
+                        )
 
                     st.session_state["chat_messages"].append(
                         {"role": "assistant", "content": reply_text, "evidence": evidence_cards}
@@ -943,49 +1001,72 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                         ClarificationTurn(role=m["role"], content=m["content"])
                         for m in st.session_state["chat_messages"]
                     ]
-                    with st.spinner("Synthesizing Candidate Governed Query & running AST check..."):
-                        cand = draft_candidate_query(
-                            history=history,
-                            catalog=catalog,
-                            evidence_queries=st.session_state.get("evidence_history") or None,
-                            previous_candidate=prev_draft,
-                            refinement_feedback=refinement,
-                            dialect="postgres",
-                            tenant_id=None,
-                            structured_llm_fn=structured_fn,
-                        )
-                    st.session_state["candidate_bundle"] = cand
-                    st.session_state["sent_to_gate"] = False
-                    st.session_state["last_repair"] = None
-                    st.session_state["last_exec_error"] = ""
-                    if cand.sql:
-                        st.session_state["editor_sql"] = cand.sql
+                    with trace_turn(
+                        name="workbench_draft_candidate",
+                        session_id=st.session_state["trace_session_id"],
+                        input_data={"refinement": refinement, "version": (prev_draft.version + 1) if prev_draft else 1},
+                        metadata={"model": DEFAULT_GEMINI_MODEL, "tab": "tab2_draft"},
+                        tags=["tab2_draft", DEFAULT_GEMINI_MODEL],
+                    ) as draft_obs:
+                        with st.spinner("Synthesizing Candidate Governed Query & running AST check..."):
+                            cand = draft_candidate_query(
+                                history=history,
+                                catalog=catalog,
+                                evidence_queries=st.session_state.get("evidence_history") or None,
+                                previous_candidate=prev_draft,
+                                refinement_feedback=refinement,
+                                dialect="postgres",
+                                tenant_id=None,
+                                structured_llm_fn=structured_fn,
+                            )
+                        st.session_state["candidate_bundle"] = cand
+                        st.session_state["sent_to_gate"] = False
+                        st.session_state["last_repair"] = None
+                        st.session_state["last_exec_error"] = ""
+                        if cand.sql:
+                            st.session_state["editor_sql"] = cand.sql
 
-                    # Preserve original business question for downstream dbt description (avoid overwriting with refinement text)
-                    original_q = next(
-                        (m["content"] for m in st.session_state["chat_messages"] if m["role"] == "user"),
-                        cand.title or "Governed analytical model",
-                    )
-                    base_spec = (cand.query_spec or QuerySpec(spec_id=f"qs_demo_v{cand.version}", dialect="postgres")).model_copy(
-                        update={"question": original_q}
-                    )
-                    if cand.sql:
-                        val = validate_and_reconcile_sql(
-                            cand.sql,
-                            base_spec,
-                            allowed_relations={r.name for r in catalog.relations},
-                            server_tenant_id=None,
-                            one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                        # Preserve original business question for downstream dbt description (avoid overwriting with refinement text)
+                        original_q = next(
+                            (m["content"] for m in st.session_state["chat_messages"] if m["role"] == "user"),
+                            cand.title or "Governed analytical model",
                         )
-                        st.session_state["last_validation"] = val
-                        st.session_state["active_spec"] = (val.reconciled_spec or base_spec).model_copy(
+                        base_spec = (cand.query_spec or QuerySpec(spec_id=f"qs_demo_v{cand.version}", dialect="postgres")).model_copy(
                             update={"question": original_q}
                         )
-                    else:
-                        st.session_state["last_validation"] = cand.validation
-                        st.session_state["active_spec"] = base_spec
-                    st.session_state["last_gap"] = cand.gap
-                    _record_gap_event(original_q, cand.gap)
+                        if cand.sql:
+                            val = validate_and_reconcile_sql(
+                                cand.sql,
+                                base_spec,
+                                allowed_relations={r.name for r in catalog.relations},
+                                server_tenant_id=None,
+                                one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                            )
+                            st.session_state["last_validation"] = val
+                            st.session_state["active_spec"] = (val.reconciled_spec or base_spec).model_copy(
+                                update={"question": original_q}
+                            )
+                        else:
+                            val = cand.validation
+                            st.session_state["last_validation"] = val
+                            st.session_state["active_spec"] = base_spec
+                        st.session_state["last_gap"] = cand.gap
+                        _record_gap_event(original_q, cand.gap)
+                        draft_obs.update(
+                            output={
+                                "sql": cand.sql,
+                                "group_by": cand.group_by,
+                                "gap": cand.gap.classification.value if cand.gap else None,
+                                "ast_status": val.status if val else None,
+                            }
+                        )
+                        if val is not None:
+                            record_trace_score(
+                                name="ast_gate_status",
+                                value=val.status,
+                                data_type="CATEGORICAL",
+                                comment=",".join(val.reason_codes),
+                            )
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Fail-Loud Halt: {exc}")
@@ -1137,18 +1218,32 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                     schema_hint = "; ".join(
                         f"{r.name}({', '.join(c.name for c in r.columns)})" for r in catalog.relations
                     )
-                    with st.spinner("Running bounded SQL Auto-Repair (max 2 attempts) + Neon EXPLAIN..."):
-                        rep = repair_sql_bounded(
-                            sql_text,
-                            err_ctx,
-                            base_spec=base_spec,
-                            allowed_relations={r.name for r in catalog.relations},
-                            adapter=_NeonReadOnlyAdapter(db_url),
-                            server_tenant_id=None,
-                            one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
-                            schema_hint=schema_hint,
-                            llm_callable=llm_text_fn,
-                            max_attempts=2,
+                    with trace_turn(
+                        name="workbench_auto_repair",
+                        session_id=st.session_state["trace_session_id"],
+                        input_data={"broken_sql": sql_text, "error": err_ctx},
+                        metadata={"model": DEFAULT_GEMINI_MODEL, "tab": "tab2_repair"},
+                        tags=["tab2_auto_repair", DEFAULT_GEMINI_MODEL],
+                    ) as rep_obs:
+                        with st.spinner("Running bounded SQL Auto-Repair (max 2 attempts) + Neon EXPLAIN..."):
+                            rep = repair_sql_bounded(
+                                sql_text,
+                                err_ctx,
+                                base_spec=base_spec,
+                                allowed_relations={r.name for r in catalog.relations},
+                                adapter=_NeonReadOnlyAdapter(db_url),
+                                server_tenant_id=None,
+                                one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
+                                schema_hint=schema_hint,
+                                llm_callable=llm_text_fn,
+                                max_attempts=2,
+                            )
+                        rep_obs.update(output={"repaired": rep.repaired, "attempts": rep.attempts, "error_class": rep.error_class})
+                        record_trace_score(
+                            name="auto_repair_attempts",
+                            value=rep.attempts,
+                            data_type="NUMERIC",
+                            comment=f"repaired={rep.repaired}",
                         )
                     st.session_state["last_repair"] = rep
                     if rep.repaired and rep.repaired_sql:
@@ -1188,17 +1283,38 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 elif spec is None or not spec.is_confirmation_valid():
                     st.warning("Human-in-the-Loop Gate: Click **Confirm spec_hash** before executing.")
                 else:
-                    try:
-                        with st.spinner("Executing READ ONLY query against Neon PostgreSQL..."):
-                            df = execute_neon_readonly(val.executable_sql or sql_text, max_rows=50, db_url=db_url)
-                        if df.empty:
-                            st.warning("Query returned 0 rows (Fail-Loud: no dummy rows substituted).")
-                        else:
-                            st.session_state["last_preview_df"] = df
-                            st.session_state["last_exec_error"] = ""
-                    except Exception as exc:
-                        st.session_state["last_exec_error"] = str(exc)
-                        st.error(f"Neon Read-Only Execution Failed (try **🔧 Auto-Repair**): {exc}")
+                    with trace_turn(
+                        name="workbench_execute_neon_readonly",
+                        session_id=st.session_state["trace_session_id"],
+                        input_data={"sql": val.executable_sql or sql_text},
+                        metadata={"model": DEFAULT_GEMINI_MODEL, "tab": "tab2_execute"},
+                        tags=["tab2_execute", "neon_readonly"],
+                    ) as exec_obs:
+                        try:
+                            with st.spinner("Executing READ ONLY query against Neon PostgreSQL..."):
+                                df = execute_neon_readonly(val.executable_sql or sql_text, max_rows=50, db_url=db_url)
+                            exec_obs.update(output={"row_count": len(df), "columns": list(df.columns)})
+                            record_trace_score(
+                                name="sql_first_pass_ok",
+                                value=1 if not df.empty else 0,
+                                data_type="NUMERIC",
+                                comment=f"rows={len(df)}",
+                            )
+                            if df.empty:
+                                st.warning("Query returned 0 rows (Fail-Loud: no dummy rows substituted).")
+                            else:
+                                st.session_state["last_preview_df"] = df
+                                st.session_state["last_exec_error"] = ""
+                        except Exception as exc:
+                            exec_obs.update(level="ERROR", status_message=str(exc))
+                            record_trace_score(
+                                name="sql_first_pass_ok",
+                                value=0,
+                                data_type="NUMERIC",
+                                comment=str(exc)[:200],
+                            )
+                            st.session_state["last_exec_error"] = str(exc)
+                            st.error(f"Neon Read-Only Execution Failed (try **🔧 Auto-Repair**): {exc}")
 
             # Validation & Repair Status + SQL Diff
             val = st.session_state.get("last_validation")
@@ -1666,6 +1782,7 @@ def main() -> None:
     )
     st.markdown(ERP_THEME_CSS, unsafe_allow_html=True)
     _init_session_state()
+    sync_langfuse_env(_resolve_secret)
 
     db_url = _resolve_secret("DATABASE_URL") or _resolve_secret("NEON_DATABASE_URL")
     if not db_url:

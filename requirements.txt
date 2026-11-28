@@ -9,3 +9,4 @@ sqlglot>=25.0.0
 pydantic>=2.6.0
 pyyaml>=6.0.1
 dbt-postgres>=1.8.0
+langfuse>=5.0.0
