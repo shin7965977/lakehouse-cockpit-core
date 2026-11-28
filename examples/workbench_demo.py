@@ -629,7 +629,9 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 server_tenant_id=None,
                 one_to_many_joins=JAFFLE_ONE_TO_MANY_JOINS,
             )
-            st.session_state["last_gap"] = classify_sql_semantic_gap(fanout_sql, catalog, is_authorized=True)
+            st.session_state["last_gap"] = classify_sql_semantic_gap(
+                fanout_sql, catalog, question=spec.question, dialect="postgres"
+            )
             st.rerun()
 
         for msg in st.session_state["chat_messages"]:
@@ -982,7 +984,9 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
                 )
                 st.session_state["last_validation"] = val
                 st.session_state["active_spec"] = val.reconciled_spec or base_spec
-                st.session_state["last_gap"] = classify_sql_semantic_gap(sql_text, catalog, is_authorized=True)
+                st.session_state["last_gap"] = classify_sql_semantic_gap(
+                    sql_text, catalog, question=base_spec.question, dialect="postgres"
+                )
                 st.session_state["last_exec_error"] = ""
                 st.rerun()
 

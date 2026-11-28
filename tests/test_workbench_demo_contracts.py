@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import importlib.util
+import inspect
 from pathlib import Path
 import typing
 
@@ -22,6 +23,16 @@ from services.consultant_service import (
 )
 from services.dbt_asset_builder import build_dbt_and_lightdash_bundle
 from services.dbt_catalog import DbtMetadataCatalog
+from services.neon_demo_engine import (
+    build_jaffle_catalog,
+    execute_neon_readonly,
+    fetch_demo_state,
+    reset_demo,
+    run_day5_normal_refresh,
+    run_day10_scd_type2,
+    run_day15_dirty_data_wap,
+    run_day20_semantic_drift_ci,
+)
 from services.query_spec import QuerySpec
 from services.release_orchestrator import orchestrate_draft_pr
 from services.semantic_gap_detector import (
@@ -275,4 +286,49 @@ def test_workbench_demo_tab2_cards_have_hover_tooltips() -> None:
         assert idx != -1, f"Card heading '{heading}' not found in workbench_demo.py"
         window = src[max(0, idx - 320) : idx + 120]
         assert "title=" in window, f"Card heading '{heading}' is missing a hover tooltip (title=...)"
+
+
+def test_workbench_demo_service_call_signatures() -> None:
+    """AST-verify that every backend service call in workbench_demo.py binds cleanly to its real signature."""
+    fns = {
+        "answer_consultant_turn": answer_consultant_turn,
+        "draft_candidate_query": draft_candidate_query,
+        "propose_consultant_turn": propose_consultant_turn,
+        "build_dbt_and_lightdash_bundle": build_dbt_and_lightdash_bundle,
+        "build_jaffle_catalog": build_jaffle_catalog,
+        "execute_neon_readonly": execute_neon_readonly,
+        "fetch_demo_state": fetch_demo_state,
+        "reset_demo": reset_demo,
+        "run_day5_normal_refresh": run_day5_normal_refresh,
+        "run_day10_scd_type2": run_day10_scd_type2,
+        "run_day15_dirty_data_wap": run_day15_dirty_data_wap,
+        "run_day20_semantic_drift_ci": run_day20_semantic_drift_ci,
+        "orchestrate_draft_pr": orchestrate_draft_pr,
+        "classify_sql_semantic_gap": classify_sql_semantic_gap,
+        "propose_source_ingestion": propose_source_ingestion,
+        "repair_sql_bounded": repair_sql_bounded,
+        "validate_and_reconcile_sql": validate_and_reconcile_sql,
+    }
+    tree = ast.parse(WORKBENCH_PATH.read_text(encoding="utf-8"))
+    mismatches: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fname = node.func.id if isinstance(node.func, ast.Name) else None
+        if fname not in fns:
+            continue
+        if any(isinstance(a, ast.Starred) for a in node.args) or any(k.arg is None for k in node.keywords):
+            continue
+        sig = inspect.signature(fns[fname])
+        pos_args = [object() for _ in node.args]
+        kw_args = {kw.arg: object() for kw in node.keywords if kw.arg is not None}
+        try:
+            sig.bind(*pos_args, **kw_args)
+        except TypeError as exc:
+            mismatches.append(f"L{node.lineno}: {fname}(...) -> {exc}")
+
+    assert not mismatches, "Service call signature mismatches in examples/workbench_demo.py:\n  - " + "\n  - ".join(
+        sorted(mismatches)
+    )
+
 
