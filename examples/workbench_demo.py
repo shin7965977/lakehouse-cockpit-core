@@ -65,7 +65,7 @@ from services.sql_validator import validate_and_reconcile_sql
 from services.warehouse_adapters import ExecutionResult, WarehouseAdapter, WarehouseAdapterError
 
 MAX_LLM_CALLS_PER_SESSION = 20
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
 DBT_DOCS_STATIC_PATH = ROOT / "examples" / "demo_artifacts" / "dbt_docs_static.html"
 TIMELINE_SNAPSHOTS_PATH = ROOT / "examples" / "demo_artifacts" / "timeline_snapshots.json"
@@ -373,7 +373,7 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
 
         server_key = _resolve_secret("GEMINI_API_KEY")
         if server_key:
-            st.success("🔐 Gemini AI: Connected (Server Secret)")
+            st.success(f"🔐 Gemini AI (`{DEFAULT_GEMINI_MODEL}`): Connected")
             api_key = server_key
         else:
             api_key = st.text_input(
@@ -1088,7 +1088,7 @@ def _render_tab2_explore(db_url: str, api_key: str, catalog) -> None:
             if g2.button(
                 "🔧 Auto-Repair (Bounded)",
                 use_container_width=True,
-                help="有界自動修復（最多 2 次嘗試）：當 SQL 驗證或執行報錯時，呼叫 Gemini 修復並自動重過 AST 安全閘門與 Neon EXPLAIN，顯示修復前後 SQL Diff。",
+                help=f"有界自動修復（最多 2 次嘗試）：當 SQL 驗證或執行報錯時，呼叫 {DEFAULT_GEMINI_MODEL} 修復並自動重過 AST 安全閘門與 Neon EXPLAIN，顯示修復前後 SQL Diff。",
             ):
                 err_ctx = st.session_state.get("last_exec_error") or (
                     "; ".join(val.messages) if (val is not None and val.messages) else "Syntax or schema error in SQL"
