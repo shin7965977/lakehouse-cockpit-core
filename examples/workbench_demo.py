@@ -73,7 +73,14 @@ from services.sql_validator import validate_and_reconcile_sql
 from services.warehouse_adapters import ExecutionResult, WarehouseAdapter, WarehouseAdapterError
 
 MAX_LLM_CALLS_PER_SESSION = 20
-DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL_OPTIONS = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+)
 ELEMENTARY_REPORT_PATH = ROOT / "examples" / "demo_artifacts" / "elementary_report.html"
 DBT_DOCS_STATIC_PATH = ROOT / "examples" / "demo_artifacts" / "dbt_docs_static.html"
 TIMELINE_SNAPSHOTS_PATH = ROOT / "examples" / "demo_artifacts" / "timeline_snapshots.json"
@@ -243,6 +250,7 @@ def _init_session_state() -> None:
         "timeline_view_mode": "SNAPSHOT",
         "timeline_live_state": None,
         "trace_session_id": f"wb_{uuid.uuid4().hex[:10]}",
+        "selected_gemini_model": DEFAULT_GEMINI_MODEL,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -266,7 +274,7 @@ def _make_text_llm_callable(api_key: str):
         return generate_gemini_text(
             prompt=prompt,
             api_key=api_key,
-            model=DEFAULT_GEMINI_MODEL,
+            model=st.session_state.get("selected_gemini_model", DEFAULT_GEMINI_MODEL),
         )
 
     return _call_text
@@ -290,7 +298,7 @@ def _make_structured_llm_callable(api_key: str):
             prompt=prompt,
             response_model=schema_cls,
             api_key=api_key,
-            model=DEFAULT_GEMINI_MODEL,
+            model=st.session_state.get("selected_gemini_model", DEFAULT_GEMINI_MODEL),
         )
 
     return _call_structured
@@ -424,7 +432,7 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
 
         server_key = _resolve_secret("GEMINI_API_KEY")
         if server_key:
-            st.success(f"🔐 Gemini AI (`{DEFAULT_GEMINI_MODEL}`): Connected")
+            st.success("🔐 Gemini AI: Connected (Server Secret)")
             api_key = server_key
         else:
             api_key = st.text_input(
@@ -433,8 +441,18 @@ def _render_sidebar(db_url: str, state: dict[str, Any]) -> str:
                 type="password",
                 help="Optional for deterministic Labs (Tab 1, AST Gate, Tab 3-6). Required for live AI chat in Tab 2.",
             )
+        selected_model = st.selectbox(
+            "Primary LLM Model (auto-failover on 503/429)",
+            options=list(GEMINI_MODEL_OPTIONS),
+            index=list(GEMINI_MODEL_OPTIONS).index(
+                st.session_state.get("selected_gemini_model", DEFAULT_GEMINI_MODEL)
+            ),
+            help="優先使用所選模型；若遇 Google 503/429 尖峰限流，自動依序降級嘗試 3.8 → 3.7 → 3.6 → 3.5 → 3.5-flash-lite（全數紀錄於 Langfuse）。",
+        )
+        st.session_state["selected_gemini_model"] = selected_model
         st.caption(
-            f"Session LLM quota: **{st.session_state['llm_calls']} / {MAX_LLM_CALLS_PER_SESSION}** · Model: `{DEFAULT_GEMINI_MODEL}`"
+            f"Session LLM quota: **{st.session_state['llm_calls']} / {MAX_LLM_CALLS_PER_SESSION}** · "
+            f"Failover: `3.8 → 3.7 → 3.6 → 3.5 → lite`"
         )
         lf_st = _cached_langfuse_status(
             bool(_resolve_secret("LANGFUSE_PUBLIC_KEY")),

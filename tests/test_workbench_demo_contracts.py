@@ -504,6 +504,72 @@ def test_draft_candidate_query_prompt_includes_postgres_round_numeric_rule() -> 
     assert "NUMERIC" in captured_prompts[0]
 
 
+def test_gemini_503_cascades_down_fallback_chain(monkeypatch) -> None:
+    """TDD regression: 503/429 on gemini-3.8-flash must cascade 3.8 -> 3.7 -> 3.6 instead of retrying the same overloaded model."""
+    from services import duckdb_executor
+
+    attempted: list[str] = []
+
+    class _FakeResp:
+        text = "OK_FROM_3_6"
+        usage_metadata = None
+
+    class _FakeModels:
+        def generate_content(self, *, model: str, contents: str, **kwargs):
+            attempted.append(model)
+            if model == "gemini-3.8-flash":
+                raise RuntimeError("503 UNAVAILABLE: This model is currently experiencing high demand.")
+            if model == "gemini-3.7-flash":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED: quota spike")
+            return _FakeResp()
+
+    class _FakeClient:
+        def __init__(self, api_key: str):
+            self.models = _FakeModels()
+
+    import google.genai as genai_mod
+
+    monkeypatch.setattr(genai_mod, "Client", _FakeClient)
+    out = duckdb_executor.generate_gemini_text(
+        api_key="test-key",
+        prompt="hello",
+        model="gemini-3.8-flash",
+        retry_base_delay_s=0.0,
+    )
+    assert out == "OK_FROM_3_6"
+    assert attempted == ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"]
+
+
+def test_gemini_non_transient_error_fails_loud_immediately(monkeypatch) -> None:
+    """TDD regression: non-503/429 errors (e.g., invalid API key) must Fail-Loud on the first model without cascading."""
+    import pytest
+    from services import duckdb_executor
+
+    attempted: list[str] = []
+
+    class _FakeModels:
+        def generate_content(self, *, model: str, contents: str, **kwargs):
+            attempted.append(model)
+            raise RuntimeError("401 UNAUTHENTICATED: API key not valid")
+
+    class _FakeClient:
+        def __init__(self, api_key: str):
+            self.models = _FakeModels()
+
+    import google.genai as genai_mod
+
+    monkeypatch.setattr(genai_mod, "Client", _FakeClient)
+    with pytest.raises(RuntimeError, match="401 UNAUTHENTICATED"):
+        duckdb_executor.generate_gemini_text(
+            api_key="bad-key",
+            prompt="hello",
+            model="gemini-3.8-flash",
+            retry_base_delay_s=0.0,
+        )
+    assert attempted == ["gemini-3.8-flash"]
+
+
+
 
 
 

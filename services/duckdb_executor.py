@@ -100,10 +100,28 @@ class DatabaseReflectionService:
         ]
 
 
+GEMINI_MODEL_FALLBACK_CHAIN: tuple[str, ...] = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+)
+
+
 def _is_transient_gemini_error(exc: Exception) -> bool:
-    """Return True only for temporary Gemini overload/rate-limit errors worth a short retry."""
+    """Return True only for temporary Gemini overload/rate-limit errors worth cascading failover."""
     msg = str(exc).upper()
     return any(tok in msg for tok in ("503", "UNAVAILABLE", "HIGH DEMAND", "429", "RESOURCE_EXHAUSTED"))
+
+
+def _build_model_attempt_list(primary_model: str) -> list[str]:
+    """Return ordered failover chain starting at primary_model and cascading down GEMINI_MODEL_FALLBACK_CHAIN."""
+    clean = (primary_model or "gemini-3.8-flash").strip()
+    if clean in GEMINI_MODEL_FALLBACK_CHAIN:
+        idx = GEMINI_MODEL_FALLBACK_CHAIN.index(clean)
+        return list(GEMINI_MODEL_FALLBACK_CHAIN[idx:])
+    return [clean, *[m for m in GEMINI_MODEL_FALLBACK_CHAIN if m != clean]]
 
 
 def _extract_gemini_usage(resp: Any) -> dict[str, int] | None:
@@ -157,15 +175,15 @@ def generate_gemini_text(
 
     trace_generation = _get_trace_generation()
 
-    def _invoke_once() -> tuple[str, dict[str, int] | None]:
+    def _invoke_once(active_model: str) -> tuple[str, dict[str, int] | None]:
         try:
             from google import genai
 
             client = genai.Client(api_key=clean_key)
-            resp = client.models.generate_content(model=model, contents=prompt)
+            resp = client.models.generate_content(model=active_model, contents=prompt)
             return (resp.text or "").strip(), _extract_gemini_usage(resp)
         except ImportError:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{active_model}:generateContent?key={clean_key}"
             payload = json.dumps(
                 {"contents": [{"parts": [{"text": prompt}]}]}
             ).encode("utf-8")
@@ -188,18 +206,31 @@ def generate_gemini_text(
             parts = candidates[0].get("content", {}).get("parts") or []
             return "".join(str(p.get("text", "")) for p in parts).strip(), None
 
-    attempts = max(1, int(max_retries) + 1)
+    model_candidates = _build_model_attempt_list(model)
+    attempted_models: list[str] = []
     last_exc: Exception | None = None
     with trace_generation(name="gemini_text", model=model, prompt_text=prompt) as gen:
-        for attempt in range(attempts):
+        for idx, active_model in enumerate(model_candidates):
+            attempted_models.append(active_model)
             try:
-                text_out, usage = _invoke_once()
-                gen.update(output=text_out, usage_details=usage)
+                text_out, usage = _invoke_once(active_model)
+                gen.update(
+                    model=active_model,
+                    output=text_out,
+                    usage_details=usage,
+                    metadata={
+                        "primary_model": model,
+                        "actual_model": active_model,
+                        "attempted_models": attempted_models,
+                        "failover_used": len(attempted_models) > 1,
+                    },
+                )
                 return text_out
             except Exception as exc:
                 last_exc = exc
-                if attempt < attempts - 1 and _is_transient_gemini_error(exc):
-                    time.sleep(retry_base_delay_s * (2 ** attempt))
+                if idx < len(model_candidates) - 1 and _is_transient_gemini_error(exc):
+                    if retry_base_delay_s > 0:
+                        time.sleep(min(0.4, retry_base_delay_s))
                     continue
                 raise
     assert last_exc is not None
@@ -227,14 +258,14 @@ def generate_gemini_structured(
     trace_generation = _get_trace_generation()
     schema_name = getattr(response_model, "__name__", "StructuredOutput")
 
-    def _invoke_once() -> tuple[Any, dict[str, int] | None]:
+    def _invoke_once(active_model: str) -> tuple[Any, dict[str, int] | None]:
         try:
             from google import genai
             from google.genai import types
 
             client = genai.Client(api_key=clean_key)
             resp = client.models.generate_content(
-                model=model,
+                model=active_model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -254,13 +285,14 @@ def generate_gemini_structured(
             raw = generate_gemini_text(
                 api_key=clean_key,
                 prompt=f"{prompt}\n\nReturn ONLY valid JSON matching this schema:\n{schema_hint}",
-                model=model,
+                model=active_model,
                 max_retries=0,
             )
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
             return response_model.model_validate_json(cleaned), None
 
-    attempts = max(1, int(max_retries) + 1)
+    model_candidates = _build_model_attempt_list(model)
+    attempted_models: list[str] = []
     last_exc: Exception | None = None
     with trace_generation(
         name=f"gemini_structured:{schema_name}",
@@ -268,16 +300,29 @@ def generate_gemini_structured(
         prompt_text=prompt,
         metadata={"response_model": schema_name},
     ) as gen:
-        for attempt in range(attempts):
+        for idx, active_model in enumerate(model_candidates):
+            attempted_models.append(active_model)
             try:
-                validated, usage = _invoke_once()
+                validated, usage = _invoke_once(active_model)
                 out_payload = validated.model_dump() if hasattr(validated, "model_dump") else str(validated)
-                gen.update(output=out_payload, usage_details=usage)
+                gen.update(
+                    model=active_model,
+                    output=out_payload,
+                    usage_details=usage,
+                    metadata={
+                        "response_model": schema_name,
+                        "primary_model": model,
+                        "actual_model": active_model,
+                        "attempted_models": attempted_models,
+                        "failover_used": len(attempted_models) > 1,
+                    },
+                )
                 return validated
             except Exception as exc:
                 last_exc = exc
-                if attempt < attempts - 1 and _is_transient_gemini_error(exc):
-                    time.sleep(retry_base_delay_s * (2 ** attempt))
+                if idx < len(model_candidates) - 1 and _is_transient_gemini_error(exc):
+                    if retry_base_delay_s > 0:
+                        time.sleep(min(0.4, retry_base_delay_s))
                     continue
                 raise
     assert last_exc is not None
