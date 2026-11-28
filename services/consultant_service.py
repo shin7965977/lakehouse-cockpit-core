@@ -638,6 +638,8 @@ def draft_candidate_query(
         "   - NO AVERAGE-OF-AVERAGES: NEVER apply `AVG(...)` to a pre-computed average/ratio/rate column (such as `average_order_value`). "
         "If aggregating to a coarser grain (e.g. `customer_tier`), compute a weighted ratio (`SUM(total_revenue) / NULLIF(SUM(order_count), 0)`). "
         "If querying a pre-aggregated mart at its native grain (e.g. `mart_customer_value` at `customer_id` grain), SELECT the columns directly without redundant `GROUP BY` (you may add window functions like `SUM(total_revenue) OVER ()` for revenue share).\n"
+        "   - POSTGRESQL ROUND() CASTING: In PostgreSQL, 2-argument `ROUND(x, n)` ONLY accepts `NUMERIC` (never `double precision`). "
+        "Whenever using `ROUND(..., 2)` on sums, averages, or divisions, ALWAYS wrap the first argument as `ROUND(CAST(expr AS NUMERIC), 2)`.\n"
         "4. ITERATIVE REFINEMENT: If PreviousCandidateDraft and RefinementFeedback are provided, modify PreviousCandidateDraft "
         "to incorporate the exact requested changes.\n"
         "5. EXPRESSIVENESS & STYLE: Support aggregated metrics (GROUP BY), raw detail listings (no GROUP BY, group_by=[]), "

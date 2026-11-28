@@ -476,6 +476,35 @@ def test_dbt_asset_builder_propagates_lightdash_status() -> None:
     assert bundle.bi_asset_manifest.lightdash_status == "DEPLOYED"
 
 
+def test_draft_candidate_query_prompt_includes_postgres_round_numeric_rule() -> None:
+    """TDD regression: draft_candidate_query prompt must instruct PostgreSQL ROUND(CAST(expr AS NUMERIC), 2)."""
+    from services.intent_clarifier import ClarificationTurn
+
+    captured_prompts: list[str] = []
+
+    def _capture_llm(prompt: str, schema_cls):
+        captured_prompts.append(prompt)
+        return schema_cls(
+            can_answer=True,
+            title="Test",
+            sql='SELECT "customer_tier", SUM("total_revenue") AS "total_revenue" FROM "mart_customer_value" GROUP BY "customer_tier"',
+            plain_language_explanation="Test",
+            assumptions=[],
+            group_by=["customer_tier"],
+        )
+
+    draft_candidate_query(
+        history=[ClarificationTurn(role="user", content="Compare revenue by customer tier")],
+        catalog=build_jaffle_catalog(),
+        dialect="postgres",
+        structured_llm_fn=_capture_llm,
+    )
+    assert captured_prompts
+    assert "ROUND(CAST(" in captured_prompts[0]
+    assert "NUMERIC" in captured_prompts[0]
+
+
+
 
 
 
